@@ -1,0 +1,14 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# graphify (generated knowledge-graph output, not source)
+graphify-out/
+
+# Claude Code local/personal settings (this one currently has a live API key
+# embedded in a permission-allow entry — must never be committed)
+.claude/settings.local.json

@@ -1,0 +1,92 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && request.auth.token.role == 'superadmin';
+    }
+
+    function isStoreAdmin(storeId) {
+      return isSignedIn()
+        && request.auth.token.role == 'admin'
+        && (storeId in request.auth.token.storeIds);
+    }
+
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // users/{uid}
+    match /users/{uid} {
+      allow read: if isSelf(uid) || isSuperAdmin();
+      allow write: if isSelf(uid) || isSuperAdmin();
+
+      // users/{uid}/saved/{postId}
+      match /saved/{postId} {
+        allow read, write: if isSelf(uid);
+      }
+    }
+
+    // stores/{storeId}
+    match /stores/{storeId} {
+      allow read: if isSignedIn();
+      allow create: if isSuperAdmin();
+      allow update, delete: if isSuperAdmin() || isStoreAdmin(storeId);
+    }
+
+    // posts/{postId}
+    match /posts/{postId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isStoreAdmin(resource == null ? request.resource.data.storeId : resource.data.storeId);
+
+      match /likes/{uid} {
+        allow read: if isSignedIn();
+        allow write: if isSelf(uid);
+      }
+
+      match /comments/{commentId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+        allow update, delete: if isSignedIn()
+          && (resource.data.uid == request.auth.uid
+            || isStoreAdmin(get(/databases/$(database)/documents/posts/$(postId)).data.storeId));
+      }
+    }
+
+    // stories/{storyId}
+    match /stories/{storyId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isStoreAdmin(resource == null ? request.resource.data.storeId : resource.data.storeId);
+    }
+
+    // chats/{chatId}
+    match /chats/{chatId} {
+      allow read, write: if isSignedIn()
+        && (resource == null
+          ? (request.resource.data.userId == request.auth.uid || isStoreAdmin(request.resource.data.storeId))
+          : (resource.data.userId == request.auth.uid || isStoreAdmin(resource.data.storeId)));
+
+      match /messages/{messageId} {
+        allow read, write: if isSignedIn()
+          && (get(/databases/$(database)/documents/chats/$(chatId)).data.userId == request.auth.uid
+            || isStoreAdmin(get(/databases/$(database)/documents/chats/$(chatId)).data.storeId));
+      }
+    }
+
+    // orders/{orderId} — created only via Cloud Functions (admin SDK bypasses rules)
+    match /orders/{orderId} {
+      allow read: if isSuperAdmin() || isStoreAdmin(resource.data.storeId);
+      allow write: if false;
+    }
+
+    // otp_codes/{phone} — Cloud Functions / admin SDK only
+    match /otp_codes/{phone} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,98 @@
+# SeMay — Project Overview & PRD
+
+## 1. What this is
+An Instagram-style mobile app (Android + iOS, **Flutter**) where independent **stores** post content
+(photos, carousels, reels, stories), and **users** browse, like, comment, save, and place orders via
+direct chat with the store. A **web Super Admin panel** manages stores, admins, and order analytics.
+
+Backend: **Firebase** (Auth via custom OTP flow, Firestore, Storage, Cloud Functions, FCM, Hosting for
+the Super Admin web panel).
+
+## 2. Roles
+
+| Role | Access | Created by |
+|---|---|---|
+| **User** | Mobile app only | Self sign-up (phone number) |
+| **Store Admin** | Mobile app (admin mode) | Promoted by Super Admin from an existing user account |
+| **Super Admin** | Web panel only | Seeded manually (no self sign-up) |
+
+A single **store** can have **multiple admins** (confirmed). An admin account is just a user account
+with an `admin` role claim scoped to one or more `storeId`s — the same phone/OTP login is used, and the
+app UI switches into "Store Admin mode" for that person.
+
+## 3. Role capabilities
+
+### Super Admin (web)
+- Create stores (name, tagline, avatar, cover, phone, address).
+- Promote/demote a user to Store Admin for a given store (grant/revoke admin privileges on existing
+  accounts — Super Admin never creates admin accounts from scratch, only elevates existing users).
+- View all **orders** (status: pending / approved / sold) across all stores — analytics dashboard.
+- No content moderation scope defined yet (posts publish directly, no approval step — see Open Items).
+
+### Store Admin (mobile, admin mode)
+- Create posts: single image, carousel (multi-image), or **reel** (video, no duration limit).
+- Create stories (photo/video, no duration limit on the video itself).
+- Edit/delete their store's own posts.
+- Chat with users; reply to messages.
+- Tap **"kabul edildi"** (order accepted) above the chat once an order is verbally/textually agreed —
+  this sends `{ itemQuantity, itemRef (post being discussed), userAddress, userPhone }` to Super Admin
+  as a new **Order** record for analytics.
+- Manage their own store profile / settings.
+
+### User (mobile)
+- Browse a **global discovery feed** (no follow system — Homepage shows posts from all stores,
+  Instagram-Explore-style, confirmed).
+- View a store's profile (Store Detail: grid of posts + reels tab, bio, phone, location, message/call).
+- Like, comment, save (favorite) posts.
+- View stories.
+- Chat with a store's admin(s) to negotiate/place an order.
+- Manage own profile, saved posts, liked posts, notifications.
+
+## 4. Post structure (1:1 with Instagram)
+- Media: single image, multi-image carousel, or video (reel).
+- Caption/description text.
+- Like count, comment count, save count.
+- Comments are threaded flat (no nested replies unless you want that — **assumption**, flag if wrong).
+- Stories: photo/video, story-ring UI on avatars, **assumed 24h expiry** like Instagram (not stated in
+  your spec — this is a default we're flagging, not something we invented silently; confirm or override).
+
+## 5. Order flow (confirmed)
+1. User chats with Store Admin, negotiates item + quantity informally in chat.
+2. Store Admin taps **"kabul edildi"**.
+3. App captures: item quantity, the post/item being referenced, user's delivery address, user's phone
+   number, plus store/admin identifiers automatically.
+4. This is sent to Super Admin as an **Order** record with status `pending`.
+5. Super Admin can update order status (`approved` / `sold` / rejected) for analytics — exact
+   Super-Admin-side status workflow is an **open item** (see below).
+
+## 6. Confirmed technical decisions
+- **Mobile:** Flutter (single codebase, Android + iOS).
+- **Backend:** Firebase (Auth, Firestore, Storage, Cloud Functions, FCM).
+- **Phone OTP:** Custom-built OTP sender (NOT Firebase Phone Auth) — see `03_CLOUD_FUNCTIONS_API.md`
+  for the pluggable-SMS-provider design. You will supply the actual SMS gateway integration later.
+- **Web Super Admin panel:** Next.js + Firebase (assumption — standard fit for a Firebase backend;
+  flag if you want something else).
+- **Admins per store:** multiple allowed.
+- **Feed model:** global discovery feed, no follow system.
+
+## 7. Open items — need your input before/while building
+These are not blocking the initial scaffold, but need answers before we finalize the corresponding
+features:
+
+1. **Story expiry** — 24h like Instagram, or permanent until manually deleted?
+2. **Video size cap** — "no duration limit" is confirmed, but do we cap file size (e.g. 500MB) to
+   control Firebase Storage/bandwidth cost, or truly unlimited?
+3. **Comment moderation** — can Store Admins delete/hide comments on their own posts?
+4. **Order status workflow on Super Admin side** — what statuses exist after `pending` (e.g. `approved`,
+   `rejected`, `sold`, `delivered`)? Who can move an order between them?
+5. **Store categories** — is every store the same "type" (like the SeMay beauty example in the design),
+   or do stores have a category/niche field used for filtering?
+6. **Localization** — single language for launch, or multi-language (a "Profile Language" screen exists
+   elsewhere in the Figma file, just outside the sections you scoped to me)?
+7. **Push notifications** — assumed default: new message, order-related updates, likes/comments on your
+   own post. Confirm scope or trim it.
+
+## 8. Explicitly out of scope (per your instructions)
+- No cart/checkout/product-catalog browsing (those screens exist in the Figma file but outside the
+  User/Store Admin sections you pointed me to — a different, older project living in the same file).
+- No in-app payments — orders are negotiated in chat, not paid for in-app.
