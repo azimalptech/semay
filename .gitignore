@@ -6,9 +6,28 @@ Thumbs.db
 .vscode/
 .idea/
 
+# --- Node (backend/functions) ---
+node_modules/
+
+# --- Flutter/Dart (mobile) ---
+build/
+.dart_tool/
+mobile/build/
+mobile/ios/Pods/
+
+# --- Firebase emulator suite ---
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+firestore-debug.log
+ui-debug.log
+*.emulator-data/
+firebase-export-*/
+
 # graphify (generated knowledge-graph output, not source)
 graphify-out/
 
-# Claude Code local/personal settings (this one currently has a live API key
-# embedded in a permission-allow entry — must never be committed)
-.claude/settings.local.json
+# Claude Code local/runtime state (settings.local.json currently has a live
+# API key embedded in a permission-allow entry — must never be committed;
+# nothing else in here is shared/team config yet)
+.claude/
