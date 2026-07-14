@@ -13,9 +13,17 @@ service firebase.storage {
         && (storeId in request.auth.token.storeIds);
     }
 
+    function isValidMediaUpload() {
+      return (request.resource.contentType.matches('video/.*')
+                && request.resource.size < 100 * 1024 * 1024)
+          || (request.resource.contentType.matches('image/.*')
+                && request.resource.size < 10 * 1024 * 1024);
+    }
+
     match /stores/{storeId}/{allPaths=**} {
       allow read: if true;
-      allow write: if isStoreAdmin(storeId);
+      allow delete: if isStoreAdmin(storeId);
+      allow create, update: if isStoreAdmin(storeId) && isValidMediaUpload();
     }
 
     match /users/{uid}/avatar.jpg {

@@ -73,3 +73,13 @@ final appRoleProvider = FutureProvider<AppRole>((ref) async {
       return AppRole.user;
   }
 });
+
+/// Store ids an admin manages, from their custom claims. Empty for non-admins.
+final storeIdsProvider = FutureProvider<List<String>>((ref) async {
+  final user = ref.watch(authStateChangesProvider).value;
+  if (user == null) return [];
+
+  final idTokenResult = await user.getIdTokenResult();
+  final storeIds = idTokenResult.claims?['storeIds'] as List<dynamic>?;
+  return storeIds?.cast<String>() ?? [];
+});

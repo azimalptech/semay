@@ -10,6 +10,7 @@ import '../features/chat/chat_thread_screen.dart';
 import '../features/feed/feed_screen.dart';
 import '../features/post_composer/post_composer_screen.dart';
 import '../features/profile/profile_screen.dart';
+import '../features/shared/post_detail_screen.dart';
 import '../features/store_admin/admin_home_screen.dart';
 import '../features/store_admin/admin_settings_screen.dart';
 import '../features/store_admin/my_store_screen.dart';
@@ -53,12 +54,16 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/auth/name', builder: (context, state) => const NameEntryScreen()),
       GoRoute(path: '/compose', builder: (context, state) => const PostComposerScreen()),
       GoRoute(
+        path: '/post/:postId',
+        builder: (context, state) => PostDetailScreen(postId: state.pathParameters['postId']!),
+      ),
+      GoRoute(
         path: '/store/:storeId',
         builder: (context, state) => StoreProfileScreen(storeId: state.pathParameters['storeId']!),
       ),
       GoRoute(
         path: '/home/story/:storeId',
-        builder: (context, state) => StoryViewerScreen(storyId: state.pathParameters['storeId']!),
+        builder: (context, state) => StoryViewerScreen(storeId: state.pathParameters['storeId']!),
       ),
       GoRoute(
         path: '/admin/store/:storeId',
@@ -66,7 +71,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/admin/home/story/:storeId',
-        builder: (context, state) => StoryViewerScreen(storyId: state.pathParameters['storeId']!),
+        builder: (context, state) => StoryViewerScreen(storeId: state.pathParameters['storeId']!),
       ),
       StatefulShellRoute.indexedStack(
         builder: (context, state, navigationShell) => _RoleScaffold(
