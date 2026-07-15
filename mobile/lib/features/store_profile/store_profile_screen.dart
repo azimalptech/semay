@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../services/auth_service.dart';
+import '../../services/chat_service.dart';
 import '../shared/widgets/posts_grid_view.dart';
 import 'store_profile_providers.dart';
 
@@ -41,14 +43,14 @@ class StoreProfileScreen extends ConsumerWidget {
   }
 }
 
-class _StoreHeader extends StatelessWidget {
+class _StoreHeader extends ConsumerWidget {
   const _StoreHeader({required this.storeId, required this.store});
 
   final String storeId;
   final Map<String, dynamic>? store;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     if (store == null) return const SizedBox.shrink();
 
     final avatarUrl = store!['avatarUrl'] as String? ?? '';
@@ -78,7 +80,14 @@ class _StoreHeader extends StatelessWidget {
               OutlinedButton.icon(
                 icon: const Icon(Icons.message_outlined),
                 label: const Text('Message'),
-                onPressed: () => context.push('/chat/$storeId'),
+                onPressed: () async {
+                  final role = await ref.read(appRoleProvider.future);
+                  final isAdmin = role == AppRole.admin || role == AppRole.superadmin;
+                  final chatId = await ref.read(chatServiceProvider).createOrGetChat(storeId);
+                  if (context.mounted) {
+                    context.push(isAdmin ? '/admin/chat/$chatId' : '/chat/$chatId');
+                  }
+                },
               ),
               const SizedBox(width: 12),
               OutlinedButton.icon(

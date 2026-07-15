@@ -72,7 +72,12 @@ service cloud.firestore {
           : (resource.data.userId == request.auth.uid || isStoreAdmin(resource.data.storeId)));
 
       match /messages/{messageId} {
-        allow read, write: if isSignedIn()
+        allow read: if isSignedIn()
+          && (get(/databases/$(database)/documents/chats/$(chatId)).data.userId == request.auth.uid
+            || isStoreAdmin(get(/databases/$(database)/documents/chats/$(chatId)).data.storeId));
+
+        allow create: if isSignedIn()
+          && request.resource.data.senderId == request.auth.uid
           && (get(/databases/$(database)/documents/chats/$(chatId)).data.userId == request.auth.uid
             || isStoreAdmin(get(/databases/$(database)/documents/chats/$(chatId)).data.storeId));
       }
@@ -80,7 +85,9 @@ service cloud.firestore {
 
     // orders/{orderId} — created only via Cloud Functions (admin SDK bypasses rules)
     match /orders/{orderId} {
-      allow read: if isSuperAdmin() || isStoreAdmin(resource.data.storeId);
+      allow read: if isSuperAdmin()
+        || isStoreAdmin(resource.data.storeId)
+        || (isSignedIn() && resource.data.userId == request.auth.uid);
       allow write: if false;
     }
 

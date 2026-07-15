@@ -10,6 +10,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/firebase_options.dart';
 import 'core/router.dart';
 import 'core/theme.dart';
+import 'services/auth_service.dart';
+import 'services/notification_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -35,6 +37,12 @@ class SeMayApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(routerProvider);
+
+    ref.listen(authStateChangesProvider, (previous, next) {
+      if (next.value != null) {
+        ref.read(notificationServiceProvider).initAndSyncToken();
+      }
+    });
 
     return MaterialApp.router(
       title: 'SeMay',

@@ -73,6 +73,14 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/admin/home/story/:storeId',
         builder: (context, state) => StoryViewerScreen(storeId: state.pathParameters['storeId']!),
       ),
+      GoRoute(
+        path: '/chat/:chatId',
+        builder: (context, state) => ChatThreadScreen(chatId: state.pathParameters['chatId']!),
+      ),
+      GoRoute(
+        path: '/admin/chat/:chatId',
+        builder: (context, state) => ChatThreadScreen(chatId: state.pathParameters['chatId']!),
+      ),
       StatefulShellRoute.indexedStack(
         builder: (context, state, navigationShell) => _RoleScaffold(
           navigationShell: navigationShell,
@@ -91,16 +99,7 @@ final routerProvider = Provider<GoRouter>((ref) {
             GoRoute(path: '/home', builder: (context, state) => const FeedScreen()),
           ]),
           StatefulShellBranch(routes: [
-            GoRoute(
-              path: '/chat',
-              builder: (context, state) => const ChatListScreen(),
-              routes: [
-                GoRoute(
-                  path: ':chatId',
-                  builder: (context, state) => ChatThreadScreen(chatId: state.pathParameters['chatId']!),
-                ),
-              ],
-            ),
+            GoRoute(path: '/chat', builder: (context, state) => const ChatListScreen()),
           ]),
           StatefulShellBranch(routes: [
             GoRoute(path: '/profile', builder: (context, state) => const ProfileScreen()),
@@ -137,16 +136,7 @@ final routerProvider = Provider<GoRouter>((ref) {
             GoRoute(path: '/admin/store', builder: (context, state) => const MyStoreScreen()),
           ]),
           StatefulShellBranch(routes: [
-            GoRoute(
-              path: '/admin/chat',
-              builder: (context, state) => const ChatListScreen(),
-              routes: [
-                GoRoute(
-                  path: ':chatId',
-                  builder: (context, state) => ChatThreadScreen(chatId: state.pathParameters['chatId']!),
-                ),
-              ],
-            ),
+            GoRoute(path: '/admin/chat', builder: (context, state) => const ChatListScreen()),
           ]),
           StatefulShellBranch(routes: [
             GoRoute(path: '/admin/settings', builder: (context, state) => const AdminSettingsScreen()),
