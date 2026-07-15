@@ -12,3 +12,6 @@ export { expireStories } from "./stories/expireStories";
 export { onMessageCreated } from "./chat/onMessageCreated";
 export { acceptOrder } from "./orders/acceptOrder";
 export { onOrderCreated } from "./orders/onOrderCreated";
+
+export { createStore } from "./stores/createStore";
+export { setStoreAdmin } from "./stores/setStoreAdmin";
