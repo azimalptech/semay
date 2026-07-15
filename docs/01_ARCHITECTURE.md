@@ -44,8 +44,9 @@ though your current spec is one-to-many stores→admins, not many-to-many — fl
 See `02_DATA_MODEL.md` for full schema. Security rules will:
 - Let any authenticated user read posts/stores/stories.
 - Let only a store's admins write posts/stories/reels/settings for *their* store(s).
-- Let only Super Admin write to `stores` (create) and `orders` (status transitions) and grant admin
-  claims.
+- Let only Super Admin write to `stores` (create) and grant admin claims. `orders` are never
+  client-written by anyone, including Super Admin — only the `acceptOrder` Cloud Function (Admin SDK)
+  creates them, and they're never updated afterward.
 - Restrict `chats/{chatId}/messages` to the two participants (user + that store's admins).
 
 ## 4. Storage layout (Firebase Storage)
@@ -103,10 +104,9 @@ lib/
 ```
 /app
   /login                     # email+password or Google, Super-Admin-only (separate from phone OTP)
-  /dashboard                 # order analytics, approved/sold totals
+  /dashboard                 # read-only order report: item quantity totals by day/store
   /stores                    # list, create
   /stores/[id]/admins        # promote/demote admins for that store
-  /orders                    # list + filter by status/store/date
 ```
 Super Admin login mechanism is a **separate concern from the phone-OTP flow** — proposal: plain
 email/password via Firebase Auth for the (small, trusted) Super Admin user set. Flag if you want phone

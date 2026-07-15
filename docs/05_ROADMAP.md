@@ -28,11 +28,12 @@
 - Next.js scaffold, Super Admin auth.
 - Store creation UI.
 - Admin promote/revoke UI.
-- Orders dashboard with filters + basic analytics (totals by status/store/date).
+- Orders dashboard: read-only daily reporting table, total item quantity per day (and per store) —
+  no status filter (every order is `accepted`), no per-order actions.
 
 ## Phase 5 — Polish & open items resolution
 - Resolve all "Open Items" from `00_PROJECT_OVERVIEW.md` (story expiry, video size caps, comment
-  moderation, order status workflow, store categories, localization, notification scope).
+  moderation, store categories, localization, notification scope).
 - App icons, splash screens, store listing assets.
 - Testing pass (auth edge cases, offline behavior, large video uploads).
 

@@ -47,7 +47,7 @@ export const acceptOrder = onCall<AcceptOrderRequest>(async (request) => {
     chatId,
     itemQuantity,
     userPhone: userPhone.trim(),
-    status: "pending",
+    status: "accepted",
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
   });

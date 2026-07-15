@@ -26,7 +26,9 @@ app UI switches into "Store Admin mode" for that person.
 - Create stores (name, tagline, avatar, cover, phone, address).
 - Promote/demote a user to Store Admin for a given store (grant/revoke admin privileges on existing
   accounts — Super Admin never creates admin accounts from scratch, only elevates existing users).
-- View all **orders** (status: pending / approved / sold) across all stores — analytics dashboard.
+- View all **orders** across all stores — **read-only** daily reporting (total item quantity ordered
+  per day, per store). No approval step, no status, no per-order editing — the Store Admin's "kabul
+  edildi" tap already is the completed sale; Super Admin only ever views aggregated numbers.
 - No content moderation scope defined yet (posts publish directly, no approval step — see Open Items).
 
 ### Store Admin (mobile, admin mode)
@@ -65,9 +67,10 @@ app UI switches into "Store Admin mode" for that person.
 3. App captures: item quantity and user's phone number (auto-filled from their profile, not typed),
    plus store/admin identifiers automatically. The specific item/post and delivery address stay
    negotiated in the chat conversation and are not stored on the order record.
-4. This is sent to Super Admin as an **Order** record with status `pending`.
-5. Super Admin can update order status (`approved` / `sold` / rejected) for analytics — exact
-   Super-Admin-side status workflow is an **open item** (see below).
+4. This is sent to Super Admin as an **Order** record with status `accepted` — always `accepted`, set
+   once at creation. The "kabul edildi" tap *is* the sale; there is no approval step.
+5. Super Admin never edits, approves, or transitions an order — it's a read-only reporting record from
+   here on. The Super Admin panel aggregates these into a daily (and per-store) item-quantity report.
 
 ## 6. Confirmed technical decisions
 - **Mobile:** Flutter (single codebase, Android + iOS).
@@ -87,14 +90,15 @@ features:
 2. **Video size cap** — "no duration limit" is confirmed, but do we cap file size (e.g. 500MB) to
    control Firebase Storage/bandwidth cost, or truly unlimited?
 3. **Comment moderation** — can Store Admins delete/hide comments on their own posts?
-4. **Order status workflow on Super Admin side** — what statuses exist after `pending` (e.g. `approved`,
-   `rejected`, `sold`, `delivered`)? Who can move an order between them?
-5. **Store categories** — is every store the same "type" (like the SeMay beauty example in the design),
+4. **Store categories** — is every store the same "type" (like the SeMay beauty example in the design),
    or do stores have a category/niche field used for filtering?
-6. **Localization** — single language for launch, or multi-language (a "Profile Language" screen exists
+5. **Localization** — single language for launch, or multi-language (a "Profile Language" screen exists
    elsewhere in the Figma file, just outside the sections you scoped to me)?
-7. **Push notifications** — assumed default: new message, order-related updates, likes/comments on your
+6. **Push notifications** — assumed default: new message, order-related updates, likes/comments on your
    own post. Confirm scope or trim it.
+
+(Order status workflow — previously open item #4 — is resolved: there is no workflow, `status` is
+always `'accepted'`, Super Admin is read-only. See §5.)
 
 ## 8. Explicitly out of scope (per your instructions)
 - No cart/checkout/product-catalog browsing (those screens exist in the Figma file but outside the

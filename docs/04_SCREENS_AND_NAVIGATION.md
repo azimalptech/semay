@@ -40,10 +40,9 @@ these two sections — explicitly ignored.)
 | Page | Purpose |
 |---|---|
 | `/login` | Super Admin auth (proposal: email/password, separate from phone OTP — flag if wrong) |
-| `/dashboard` | Order analytics: totals by status, by store, over time |
+| `/dashboard` | Read-only order report: total item quantity per day, per store. No status (every order is `accepted`), no per-order actions — Super Admin can't edit or approve anything here. |
 | `/stores` | List + create stores |
 | `/stores/:id/admins` | Promote/revoke admin privileges for existing user accounts |
-| `/orders` | Full order list, filter by store/status/date |
 
 ## Navigation/role-branching logic
 On login, after `verifyOtp` resolves and (if new) `completeProfile` runs:

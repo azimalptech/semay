@@ -99,7 +99,9 @@ are a single collection read.)
   "chatId": "uid_storeId1",
   "itemQuantity": 2,
   "userPhone": "+993...",            // auto-filled client-side from users/{userId}.phone, not typed
-  "status": "pending",              // "pending" | "approved" | "sold" | "rejected" (see Open Items)
+  "status": "accepted",             // always "accepted" — set once at creation, never transitions.
+                                     // The Store Admin's "kabul edildi" tap IS the sale; there is no
+                                     // approval step and no other status value.
   "createdAt": "<timestamp>",
   "updatedAt": "<timestamp>"
 }
@@ -127,7 +129,8 @@ Short-lived, cleaned up by a scheduled Cloud Function (e.g. daily deletion of ex
   `posts` create/delete — never trust a client-side count.
 - `posts.likesCount` / `commentsCount` / `savesCount` same pattern — Cloud Function keeps them in sync
   with the `likes`/`comments` subcollections and the `saved` collection.
-- Order analytics for Super Admin (totals by store/status/date) should be computed either via a
+- Order analytics for Super Admin (item quantity totals by store/date — no status breakdown, every
+  order counts) should be computed either via a
   scheduled aggregation Cloud Function into an `analytics/dailySummary/{date}` doc, or queried live if
   volume stays low. Firestore can't do SQL-style GROUP BY, so this needs to be decided once you know
   expected order volume.

@@ -30,15 +30,15 @@ All callable from Flutter via `cloud_functions` SDK unless noted as a background
   and adds `storeId` to their `storeIds`.
 - Revokes: inverse. If a user ends up with zero `storeIds` after revoke, role reverts to `'user'`.
 
-### `updateOrderStatus({ orderId, status })`
-- Transitions `orders/{orderId}.status`. Exact allowed status values pending your answer in Open Items
-  #4 of the overview doc.
+Super Admin has no order-mutating function — orders are read-only for Super Admin (reporting only, no
+approval step, no status transitions). There is no `updateOrderStatus`.
 
 ## Store Admin only (enforced via `role == 'admin'` + `storeIds` contains the target store)
 ### `acceptOrder({ chatId, itemQuantity, userPhone })`
-- Creates `orders/{orderId}` with `status: 'pending'`. `userPhone` is auto-filled client-side from
-  `users/{userId}.phone` (not manually typed) — no post/item reference or delivery address is captured;
-  those stay negotiated in the chat conversation, not on the order record.
+- Creates `orders/{orderId}` with `status: 'accepted'` — this is the only status value that ever
+  exists; the tap itself is the completed sale, not a pending request. `userPhone` is auto-filled
+  client-side from `users/{userId}.phone` (not manually typed) — no post/item reference or delivery
+  address is captured; those stay negotiated in the chat conversation, not on the order record.
 - Writes a system message into `chats/{chatId}/messages` referencing the new `orderId` (so the chat
   thread shows "Order accepted ✅" inline).
 - Triggers a notification to Super Admin (see below).
@@ -61,7 +61,8 @@ All callable from Flutter via `cloud_functions` SDK unless noted as a background
   admins (checked via custom claim `storeIds` array-contains match, not just `adminIds` on the doc —
   claims are the source of truth for security rules since rules can't easily do array-contains against
   another doc without an extra `get()`).
-- `orders`: create only via the `acceptOrder` Cloud Function (not direct client writes); read restricted
-  to Super Admin and the store's admins (their own store's orders only).
+- `orders`: create only via the `acceptOrder` Cloud Function (not direct client writes) and never
+  updated afterward (`status` is fixed at `'accepted'`); read restricted to Super Admin and the store's
+  admins (their own store's orders only).
 - `chats/{chatId}/messages`: read/write restricted to `chatId`'s `userId` and that store's admins.
 - `users/{uid}`: self read/write only, except Super Admin can read all (for the admin-assignment UI).
