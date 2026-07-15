@@ -57,16 +57,12 @@ class ChatService {
 
   Future<String> acceptOrder({
     required String chatId,
-    required String postId,
     required int itemQuantity,
-    required String deliveryAddress,
     required String userPhone,
   }) async {
     final result = await _functions.httpsCallable('acceptOrder').call<Map<String, dynamic>>({
       'chatId': chatId,
-      'postId': postId,
       'itemQuantity': itemQuantity,
-      'deliveryAddress': deliveryAddress,
       'userPhone': userPhone,
     });
     final data = Map<String, dynamic>.from(result.data as Map);

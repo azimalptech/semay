@@ -97,15 +97,19 @@ are a single collection read.)
   "adminId": "uidOfAdminWhoAccepted",
   "userId": "uid",
   "chatId": "uid_storeId1",
-  "postId": "postId_referenced",   // the item being discussed — addition beyond your literal spec, flag if unwanted
   "itemQuantity": 2,
-  "deliveryAddress": "...",         // captured from user at accept time
-  "userPhone": "+993...",
+  "userPhone": "+993...",            // auto-filled client-side from users/{userId}.phone, not typed
   "status": "pending",              // "pending" | "approved" | "sold" | "rejected" (see Open Items)
   "createdAt": "<timestamp>",
   "updatedAt": "<timestamp>"
 }
 ```
+No `postId`/item reference or `deliveryAddress` — the negotiated item and delivery details live in the
+chat conversation itself, not on the order record. (Dropped by explicit request; previously `postId` was
+captured via a dropdown and `deliveryAddress` via a text field in the accept-order sheet — there is no
+automatic way to infer which post was discussed from chat context, since a chat thread is scoped to a
+user↔store pair, not a specific post. If Phase 4's Super Admin order dashboard ever needs to show the
+item or delivery address, one of those fields will need to come back.)
 
 ## `otp_codes/{phone}`
 ```jsonc

@@ -35,8 +35,10 @@ All callable from Flutter via `cloud_functions` SDK unless noted as a background
   #4 of the overview doc.
 
 ## Store Admin only (enforced via `role == 'admin'` + `storeIds` contains the target store)
-### `acceptOrder({ chatId, postId, itemQuantity, deliveryAddress, userPhone })`
-- Creates `orders/{orderId}` with `status: 'pending'`.
+### `acceptOrder({ chatId, itemQuantity, userPhone })`
+- Creates `orders/{orderId}` with `status: 'pending'`. `userPhone` is auto-filled client-side from
+  `users/{userId}.phone` (not manually typed) — no post/item reference or delivery address is captured;
+  those stay negotiated in the chat conversation, not on the order record.
 - Writes a system message into `chats/{chatId}/messages` referencing the new `orderId` (so the chat
   thread shows "Order accepted ✅" inline).
 - Triggers a notification to Super Admin (see below).

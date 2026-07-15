@@ -112,7 +112,6 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen> {
                   onTap: () => showAcceptOrderSheet(
                     context,
                     chatId: widget.chatId,
-                    storeId: chat['storeId'] as String,
                     userId: chat['userId'] as String,
                   ),
                 ),

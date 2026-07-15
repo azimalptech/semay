@@ -35,8 +35,11 @@ app UI switches into "Store Admin mode" for that person.
 - Edit/delete their store's own posts.
 - Chat with users; reply to messages.
 - Tap **"kabul edildi"** (order accepted) above the chat once an order is verbally/textually agreed —
-  this sends `{ itemQuantity, itemRef (post being discussed), userAddress, userPhone }` to Super Admin
-  as a new **Order** record for analytics.
+  this sends `{ itemQuantity, userPhone }` to Super Admin as a new **Order** record for analytics.
+  `userPhone` is auto-filled from the customer's profile, not typed. The item being discussed and the
+  delivery address stay negotiated in the chat itself and are not captured on the order record
+  (changed from the original spec by explicit request — flag if the Super Admin dashboard needs them
+  after all).
 - Manage their own store profile / settings.
 
 ### User (mobile)
@@ -59,8 +62,9 @@ app UI switches into "Store Admin mode" for that person.
 ## 5. Order flow (confirmed)
 1. User chats with Store Admin, negotiates item + quantity informally in chat.
 2. Store Admin taps **"kabul edildi"**.
-3. App captures: item quantity, the post/item being referenced, user's delivery address, user's phone
-   number, plus store/admin identifiers automatically.
+3. App captures: item quantity and user's phone number (auto-filled from their profile, not typed),
+   plus store/admin identifiers automatically. The specific item/post and delivery address stay
+   negotiated in the chat conversation and are not stored on the order record.
 4. This is sent to Super Admin as an **Order** record with status `pending`.
 5. Super Admin can update order status (`approved` / `sold` / rejected) for analytics — exact
    Super-Admin-side status workflow is an **open item** (see below).
