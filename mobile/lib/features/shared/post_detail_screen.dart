@@ -11,6 +11,7 @@ import 'post_interaction_providers.dart';
 import 'widgets/confirm_delete_dialog.dart';
 import 'widgets/double_tap_like_overlay.dart';
 import 'widgets/edit_caption_dialog.dart';
+import 'widgets/pinch_zoom_image.dart';
 import 'widgets/reel_player_view.dart';
 import 'widgets/send_to_chat_sheet.dart';
 
@@ -97,7 +98,10 @@ class ImagePostDetailContent extends ConsumerWidget {
             aspectRatio: 1,
             child: PageView(
               children: [
-                for (final url in mediaUrls) CachedNetworkImage(imageUrl: url, fit: BoxFit.cover),
+                for (final url in mediaUrls)
+                  PinchZoomImage(
+                    child: CachedNetworkImage(imageUrl: url, fit: BoxFit.cover),
+                  ),
               ],
             ),
           ),

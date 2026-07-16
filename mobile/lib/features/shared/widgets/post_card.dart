@@ -13,6 +13,7 @@ import '../../../core/theme.dart';
 import '../../../services/posts_service.dart';
 import '../post_interaction_providers.dart';
 import 'double_tap_like_overlay.dart';
+import 'pinch_zoom_image.dart';
 import 'reel_player_view.dart' show reelsMutedProvider;
 import 'send_to_chat_sheet.dart';
 
@@ -239,7 +240,9 @@ class _PostMedia extends StatelessWidget {
     }
 
     if (mediaUrls.length == 1) {
-      return CachedNetworkImage(imageUrl: mediaUrls.first, fit: BoxFit.cover);
+      return PinchZoomImage(
+        child: CachedNetworkImage(imageUrl: mediaUrls.first, fit: BoxFit.cover),
+      );
     }
 
     return Stack(
@@ -247,8 +250,9 @@ class _PostMedia extends StatelessWidget {
         PageView.builder(
           itemCount: mediaUrls.length,
           onPageChanged: onPageChanged,
-          itemBuilder: (context, i) =>
-              CachedNetworkImage(imageUrl: mediaUrls[i], fit: BoxFit.cover),
+          itemBuilder: (context, i) => PinchZoomImage(
+            child: CachedNetworkImage(imageUrl: mediaUrls[i], fit: BoxFit.cover),
+          ),
         ),
         Positioned(
           top: 12,
@@ -293,6 +297,10 @@ class _FeedReelPlayer extends ConsumerStatefulWidget {
 class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
   VideoPlayerController? _video;
   bool _visible = false;
+  // Plays twice (first play + one repeat) then stops on a replay icon,
+  // same as the dedicated Reels tab / post-detail player.
+  int _replays = 0;
+  bool _ended = false;
 
   @override
   void initState() {
@@ -300,7 +308,7 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
     final vc = VideoPlayerController.networkUrl(Uri.parse(widget.videoUrl));
     _video = vc;
     vc.setVolume(ref.read(reelsMutedProvider) ? 0 : 1);
-    vc.setLooping(true);
+    vc.addListener(_onVideoTick);
     vc.initialize().then((_) {
       if (!mounted) return;
       if (_visible) vc.play();
@@ -308,8 +316,28 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
     });
   }
 
+  void _onVideoTick() {
+    final video = _video;
+    if (video == null || !video.value.isInitialized || _ended) return;
+    final duration = video.value.duration;
+    if (duration <= Duration.zero) return;
+    // Android's reported end-of-playback position is reliably a few ms
+    // short of duration, never >=, so an exact comparison never fires.
+    final remaining = duration - video.value.position;
+    final completed = !video.value.isPlaying && remaining < const Duration(milliseconds: 300);
+    if (!completed) return;
+    if (_replays < 1) {
+      _replays++;
+      video.seekTo(Duration.zero);
+      video.play();
+    } else if (mounted) {
+      setState(() => _ended = true);
+    }
+  }
+
   @override
   void dispose() {
+    _video?.removeListener(_onVideoTick);
     _video?.dispose();
     super.dispose();
   }
@@ -320,12 +348,29 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
     _visible = isVisible;
     final video = _video;
     if (video == null || !video.value.isInitialized) return;
-    isVisible ? video.play() : video.pause();
+    if (isVisible) {
+      // Scrolled back into view: fresh watch, fresh loop budget.
+      _replays = 0;
+      _ended = false;
+      video.seekTo(Duration.zero);
+      video.play();
+    } else {
+      video.pause();
+    }
+  }
+
+  void _replay() {
+    final video = _video;
+    if (video == null) return;
+    _replays = 0;
+    _ended = false;
+    video.seekTo(Duration.zero);
+    video.play();
+    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    final muted = ref.watch(reelsMutedProvider);
     ref.listen<bool>(reelsMutedProvider, (_, isMuted) {
       _video?.setVolume(isMuted ? 0 : 1);
     });
@@ -333,36 +378,28 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
     return VisibilityDetector(
       key: Key('feed-reel-${widget.postId}'),
       onVisibilityChanged: _onVisibilityChanged,
-      child: Stack(
-        alignment: Alignment.center,
-        fit: StackFit.expand,
-        children: [
-          if (_video?.value.isInitialized ?? false)
-            FittedBox(
-              fit: BoxFit.cover,
-              clipBehavior: Clip.hardEdge,
-              child: SizedBox(
-                width: _video!.value.size.width,
-                height: _video!.value.size.height,
-                child: VideoPlayer(_video!),
-              ),
-            )
-          else
-            CachedNetworkImage(imageUrl: widget.thumbnailUrl, fit: BoxFit.cover),
-          Positioned(
-            right: 8,
-            bottom: 8,
-            child: GestureDetector(
-              onTap: () => ref.read(reelsMutedProvider.notifier).toggle(),
-              child: CircleAvatar(
-                radius: 14,
-                backgroundColor: AppColors.overlayAlphaBlack,
-                child: Icon(muted ? Icons.volume_off : Icons.volume_up,
-                    color: Colors.white, size: 16),
-              ),
-            ),
-          ),
-        ],
+      child: GestureDetector(
+        onTap: _ended ? _replay : null,
+        child: Stack(
+          alignment: Alignment.center,
+          fit: StackFit.expand,
+          children: [
+            if (_video?.value.isInitialized ?? false)
+              FittedBox(
+                fit: BoxFit.cover,
+                clipBehavior: Clip.hardEdge,
+                child: SizedBox(
+                  width: _video!.value.size.width,
+                  height: _video!.value.size.height,
+                  child: VideoPlayer(_video!),
+                ),
+              )
+            else
+              CachedNetworkImage(imageUrl: widget.thumbnailUrl, fit: BoxFit.cover),
+            if (_ended)
+              const Icon(Icons.refresh, color: Colors.white70, size: 56),
+          ],
+        ),
       ),
     );
   }

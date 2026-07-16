@@ -18,9 +18,16 @@ const SUPERADMIN_UID = "seed-superadmin-uid";
 const SUPERADMIN_EMAIL = "superadmin@semay.local";
 const SUPERADMIN_PASSWORD = "superadmin123";
 
-const PLAIN_USER_UID = "seed-plain-user-uid";
+// No fixed-uid "plain user" account is seeded anymore — it used to be
+// created via a phoneNumber-style Auth account, but the mobile app's dev
+// OTP bypass (auth_service.dart) now signs in with a deterministic
+// "<digits>@dev.semay.local" email/password account instead. Seeding a
+// second, differently-authed account for the same phone number produced two
+// Firestore users/{uid} docs sharing one `phone` — /api/users/lookup had no
+// tiebreaker between them, so a promote-to-admin could silently land on the
+// uid nobody was actually signed in as. Just use the phone in the mobile
+// app; its first real login creates the Firestore doc.
 const PLAIN_USER_PHONE = "+99361112233";
-const PLAIN_USER_NAME = "Aylar";
 
 const STORE_ID = "seed-store-lady-shop";
 
@@ -65,11 +72,6 @@ async function main() {
     { role: "superadmin" }
   );
   await ensureAuthUser(
-    PLAIN_USER_UID,
-    { phoneNumber: PLAIN_USER_PHONE },
-    { role: "user", storeIds: [] }
-  );
-  await ensureAuthUser(
     STORE_ADMIN_UID,
     { email: STORE_ADMIN_EMAIL, password: DEV_BYPASS_PASSWORD },
     { role: "admin", storeIds: [STORE_ID] }
@@ -80,16 +82,6 @@ async function main() {
     avatarUrl: "",
     phone: "",
     role: "superadmin",
-    storeIds: [],
-    fcmTokens: [],
-    createdAt: FieldValue.serverTimestamp(),
-  });
-
-  await db.collection("users").doc(PLAIN_USER_UID).set({
-    name: PLAIN_USER_NAME,
-    avatarUrl: "",
-    phone: PLAIN_USER_PHONE,
-    role: "user",
     storeIds: [],
     fcmTokens: [],
     createdAt: FieldValue.serverTimestamp(),
@@ -128,12 +120,15 @@ async function main() {
       { itemQuantity: 2, createdAt: dayTimestamp(1, 15) },
       { itemQuantity: 5, createdAt: dayTimestamp(0, 11) },
     ];
+    // Sample rows for the dashboard's orders report only — deliberately not
+    // tied to any real uid (see the note above on why a second seeded
+    // account for the same phone caused real bugs).
     for (const order of orders) {
       await db.collection("orders").add({
         storeId: STORE_ID,
         adminId: SUPERADMIN_UID,
-        userId: PLAIN_USER_UID,
-        chatId: `${PLAIN_USER_UID}_${STORE_ID}`,
+        userId: "demo-customer",
+        chatId: null,
         itemQuantity: order.itemQuantity,
         userPhone: PLAIN_USER_PHONE,
         status: "accepted",
@@ -145,8 +140,10 @@ async function main() {
 
   console.log("Seed complete.");
   console.log(`Super Admin login → email: ${SUPERADMIN_EMAIL}  password: ${SUPERADMIN_PASSWORD}`);
-  console.log(`Plain user phone (for the promote-admin lookup) → ${PLAIN_USER_PHONE}`);
   console.log(`Store-admin phone (already has admin claims on "${STORE_ID}") → ${STORE_ADMIN_PHONE}`);
+  console.log(
+    `To test promote-to-admin: log into the mobile app with any phone number first (creates its Firestore user doc), then promote that number from the Stores > Manage Admins page.`
+  );
 }
 
 main()
