@@ -1,5 +1,6 @@
 import { Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebaseAdmin";
+import { getTranslations } from "@/lib/l10n";
 
 const WINDOW_DAYS = 90;
 
@@ -34,6 +35,7 @@ async function getStoreNames(): Promise<Record<string, string>> {
 }
 
 export default async function DashboardPage() {
+  const t = await getTranslations();
   const [orders, storeNames] = await Promise.all([getOrders(), getStoreNames()]);
   const storeIds = Object.keys(storeNames).sort((a, b) =>
     storeNames[a].localeCompare(storeNames[b])
@@ -55,19 +57,16 @@ export default async function DashboardPage() {
   return (
     <div className="mx-auto max-w-3xl space-y-8">
       <div>
-        <h1 className="text-lg font-semibold text-gray-900">Orders report</h1>
-        <p className="text-sm text-gray-500">
-          Read-only. Total item quantity ordered, last {WINDOW_DAYS} days. Every order counts —
-          there is no status or approval step.
-        </p>
+        <h1 className="text-lg font-semibold text-gray-900">{t.ordersReport}</h1>
+        <p className="text-sm text-gray-500">{t.ordersReportDesc(WINDOW_DAYS)}</p>
       </div>
 
       <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-gray-200 bg-gray-50 text-gray-500">
             <tr>
-              <th className="px-4 py-2 font-medium">Day</th>
-              <th className="px-4 py-2 font-medium">Total items</th>
+              <th className="px-4 py-2 font-medium">{t.day}</th>
+              <th className="px-4 py-2 font-medium">{t.totalItems}</th>
               {showPerStore &&
                 storeIds.map((id) => (
                   <th key={id} className="px-4 py-2 font-medium">
@@ -83,7 +82,7 @@ export default async function DashboardPage() {
                   colSpan={showPerStore ? 2 + storeIds.length : 2}
                   className="px-4 py-6 text-center text-gray-400"
                 >
-                  No orders in the last {WINDOW_DAYS} days.
+                  {t.noOrders(WINDOW_DAYS)}
                 </td>
               </tr>
             )}

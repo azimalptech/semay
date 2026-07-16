@@ -1,35 +1,51 @@
-import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../../services/auth_service.dart';
+import '../../core/image_crop.dart';
+import '../../core/l10n.dart';
+import '../../core/theme.dart';
 import '../../services/posts_service.dart';
-import '../../services/stories_service.dart';
+import '../feed/feed_providers.dart';
+import '../store_profile/store_profile_providers.dart';
 
-enum _ComposeMode { post, story }
+enum _FrameMode { fill, fit }
 
+/// Caption + publish step for pre-picked file(s) — reached only from
+/// AddContentSheet, which already decided the type ('image' | 'carousel' |
+/// 'reel') and did the initial picking/cropping.
+///
+/// For images, [originalFiles] (the un-cropped sources, one per entry in
+/// [files]) enables Instagram's Fill/Fit toggle: Fill re-runs the pan/zoom
+/// crop UI on every photo one at a time, Fit letterboxes each original onto
+/// a square canvas instead of cropping it.
 class PostComposerScreen extends ConsumerStatefulWidget {
-  const PostComposerScreen({super.key});
+  const PostComposerScreen({
+    super.key,
+    required this.storeId,
+    required this.type,
+    required this.files,
+    this.originalFiles,
+  });
+
+  final String storeId;
+  final String type;
+  final List<XFile> files;
+  final List<XFile>? originalFiles;
 
   @override
   ConsumerState<PostComposerScreen> createState() => _PostComposerScreenState();
 }
 
 class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
-  final _picker = ImagePicker();
-  _ComposeMode _mode = _ComposeMode.post;
-  bool _submitting = false;
-
-  // Post state
-  String _postType = 'image';
-  final List<File> _postFiles = [];
   final _captionController = TextEditingController();
-
-  // Story state
-  String _storyMediaType = 'image';
-  File? _storyFile;
+  bool _submitting = false;
+  bool _reframing = false;
+  int _page = 0;
+  _FrameMode _mode = _FrameMode.fill;
+  late List<XFile> _displayFiles = List.of(widget.files);
 
   @override
   void dispose() {
@@ -37,162 +53,218 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
     super.dispose();
   }
 
-  Future<void> _pickForPost() async {
-    if (_postType == 'reel') {
-      final video = await _picker.pickVideo(source: ImageSource.gallery);
-      if (video != null) setState(() => _postFiles..clear()..add(File(video.path)));
-    } else if (_postType == 'carousel') {
-      final images = await _picker.pickMultiImage();
-      if (images.isNotEmpty) {
-        setState(() => _postFiles..clear()..addAll(images.map((x) => File(x.path))));
+  Future<void> _setMode(_FrameMode mode) async {
+    final originals = widget.originalFiles;
+    if (mode == _mode || originals == null || _reframing) return;
+    setState(() => _reframing = true);
+    try {
+      final result = <XFile>[];
+      if (mode == _FrameMode.fill) {
+        // One photo at a time, fully awaited — see add_content_sheet.dart's
+        // _pickPost for why this must never turn into a tight loop.
+        for (final original in originals) {
+          final cropped = await cropSquare(original);
+          result.add(cropped ?? original);
+        }
+      } else {
+        for (final original in originals) {
+          result.add(await fitSquareWithLetterbox(original));
+        }
       }
-    } else {
-      final image = await _picker.pickImage(source: ImageSource.gallery);
-      if (image != null) setState(() => _postFiles..clear()..add(File(image.path)));
-    }
-  }
-
-  Future<void> _pickForStory() async {
-    if (_storyMediaType == 'video') {
-      final video = await _picker.pickVideo(source: ImageSource.gallery);
-      if (video != null) setState(() => _storyFile = File(video.path));
-    } else {
-      final image = await _picker.pickImage(source: ImageSource.gallery);
-      if (image != null) setState(() => _storyFile = File(image.path));
+      setState(() {
+        _displayFiles = result;
+        _mode = mode;
+      });
+    } finally {
+      if (mounted) setState(() => _reframing = false);
     }
   }
 
   Future<void> _submit() async {
-    final storeIds = await ref.read(storeIdsProvider.future);
-    if (storeIds.isEmpty) {
-      _showError('No store assigned to this account yet');
-      return;
-    }
-    final storeId = storeIds.first;
-
+    final s = ref.read(l10nProvider);
     setState(() => _submitting = true);
     try {
-      if (_mode == _ComposeMode.post) {
-        if (_postFiles.isEmpty) {
-          _showError('Pick media first');
-          return;
-        }
-        await ref.read(postsServiceProvider).createPost(
-              storeId: storeId,
-              type: _postType,
-              files: _postFiles,
-              caption: _captionController.text.trim(),
-            );
-      } else {
-        if (_storyFile == null) {
-          _showError('Pick media first');
-          return;
-        }
-        await ref.read(storiesServiceProvider).createStory(
-              storeId: storeId,
-              mediaFile: _storyFile!,
-              mediaType: _storyMediaType,
-            );
-      }
+      await ref.read(postsServiceProvider).createPost(
+            storeId: widget.storeId,
+            type: widget.type,
+            files: widget.type == 'reel' ? widget.files : _displayFiles,
+            caption: _captionController.text.trim(),
+          );
+      // The feed/store-profile grids fetch once with .get() rather than a
+      // live listener, so without this a freshly published post is
+      // invisible until the next manual pull-to-refresh.
+      ref.invalidate(feedNotifierProvider);
+      ref.invalidate(storePostsProvider(widget.storeId));
+      ref.invalidate(storeReelsProvider(widget.storeId));
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
-      _showError('$e');
-    } finally {
-      if (mounted) setState(() => _submitting = false);
+      if (mounted) {
+        setState(() => _submitting = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('${s.failedToLoad}: $e')));
+      }
     }
-  }
-
-  void _showError(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
   Widget build(BuildContext context) {
+    final s = ref.watch(l10nProvider);
+    final showFrameToggle = widget.type != 'reel' && widget.originalFiles != null;
+
     return Scaffold(
-      appBar: AppBar(title: const Text('New Post')),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SegmentedButton<_ComposeMode>(
-              segments: const [
-                ButtonSegment(value: _ComposeMode.post, label: Text('Post')),
-                ButtonSegment(value: _ComposeMode.story, label: Text('Story')),
+      appBar: AppBar(title: Text(widget.type == 'reel' ? s.postStory : s.newPost)),
+      body: Column(
+        children: [
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                if (widget.type == 'reel')
+                  const _ReelPreviewTile()
+                else
+                  AspectRatio(
+                    aspectRatio: 1,
+                    child: Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: PageView.builder(
+                            itemCount: _displayFiles.length,
+                            onPageChanged: (i) => setState(() => _page = i),
+                            itemBuilder: (context, i) => FutureBuilder<Uint8List>(
+                              future: _displayFiles[i].readAsBytes(),
+                              builder: (context, snapshot) => snapshot.hasData
+                                  ? Image.memory(snapshot.data!, fit: BoxFit.cover)
+                                  : const Center(child: CircularProgressIndicator()),
+                            ),
+                          ),
+                        ),
+                        if (_displayFiles.length > 1)
+                          Positioned(
+                            top: 12,
+                            right: 12,
+                            child: _CountBadge(
+                              label: '${_page + 1}/${_displayFiles.length}',
+                            ),
+                          ),
+                        if (_reframing)
+                          const Positioned.fill(
+                            child: ColoredBox(
+                              color: Colors.black38,
+                              child: Center(
+                                child: CircularProgressIndicator(color: Colors.white),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                if (showFrameToggle) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _FrameModeChip(
+                        label: s.fill,
+                        selected: _mode == _FrameMode.fill,
+                        onTap: () => _setMode(_FrameMode.fill),
+                      ),
+                      const SizedBox(width: 12),
+                      _FrameModeChip(
+                        label: s.fit,
+                        selected: _mode == _FrameMode.fit,
+                        onTap: () => _setMode(_FrameMode.fit),
+                      ),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _captionController,
+                  decoration: InputDecoration(labelText: s.caption),
+                  maxLines: 3,
+                ),
               ],
-              selected: {_mode},
-              onSelectionChanged: (s) => setState(() => _mode = s.first),
             ),
-            const SizedBox(height: 16),
-            Expanded(
-              child: _mode == _ComposeMode.post ? _buildPostForm() : _buildStoryForm(),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: AppColors.brand),
+                onPressed: _submitting ? null : _submit,
+                child: _submitting
+                    ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator())
+                    : Text(s.publish),
+              ),
             ),
-            const SizedBox(height: 16),
-            FilledButton(
-              onPressed: _submitting ? null : _submit,
-              child: _submitting
-                  ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator())
-                  : Text(_mode == _ComposeMode.post ? 'Post' : 'Post story'),
-            ),
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CountBadge extends StatelessWidget {
+  const _CountBadge({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.overlayAlphaBlack,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Text(label, style: AppTypography.bodySmall.copyWith(color: AppColors.textOnPrimary)),
+    );
+  }
+}
+
+class _FrameModeChip extends StatelessWidget {
+  const _FrameModeChip({required this.label, required this.selected, required this.onTap});
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? AppColors.brand : AppColors.backgroundCard,
+      shape: const StadiumBorder(side: BorderSide(color: AppColors.borderDivider)),
+      child: InkWell(
+        customBorder: const StadiumBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          child: Text(
+            label,
+            style: AppTypography.buttonSmall
+                .copyWith(color: selected ? Colors.white : AppColors.textPrimary),
+          ),
         ),
       ),
     );
   }
+}
 
-  Widget _buildPostForm() {
-    return ListView(
-      children: [
-        SegmentedButton<String>(
-          segments: const [
-            ButtonSegment(value: 'image', label: Text('Image')),
-            ButtonSegment(value: 'carousel', label: Text('Carousel')),
-            ButtonSegment(value: 'reel', label: Text('Reel')),
-          ],
-          selected: {_postType},
-          onSelectionChanged: (s) => setState(() {
-            _postType = s.first;
-            _postFiles.clear();
-          }),
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
-          icon: const Icon(Icons.photo_library_outlined),
-          label: Text(_postFiles.isEmpty ? 'Pick media' : '${_postFiles.length} file(s) selected'),
-          onPressed: _pickForPost,
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _captionController,
-          decoration: const InputDecoration(labelText: 'Caption'),
-          maxLines: 3,
-        ),
-      ],
-    );
-  }
+class _ReelPreviewTile extends StatelessWidget {
+  const _ReelPreviewTile();
 
-  Widget _buildStoryForm() {
-    return ListView(
-      children: [
-        SegmentedButton<String>(
-          segments: const [
-            ButtonSegment(value: 'image', label: Text('Image')),
-            ButtonSegment(value: 'video', label: Text('Video')),
-          ],
-          selected: {_storyMediaType},
-          onSelectionChanged: (s) => setState(() {
-            _storyMediaType = s.first;
-            _storyFile = null;
-          }),
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
-          icon: const Icon(Icons.photo_library_outlined),
-          label: Text(_storyFile == null ? 'Pick media' : '1 file selected'),
-          onPressed: _pickForStory,
-        ),
-      ],
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 300,
+      decoration: BoxDecoration(
+        color: AppColors.backgroundPrimary,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      alignment: Alignment.center,
+      child: const Icon(Icons.movie_outlined, size: 48, color: AppColors.textMuted),
     );
   }
 }

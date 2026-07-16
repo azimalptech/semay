@@ -1,7 +1,15 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- The INTERNET permission is required for development. Specifically,
          the Flutter tool needs it to communicate with the running application
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- Debug builds talk to the local Firebase emulator suite over plain
+         HTTP (see main.dart), which Android 9+ blocks by default. Debug
+         manifest only — release builds keep the secure default. -->
+    <application
+        android:usesCleartextTraffic="true"
+        tools:targetApi="28" />
 </manifest>

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { adminDb } from "@/lib/firebaseAdmin";
+import { getTranslations } from "@/lib/l10n";
 import { CreateStoreForm } from "./_components/CreateStoreForm";
 
 interface StoreRow {
@@ -25,25 +26,26 @@ async function getStores(): Promise<StoreRow[]> {
 }
 
 export default async function StoresPage() {
+  const t = await getTranslations();
   const stores = await getStores();
 
   return (
     <div className="mx-auto max-w-3xl space-y-8">
       <div>
-        <h1 className="text-lg font-semibold text-gray-900">Stores</h1>
-        <p className="text-sm text-gray-500">Create stores and manage their admins.</p>
+        <h1 className="text-lg font-semibold text-gray-900">{t.storesTitle}</h1>
+        <p className="text-sm text-gray-500">{t.storesDesc}</p>
       </div>
 
-      <CreateStoreForm />
+      <CreateStoreForm t={t} />
 
       <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-gray-200 bg-gray-50 text-gray-500">
             <tr>
-              <th className="px-4 py-2 font-medium">Name</th>
-              <th className="px-4 py-2 font-medium">Phone</th>
-              <th className="px-4 py-2 font-medium">Admins</th>
-              <th className="px-4 py-2 font-medium">Status</th>
+              <th className="px-4 py-2 font-medium">{t.name}</th>
+              <th className="px-4 py-2 font-medium">{t.phone}</th>
+              <th className="px-4 py-2 font-medium">{t.admins}</th>
+              <th className="px-4 py-2 font-medium">{t.status}</th>
               <th className="px-4 py-2 font-medium"></th>
             </tr>
           </thead>
@@ -51,7 +53,7 @@ export default async function StoresPage() {
             {stores.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-4 py-6 text-center text-gray-400">
-                  No stores yet.
+                  {t.noStoresYet}
                 </td>
               </tr>
             )}
@@ -68,7 +70,7 @@ export default async function StoresPage() {
                         : "rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500"
                     }
                   >
-                    {store.active ? "active" : "inactive"}
+                    {store.active ? t.active : t.inactive}
                   </span>
                 </td>
                 <td className="px-4 py-2 text-right">
@@ -76,7 +78,7 @@ export default async function StoresPage() {
                     href={`/stores/${store.id}/admins`}
                     className="text-sm font-medium text-gray-700 underline hover:text-gray-900"
                   >
-                    Manage admins
+                    {t.manageAdmins}
                   </Link>
                 </td>
               </tr>

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/l10n.dart';
 import '../../services/chat_service.dart';
 import 'chat_providers.dart';
 
@@ -45,7 +46,7 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
       if (mounted) Navigator.of(context).pop();
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('Order accepted')));
+            .showSnackBar(SnackBar(content: Text(ref.read(l10nProvider).orderAccepted)));
       }
     } catch (e) {
       _showError('$e');
@@ -60,6 +61,7 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final s = ref.watch(l10nProvider);
     final customer = ref.watch(userDocProvider(widget.userId)).value;
     final userPhone = customer?['phone'] as String?;
 
@@ -74,11 +76,11 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Accept order', style: Theme.of(context).textTheme.titleMedium),
+          Text(s.acceptOrder, style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           Row(
             children: [
-              const Text('Quantity'),
+              Text(s.quantity),
               const Spacer(),
               IconButton(
                 icon: const Icon(Icons.remove),
@@ -93,7 +95,7 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
           ),
           Row(
             children: [
-              const Text('Phone'),
+              Text(s.phoneLabel),
               const Spacer(),
               Text(userPhone ?? '...', style: Theme.of(context).textTheme.bodyMedium),
             ],
@@ -103,7 +105,7 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
             onPressed: (_submitting || userPhone == null) ? null : () => _submit(userPhone),
             child: _submitting
                 ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator())
-                : const Text('kabul edildi'),
+                : Text(s.acceptOrder),
           ),
         ],
       ),

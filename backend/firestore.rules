@@ -23,11 +23,26 @@ service cloud.firestore {
 
     // users/{uid}
     match /users/{uid} {
-      allow read: if isSelf(uid) || isSuperAdmin();
+      // Any signed-in reader: store admins must see the customer's
+      // name/avatar in their chat list and the customer's phone in the
+      // accept-order sheet — isSelf-only reads left all of those
+      // permanently blank ('…' names, disabled "accept order" button).
+      allow read: if isSignedIn();
       allow write: if isSelf(uid) || isSuperAdmin();
 
       // users/{uid}/saved/{postId}
       match /saved/{postId} {
+        allow read, write: if isSelf(uid);
+      }
+
+      // users/{uid}/liked/{postId} — denormalized mirror of posts/*/likes/{uid},
+      // written in the same client batch as the like toggle.
+      match /liked/{postId} {
+        allow read, write: if isSelf(uid);
+      }
+
+      // users/{uid}/storySeen/{storeId} — story-ring seen state.
+      match /storySeen/{storeId} {
         allow read, write: if isSelf(uid);
       }
     }
@@ -37,6 +52,12 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow create: if isSuperAdmin();
       allow update, delete: if isSuperAdmin() || isStoreAdmin(storeId);
+
+      // stores/{storeId}/quickReplies/{replyId} — canned chat responses,
+      // managed and used only by that store's admins.
+      match /quickReplies/{replyId} {
+        allow read, write: if isStoreAdmin(storeId);
+      }
     }
 
     // posts/{postId}
@@ -48,28 +69,41 @@ service cloud.firestore {
         allow read: if isSignedIn();
         allow write: if isSelf(uid);
       }
-
-      match /comments/{commentId} {
-        allow read: if isSignedIn();
-        allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
-        allow update, delete: if isSignedIn()
-          && (resource.data.uid == request.auth.uid
-            || isStoreAdmin(get(/databases/$(database)/documents/posts/$(postId)).data.storeId));
-      }
     }
 
     // stories/{storyId}
     match /stories/{storyId} {
       allow read: if isSignedIn();
       allow create, update, delete: if isStoreAdmin(resource == null ? request.resource.data.storeId : resource.data.storeId);
+
+      // stories/{storyId}/views/{uid} — unique-viewer records ("seen by N").
+      // Anyone signed-in may record their own view; listing (counting) them
+      // is for that story's own store admins.
+      match /views/{uid} {
+        allow write: if isSelf(uid);
+        allow read: if isStoreAdmin(get(/databases/$(database)/documents/stories/$(storyId)).data.storeId);
+      }
     }
 
     // chats/{chatId}
     match /chats/{chatId} {
-      allow read, write: if isSignedIn()
+      // request.resource is only populated on writes (create/update) — a plain
+      // read of a chat that doesn't exist yet (createOrGetChat's existence
+      // check, before the first message is ever sent) has no request.resource
+      // to inspect, so evaluating it during a read errors out and silently
+      // denies the read. resource == null is allowed outright for reads: there
+      // is no data to protect on a document that doesn't exist.
+      allow read: if isSignedIn()
         && (resource == null
-          ? (request.resource.data.userId == request.auth.uid || isStoreAdmin(request.resource.data.storeId))
-          : (resource.data.userId == request.auth.uid || isStoreAdmin(resource.data.storeId)));
+          || resource.data.userId == request.auth.uid
+          || isStoreAdmin(resource.data.storeId));
+
+      allow create: if isSignedIn()
+        && (request.resource.data.userId == request.auth.uid
+          || isStoreAdmin(request.resource.data.storeId));
+
+      allow update: if isSignedIn()
+        && (resource.data.userId == request.auth.uid || isStoreAdmin(resource.data.storeId));
 
       match /messages/{messageId} {
         allow read: if isSignedIn()

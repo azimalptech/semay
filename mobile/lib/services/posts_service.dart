@@ -1,9 +1,9 @@
-import 'dart:io';
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
 import 'auth_service.dart';
@@ -19,36 +19,40 @@ class PostsService {
 
   static const _maxVideoBytes = 100 * 1024 * 1024;
 
+  /// XFile + putData (not dart:io File) so publishing works on web too.
   Future<void> createPost({
     required String storeId,
     required String type, // "image" | "carousel" | "reel"
-    required List<File> files,
+    required List<XFile> files,
     required String caption,
   }) async {
-    if (type == 'reel' && await files.first.length() > _maxVideoBytes) {
-      throw Exception('Video must be under 100MB');
-    }
-
     final postRef = _firestore.collection('posts').doc();
     final basePath = 'stores/$storeId/posts/${postRef.id}';
 
     final mediaUrls = <String>[];
     for (var i = 0; i < files.length; i++) {
+      final bytes = await files[i].readAsBytes();
+      if (type == 'reel' && bytes.length > _maxVideoBytes) {
+        throw Exception('Video must be under 100MB');
+      }
       final ext = type == 'reel' ? 'mp4' : 'jpg';
+      final contentType = type == 'reel' ? 'video/mp4' : 'image/jpeg';
       final ref = _storage.ref('$basePath/media_$i.$ext');
-      await ref.putFile(files[i]);
+      await ref.putData(bytes, SettableMetadata(contentType: contentType));
       mediaUrls.add(await ref.getDownloadURL());
     }
 
+    // video_thumbnail has no web implementation — reels published from a
+    // browser get an empty thumbnailUrl and grids fall back to the video URL.
     String thumbnailUrl = '';
-    if (type == 'reel') {
-      final thumbPath = await VideoThumbnail.thumbnailFile(
+    if (type == 'reel' && !kIsWeb) {
+      final thumbBytes = await VideoThumbnail.thumbnailData(
         video: files.first.path,
         imageFormat: ImageFormat.JPEG,
       );
-      if (thumbPath != null) {
+      if (thumbBytes != null) {
         final thumbRef = _storage.ref('$basePath/thumbnail.jpg');
-        await thumbRef.putFile(File(thumbPath));
+        await thumbRef.putData(thumbBytes, SettableMetadata(contentType: 'image/jpeg'));
         thumbnailUrl = await thumbRef.getDownloadURL();
       }
     }
@@ -60,7 +64,6 @@ class PostsService {
       'thumbnailUrl': thumbnailUrl,
       'caption': caption,
       'likesCount': 0,
-      'commentsCount': 0,
       'savesCount': 0,
       'createdAt': FieldValue.serverTimestamp(),
     });
@@ -70,31 +73,26 @@ class PostsService {
     await _firestore.collection('posts').doc(postId).delete();
   }
 
+  /// Instagram scopes post editing to the caption only — the media stays as
+  /// uploaded, no re-crop/replace after publish.
+  Future<void> updateCaption(String postId, String caption) async {
+    await _firestore.collection('posts').doc(postId).update({'caption': caption});
+  }
+
   Future<void> toggleLike(String postId) async {
     final uid = _auth.currentUser!.uid;
     final likeRef = _firestore.collection('posts').doc(postId).collection('likes').doc(uid);
+    final likedRef = _firestore.collection('users').doc(uid).collection('liked').doc(postId);
     final snap = await likeRef.get();
+    final batch = _firestore.batch();
     if (snap.exists) {
-      await likeRef.delete();
+      batch.delete(likeRef);
+      batch.delete(likedRef);
     } else {
-      await likeRef.set({'createdAt': FieldValue.serverTimestamp()});
+      batch.set(likeRef, {'createdAt': FieldValue.serverTimestamp()});
+      batch.set(likedRef, {'createdAt': FieldValue.serverTimestamp()});
     }
-  }
-
-  Future<void> addComment(String postId, String text) async {
-    final user = _auth.currentUser!;
-    await _firestore.collection('posts').doc(postId).collection('comments').add({
-      'uid': user.uid,
-      'userName': user.displayName ?? '',
-      'text': text,
-      'createdAt': FieldValue.serverTimestamp(),
-    });
-  }
-
-  /// Shared path for both self-delete and store-admin moderation delete —
-  /// firestore.rules decides who's allowed, this call is identical either way.
-  Future<void> deleteComment(String postId, String commentId) async {
-    await _firestore.collection('posts').doc(postId).collection('comments').doc(commentId).delete();
+    await batch.commit();
   }
 
   Future<void> toggleSave(String postId) async {

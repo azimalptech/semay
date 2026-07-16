@@ -92,10 +92,18 @@ features:
 3. **Comment moderation** — can Store Admins delete/hide comments on their own posts?
 4. **Store categories** — is every store the same "type" (like the SeMay beauty example in the design),
    or do stores have a category/niche field used for filtering?
-5. **Localization** — single language for launch, or multi-language (a "Profile Language" screen exists
-   elsewhere in the Figma file, just outside the sections you scoped to me)?
+5. **Localization** — a "Language" selector (Turkmen/Russian) is confirmed present in the Settings screen
+   Figma frames. Implemented so far: the selector UI + a `users/{uid}.language` field to persist the
+   choice (see `02_DATA_MODEL.md`) — **no actual translated strings are wired up yet**, the app is still
+   English-only regardless of the selection. Full i18n (extracting every UI string, translating to
+   Turkmen + Russian, wiring `intl`/ARB files) is a separate, much larger task — confirm priority before
+   it's picked up.
 6. **Push notifications** — assumed default: new message, order-related updates, likes/comments on your
    own post. Confirm scope or trim it.
+7. **Quick Replies** — canned chat responses (Store Admin composes once, reuses per chat) discovered in
+   the Settings screen Figma frames — not in the original screen inventory. Data model added
+   (`stores/{storeId}/quickReplies`), CRUD screen built. Not yet wired into the chat composer itself
+   (tapping a quick reply to insert it into an outgoing message) — flag if that's wanted now vs. later.
 
 (Order status workflow — previously open item #4 — is resolved: there is no workflow, `status` is
 always `'accepted'`, Super Admin is read-only. See §5.)

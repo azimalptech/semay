@@ -1,8 +1,14 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
+
+/// Store name/avatar for a post's header row — cached per storeId.
+final storeSummaryProvider = FutureProvider.family<Map<String, dynamic>?, String>((ref, storeId) async {
+  if (storeId.isEmpty) return null;
+  final snap = await ref.watch(firestoreProvider).collection('stores').doc(storeId).get();
+  return snap.data();
+});
 
 final postDocProvider = StreamProvider.family<Map<String, dynamic>?, String>((ref, postId) {
   return ref
@@ -41,15 +47,3 @@ final isSavedProvider = StreamProvider.family<bool, String>((ref, postId) {
       .map((snap) => snap.exists);
 });
 
-final commentsProvider =
-    StreamProvider.family<List<QueryDocumentSnapshot<Map<String, dynamic>>>, String>((ref, postId) {
-  return ref
-      .watch(firestoreProvider)
-      .collection('posts')
-      .doc(postId)
-      .collection('comments')
-      .orderBy('createdAt')
-      .limit(200)
-      .snapshots()
-      .map((snap) => snap.docs);
-});

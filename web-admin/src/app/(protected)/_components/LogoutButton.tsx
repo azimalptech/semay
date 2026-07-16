@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
 import { clientAuth } from "@/lib/firebaseClient";
 
-export function LogoutButton() {
+export function LogoutButton({ label }: { label: string }) {
   const router = useRouter();
 
   async function handleLogout() {
@@ -19,7 +19,7 @@ export function LogoutButton() {
       onClick={handleLogout}
       className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
     >
-      Log out
+      {label}
     </button>
   );
 }

@@ -4,8 +4,17 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { httpsCallable } from "firebase/functions";
 import { clientFunctions } from "@/lib/firebaseClient";
+import type { Dict } from "@/lib/l10n";
 
-export function RevokeAdminButton({ storeId, userId }: { storeId: string; userId: string }) {
+export function RevokeAdminButton({
+  storeId,
+  userId,
+  t,
+}: {
+  storeId: string;
+  userId: string;
+  t: Dict;
+}) {
   const router = useRouter();
   const [revoking, setRevoking] = useState(false);
 
@@ -26,7 +35,7 @@ export function RevokeAdminButton({ storeId, userId }: { storeId: string; userId
       disabled={revoking}
       className="text-sm font-medium text-red-600 underline hover:text-red-700 disabled:opacity-50"
     >
-      {revoking ? "Revoking..." : "Revoke"}
+      {revoking ? t.revoking : t.revoke}
     </button>
   );
 }

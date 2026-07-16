@@ -17,6 +17,19 @@ class AppColors {
   static const Color textMuted = Color(0xFF9B9B9B);
   static const Color textOnPrimary = Colors.white;
   static const Color error = Color(0xFFF44F3E);
+
+  /// Story-ring accent (Homepage story bar) — distinct from `brand`.
+  static const Color storyRing = Color(0xFFFF08ED);
+  static const Color overlayAlphaBlack = Color(0x66000000);
+
+  /// "Brand Graadient Story" (sic — Figma style name): sweep used for the
+  /// unseen story ring; seen rings fall back to [buttonMuted].
+  static const List<Color> storyGradient = [
+    Color(0xFF934D8E),
+    Color(0xFFFF08ED),
+    Color(0xFFFFA0F5),
+    Color(0xFF934D8E),
+  ];
 }
 
 class AppTypography {

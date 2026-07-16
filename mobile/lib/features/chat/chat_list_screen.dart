@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
+import '../shared/widgets/error_state_view.dart';
 import '../store_profile/store_profile_providers.dart';
 import 'chat_providers.dart';
 
@@ -18,7 +20,7 @@ class ChatListScreen extends ConsumerWidget {
     final isAdmin = role == AppRole.admin || role == AppRole.superadmin;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Chat')),
+      appBar: AppBar(title: Text(ref.watch(l10nProvider).chat)),
       body: isAdmin ? const _AdminChatList() : const _UserChatList(),
     );
   }
@@ -32,7 +34,9 @@ class _UserChatList extends ConsumerWidget {
     final chatsAsync = ref.watch(userChatsProvider);
     return chatsAsync.when(
       data: (chats) {
-        if (chats.isEmpty) return const Center(child: Text('No conversations yet'));
+        if (chats.isEmpty) {
+          return Center(child: Text(ref.watch(l10nProvider).noConversationsYet));
+        }
         return ListView.builder(
           padding: const EdgeInsets.symmetric(vertical: 16),
           itemCount: chats.length,
@@ -51,7 +55,8 @@ class _UserChatList extends ConsumerWidget {
         );
       },
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (error, stack) => Center(child: Text('Error: $error')),
+      error: (error, stack) =>
+          ErrorStateView(onRetry: () => ref.invalidate(userChatsProvider)),
     );
   }
 }
@@ -64,7 +69,9 @@ class _AdminChatList extends ConsumerWidget {
     final chatsAsync = ref.watch(adminChatsProvider);
     return chatsAsync.when(
       data: (chats) {
-        if (chats.isEmpty) return const Center(child: Text('No conversations yet'));
+        if (chats.isEmpty) {
+          return Center(child: Text(ref.watch(l10nProvider).noConversationsYet));
+        }
         return ListView.builder(
           padding: const EdgeInsets.symmetric(vertical: 16),
           itemCount: chats.length,
@@ -83,7 +90,8 @@ class _AdminChatList extends ConsumerWidget {
         );
       },
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (error, stack) => Center(child: Text('Error: $error')),
+      error: (error, stack) =>
+          ErrorStateView(onRetry: () => ref.invalidate(adminChatsProvider)),
     );
   }
 }

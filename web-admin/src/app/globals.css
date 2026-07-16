@@ -12,12 +12,12 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+/* Every page/component here is built with explicit light-mode Tailwind
+   classes (bg-white, text-gray-900, etc.) with no dark: variants — the
+   default Next.js dark-mode media query was left in from scaffolding and
+   caused inputs/buttons with no explicit text color to inherit near-white
+   text on white backgrounds. Force light unconditionally instead of
+   auditing every element for a dark mode that was never designed. */
 
 body {
   background: var(--background);

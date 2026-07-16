@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/l10n.dart';
 import '../../services/auth_service.dart';
 
 class OtpScreen extends ConsumerStatefulWidget {
@@ -45,12 +46,13 @@ class _OtpScreenState extends ConsumerState<OtpScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final s = ref.watch(l10nProvider);
     if (widget.phone.isEmpty) {
       return Scaffold(
         body: Center(
           child: TextButton(
             onPressed: () => context.go('/auth/phone'),
-            child: const Text('Missing phone number — go back'),
+            child: Text(s.missingPhoneGoBack),
           ),
         ),
       );
@@ -64,7 +66,7 @@ class _OtpScreenState extends ConsumerState<OtpScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('Enter the code sent to ${widget.phone}', style: const TextStyle(fontSize: 20)),
+              Text(s.codeSentTo(widget.phone), style: const TextStyle(fontSize: 20)),
               const SizedBox(height: 16),
               TextField(
                 controller: _codeController,
@@ -84,7 +86,7 @@ class _OtpScreenState extends ConsumerState<OtpScreen> {
                         width: 16,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('Verify'),
+                    : Text(s.verify),
               ),
             ],
           ),

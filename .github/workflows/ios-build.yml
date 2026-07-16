@@ -1,0 +1,41 @@
+# Builds an UNSIGNED iOS .ipa on GitHub's macOS runners — iOS can only be
+# compiled on macOS, so from a Windows dev machine this cloud build is the
+# way to get an iOS binary. Trigger it manually from the GitHub Actions tab
+# (workflow_dispatch), then download the artifact from the run page.
+#
+# NOTE: the artifact is unsigned. To put it on an iPhone you still need
+# Apple-side signing: either an Apple Developer account (TestFlight / ad-hoc)
+# or a sideloading tool like AltStore/Sideloadly with a free Apple ID.
+name: iOS build (unsigned)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -qr semay-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: semay-ios-unsigned
+          path: mobile/semay-unsigned.ipa

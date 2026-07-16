@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/l10n.dart';
 import '../../services/auth_service.dart';
 
 class NameEntryScreen extends ConsumerStatefulWidget {
@@ -42,6 +43,7 @@ class _NameEntryScreenState extends ConsumerState<NameEntryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final s = ref.watch(l10nProvider);
     return Scaffold(
       body: Center(
         child: Padding(
@@ -50,11 +52,11 @@ class _NameEntryScreenState extends ConsumerState<NameEntryScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text('What should we call you?', style: TextStyle(fontSize: 20)),
+              Text(s.whatsYourName, style: const TextStyle(fontSize: 20)),
               const SizedBox(height: 16),
               TextField(
                 controller: _nameController,
-                decoration: const InputDecoration(hintText: 'Your name'),
+                decoration: InputDecoration(hintText: s.yourName),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 12),
@@ -69,7 +71,7 @@ class _NameEntryScreenState extends ConsumerState<NameEntryScreen> {
                         width: 16,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('Continue'),
+                    : Text(s.continueLabel),
               ),
             ],
           ),

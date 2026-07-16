@@ -43,6 +43,12 @@ approval step, no status transitions). There is no `updateOrderStatus`.
   thread shows "Order accepted ✅" inline).
 - Triggers a notification to Super Admin (see below).
 
+## Client-written (no Cloud Function — direct Firestore write, rules-gated)
+### "Send to chat" (share a post into an existing conversation)
+- Not a callable — the client writes directly into `chats/{chatId}/messages` with `sharedPostId` set
+  (see `02_DATA_MODEL.md`), same as any other message. No dedicated function; `onMessageCreated`
+  (below) fires for it like any message.
+
 ## Background triggers (no client call — fire automatically)
 - **`onOrderCreated`** (Firestore trigger on `orders` create) → sends FCM push to all Super Admin
   accounts.
@@ -50,8 +56,7 @@ approval step, no status transitions). There is no `updateOrderStatus`.
   participant (user or that store's admins).
 - **`onPostCreated` / `onPostDeleted`** (trigger on `posts`) → increments/decrements
   `stores/{storeId}.postsCount` or `reelsCount` depending on `type`.
-- **`onLikeWrite` / `onCommentCreated` / `onSavedWrite`** → keep `posts.likesCount` /
-  `commentsCount` / `savesCount` in sync.
+- **`onLikeWrite` / `onSavedWrite`** → keep `posts.likesCount` / `savesCount` in sync.
 - **`cleanupExpiredOtps`** (scheduled, daily) → deletes stale `otp_codes` docs.
 - **`expireStories`** (scheduled, hourly) — only if you confirm 24h expiry — deletes/hides stories past
   `expiresAt`.

@@ -19,20 +19,31 @@ class DefaultFirebaseOptions {
     }
   }
 
+  // Demo values matching the emulator suite's `--project demo-semay` — only
+  // valid against the local emulator (see main.dart), never a real project.
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'REPLACE_ME',
-    appId: 'REPLACE_ME',
-    messagingSenderId: 'REPLACE_ME',
-    projectId: 'REPLACE_ME',
-    storageBucket: 'REPLACE_ME',
+    // Must match ^AIza[0-9A-Za-z_-]{35}$ — like the appId below, the native
+    // SDK (Firebase Installations) format-checks it before ANY server call,
+    // including Cloud Functions callables pointed at the local emulator
+    // ("Please set a valid API key" killed acceptOrder/sendOtp otherwise).
+    apiKey: 'AIzaSyDemoKeyForEmulatorTesting12345678',
+    // Must match ^1:\d+:android:[0-9a-f]+$ — the native SDK (Firebase
+    // Installations) rejects non-hex suffixes at runtime even against the
+    // emulator ("Please set your Application ID").
+    appId: '1:12345678901:android:1234567890abcdef1234',
+    messagingSenderId: 'demo-sender-id',
+    projectId: 'demo-semay',
+    storageBucket: 'demo-semay.appspot.com',
   );
 
+  // Same demo-emulator values as Android (see the format notes there) so an
+  // iOS build at least boots; run `flutterfire configure` before shipping.
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'REPLACE_ME',
-    appId: 'REPLACE_ME',
-    messagingSenderId: 'REPLACE_ME',
-    projectId: 'REPLACE_ME',
-    storageBucket: 'REPLACE_ME',
+    apiKey: 'AIzaSyDemoKeyForEmulatorTesting12345678',
+    appId: '1:12345678901:ios:1234567890abcdef1234',
+    messagingSenderId: 'demo-sender-id',
+    projectId: 'demo-semay',
+    storageBucket: 'demo-semay.appspot.com',
     iosBundleId: 'com.semay.app',
   );
 

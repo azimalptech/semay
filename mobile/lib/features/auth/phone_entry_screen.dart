@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/l10n.dart';
 import '../../services/auth_service.dart';
 
 class PhoneEntryScreen extends ConsumerStatefulWidget {
@@ -31,8 +32,11 @@ class _PhoneEntryScreenState extends ConsumerState<PhoneEntryScreen> {
       _error = null;
     });
     try {
+      // Dev mode: skip OTP screen, go straight to verification
       await ref.read(authServiceProvider).sendOtp(phone);
-      if (mounted) context.push('/auth/otp', extra: phone);
+      await ref.read(authServiceProvider).verifyOtp(phone, 'dev');
+      // Router will redirect to /auth/name or home based on auth state
+      if (mounted) context.go('/');
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -42,20 +46,21 @@ class _PhoneEntryScreenState extends ConsumerState<PhoneEntryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final s = ref.watch(l10nProvider);
     return Scaffold(
       body: Center(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text('Enter your phone number', style: TextStyle(fontSize: 20)),
+              Text(s.enterPhone, style: const TextStyle(fontSize: 20)),
               const SizedBox(height: 16),
               TextField(
                 controller: _phoneController,
                 keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(hintText: '+1 555 000 0000'),
+                decoration: const InputDecoration(hintText: '+993 6X XXXXXX'),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 12),
@@ -70,7 +75,7 @@ class _PhoneEntryScreenState extends ConsumerState<PhoneEntryScreen> {
                         width: 16,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('Send code'),
+                    : Text(s.sendCode),
               ),
             ],
           ),

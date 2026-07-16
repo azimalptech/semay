@@ -6,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'auth_service.dart';
 import 'firestore_service.dart';
 
+final functionsProvider = Provider<FirebaseFunctions>((ref) => FirebaseFunctions.instance);
+
 class ChatService {
   ChatService(this._firestore, this._functions, this._auth);
 
@@ -37,14 +39,23 @@ class ChatService {
   /// Writes only the message doc — denormalized chat-doc fields
   /// (lastMessageText/lastMessageAt/unread counters) are the
   /// onMessageCreated trigger's job, same philosophy as postsCount.
-  Future<void> sendMessage(String chatId, String text, {required String senderRole}) async {
+  Future<void> sendMessage(
+    String chatId,
+    String text, {
+    required String senderRole,
+    String? sharedPostId,
+    String? sharedStoryId,
+    String? mediaUrl,
+  }) async {
     final uid = _auth.currentUser!.uid;
     await _firestore.collection('chats').doc(chatId).collection('messages').add({
       'senderId': uid,
       'senderRole': senderRole,
       'text': text,
-      'mediaUrl': null,
+      'mediaUrl': mediaUrl,
       'orderId': null,
+      'sharedPostId': sharedPostId,
+      'sharedStoryId': sharedStoryId,
       'createdAt': FieldValue.serverTimestamp(),
     });
   }
@@ -52,6 +63,16 @@ class ChatService {
   Future<void> markThreadRead(String chatId, {required bool asAdmin}) async {
     await _firestore.collection('chats').doc(chatId).update({
       asAdmin ? 'unreadByAdmin' : 'unreadByUser': 0,
+    });
+  }
+
+  /// Heartbeat while composing — the other side shows "typing…" while the
+  /// timestamp is fresh (staleness handles abandoned drafts, so there is no
+  /// explicit "stopped typing" write besides clearing on send).
+  Future<void> setTyping(String chatId, {required bool asAdmin, required bool isTyping}) async {
+    await _firestore.collection('chats').doc(chatId).update({
+      asAdmin ? 'typingAdminAt' : 'typingUserAt':
+          isTyping ? FieldValue.serverTimestamp() : null,
     });
   }
 

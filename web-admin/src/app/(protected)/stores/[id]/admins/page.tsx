@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { adminDb } from "@/lib/firebaseAdmin";
+import { getTranslations } from "@/lib/l10n";
 import { PromoteAdminForm } from "./_components/PromoteAdminForm";
 import { RevokeAdminButton } from "./_components/RevokeAdminButton";
 
@@ -15,6 +16,7 @@ export default async function StoreAdminsPage({
   params: Promise<{ id: string }>;
 }) {
   const { id: storeId } = await params;
+  const t = await getTranslations();
 
   const storeSnap = await adminDb.collection("stores").doc(storeId).get();
   if (!storeSnap.exists) notFound();
@@ -35,18 +37,18 @@ export default async function StoreAdminsPage({
   return (
     <div className="mx-auto max-w-2xl space-y-8">
       <div>
-        <h1 className="text-lg font-semibold text-gray-900">{store.name} — Admins</h1>
-        <p className="text-sm text-gray-500">Promote or revoke store-admin access.</p>
+        <h1 className="text-lg font-semibold text-gray-900">{t.storeAdminsTitle(store.name)}</h1>
+        <p className="text-sm text-gray-500">{t.storeAdminsDesc}</p>
       </div>
 
-      <PromoteAdminForm storeId={storeId} />
+      <PromoteAdminForm storeId={storeId} t={t} />
 
       <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-gray-200 bg-gray-50 text-gray-500">
             <tr>
-              <th className="px-4 py-2 font-medium">Name</th>
-              <th className="px-4 py-2 font-medium">Phone</th>
+              <th className="px-4 py-2 font-medium">{t.name}</th>
+              <th className="px-4 py-2 font-medium">{t.phone}</th>
               <th className="px-4 py-2 font-medium"></th>
             </tr>
           </thead>
@@ -54,7 +56,7 @@ export default async function StoreAdminsPage({
             {admins.length === 0 && (
               <tr>
                 <td colSpan={3} className="px-4 py-6 text-center text-gray-400">
-                  No admins yet.
+                  {t.noAdminsYet}
                 </td>
               </tr>
             )}
@@ -63,7 +65,7 @@ export default async function StoreAdminsPage({
                 <td className="px-4 py-2 text-gray-900">{admin.name}</td>
                 <td className="px-4 py-2 text-gray-500">{admin.phone}</td>
                 <td className="px-4 py-2 text-right">
-                  <RevokeAdminButton storeId={storeId} userId={admin.uid} />
+                  <RevokeAdminButton storeId={storeId} userId={admin.uid} t={t} />
                 </td>
               </tr>
             ))}

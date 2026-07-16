@@ -7,7 +7,8 @@ const OTP_TTL_MS = 5 * 60 * 1000;
 const RESEND_COOLDOWN_MS = 60 * 1000;
 
 function generateCode(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  // TODO: remove this test code before production. For local dev/testing only.
+  return "123456";
 }
 
 interface SendOtpRequest {

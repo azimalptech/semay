@@ -24,6 +24,20 @@ const PLAIN_USER_NAME = "Aylar";
 
 const STORE_ID = "seed-store-lady-shop";
 
+// Store-admin test account, pre-provisioned with custom claims already set
+// (mobile/lib/services/auth_service.dart's dev OTP-bypass signs in with
+// email/password, which — unlike the real verifyOtp Cloud Function — never
+// calls the Admin SDK, so it can never mint role/storeIds custom claims on
+// its own. Logging in with this phone number in the app hits this
+// already-provisioned account instead of creating a fresh claim-less one.)
+const STORE_ADMIN_UID = "seed-store-admin-uid";
+const STORE_ADMIN_PHONE = "+99365555555";
+const STORE_ADMIN_NAME = "Store Admin";
+// Must match the digits + "@dev.semay.local" convention and fixed password
+// in auth_service.dart's _devEmailFor()/verifyOtp().
+const STORE_ADMIN_EMAIL = "99365555555@dev.semay.local";
+const DEV_BYPASS_PASSWORD = "dev-testing-password-123";
+
 function dayTimestamp(daysAgo: number, hour: number): Timestamp {
   const d = new Date();
   d.setDate(d.getDate() - daysAgo);
@@ -55,6 +69,11 @@ async function main() {
     { phoneNumber: PLAIN_USER_PHONE },
     { role: "user", storeIds: [] }
   );
+  await ensureAuthUser(
+    STORE_ADMIN_UID,
+    { email: STORE_ADMIN_EMAIL, password: DEV_BYPASS_PASSWORD },
+    { role: "admin", storeIds: [STORE_ID] }
+  );
 
   await db.collection("users").doc(SUPERADMIN_UID).set({
     name: "Super Admin",
@@ -76,6 +95,16 @@ async function main() {
     createdAt: FieldValue.serverTimestamp(),
   });
 
+  await db.collection("users").doc(STORE_ADMIN_UID).set({
+    name: STORE_ADMIN_NAME,
+    avatarUrl: "",
+    phone: STORE_ADMIN_PHONE,
+    role: "admin",
+    storeIds: [STORE_ID],
+    fcmTokens: [],
+    createdAt: FieldValue.serverTimestamp(),
+  });
+
   const storeSnap = await db.collection("stores").doc(STORE_ID).get();
   if (!storeSnap.exists) {
     await db.collection("stores").doc(STORE_ID).set({
@@ -86,7 +115,7 @@ async function main() {
       phone: "+99362123456",
       address: "Ashgabat, Bitaraplyk shayoly 142-nji jayy",
       geopoint: null,
-      adminIds: [],
+      adminIds: [STORE_ADMIN_UID],
       postsCount: 0,
       reelsCount: 0,
       createdBy: SUPERADMIN_UID,
@@ -117,6 +146,7 @@ async function main() {
   console.log("Seed complete.");
   console.log(`Super Admin login → email: ${SUPERADMIN_EMAIL}  password: ${SUPERADMIN_PASSWORD}`);
   console.log(`Plain user phone (for the promote-admin lookup) → ${PLAIN_USER_PHONE}`);
+  console.log(`Store-admin phone (already has admin claims on "${STORE_ID}") → ${STORE_ADMIN_PHONE}`);
 }
 
 main()
