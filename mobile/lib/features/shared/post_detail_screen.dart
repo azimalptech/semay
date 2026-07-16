@@ -46,7 +46,10 @@ class PostDetailScreen extends ConsumerWidget {
             ),
           );
         }
-        return _ImagePostDetail(postId: postId, post: post);
+        return Scaffold(
+          appBar: AppBar(title: Text(s.post)),
+          body: ListView(children: [ImagePostDetailContent(postId: postId, post: post)]),
+        );
       },
       loading: () => Scaffold(
         appBar: AppBar(title: Text(s.post)),
@@ -60,8 +63,11 @@ class PostDetailScreen extends ConsumerWidget {
   }
 }
 
-class _ImagePostDetail extends ConsumerWidget {
-  const _ImagePostDetail({required this.postId, required this.post});
+/// Media + actions + caption for one image/carousel post — no Scaffold/AppBar
+/// of its own, so it can sit either as PostDetailScreen's whole body or as
+/// one page of StorePostsPagerScreen's vertical swipe-through-the-grid pager.
+class ImagePostDetailContent extends ConsumerWidget {
+  const ImagePostDetailContent({super.key, required this.postId, required this.post});
 
   final String postId;
   final Map<String, dynamic> post;
@@ -81,83 +87,84 @@ class _ImagePostDetail extends ConsumerWidget {
     final isOwner =
         (role == AppRole.admin || role == AppRole.superadmin) && storeIds.contains(storeId);
 
-    return Scaffold(
-      appBar: AppBar(title: Text(s.post)),
-      body: ListView(
-        children: [
-          DoubleTapLikeOverlay(
-            isLiked: isLiked,
-            onLike: () => ref.read(postsServiceProvider).toggleLike(postId),
-            child: AspectRatio(
-              aspectRatio: 1,
-              child: PageView(
-                children: [
-                  for (final url in mediaUrls) CachedNetworkImage(imageUrl: url, fit: BoxFit.cover),
-                ],
-              ),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        DoubleTapLikeOverlay(
+          isLiked: isLiked,
+          onLike: () => ref.read(postsServiceProvider).toggleLike(postId),
+          child: AspectRatio(
+            aspectRatio: 1,
+            child: PageView(
+              children: [
+                for (final url in mediaUrls) CachedNetworkImage(imageUrl: url, fit: BoxFit.cover),
+              ],
             ),
           ),
-          Row(
-            children: [
-              IconButton(
-                icon: Icon(isLiked ? Icons.favorite : Icons.favorite_border,
-                    color: isLiked ? Colors.red : null),
-                onPressed: () => ref.read(postsServiceProvider).toggleLike(postId),
+        ),
+        Row(
+          children: [
+            IconButton(
+              icon: Icon(isLiked ? Icons.favorite : Icons.favorite_border,
+                  color: isLiked ? Colors.red : null),
+              onPressed: () => ref.read(postsServiceProvider).toggleLike(postId),
+            ),
+            Text('$likesCount'),
+            IconButton(
+              icon: const Icon(Icons.send_outlined),
+              onPressed: () => showSendToChatSheet(
+                context,
+                ref,
+                postId: postId,
+                postStoreId: storeId,
+                postCaption: caption,
+                postMediaUrl: mediaUrls.isNotEmpty ? mediaUrls.first : '',
               ),
-              Text('$likesCount'),
+            ),
+            IconButton(
+              icon: const Icon(Icons.share_outlined),
+              onPressed: () =>
+                  SharePlus.instance.share(ShareParams(uri: Uri.parse('semay://post/$postId'))),
+            ),
+            const Spacer(),
+            IconButton(
+              icon: Icon(isSaved ? Icons.bookmark : Icons.bookmark_border),
+              onPressed: () => ref.read(postsServiceProvider).toggleSave(postId),
+            ),
+            if (isOwner)
               IconButton(
-                icon: const Icon(Icons.send_outlined),
-                onPressed: () => showSendToChatSheet(
+                icon: const Icon(Icons.edit_outlined),
+                onPressed: () => showEditCaptionDialog(
                   context,
                   ref,
                   postId: postId,
-                  postStoreId: storeId,
-                  postCaption: caption,
-                  postMediaUrl: mediaUrls.isNotEmpty ? mediaUrls.first : '',
+                  currentCaption: caption,
                 ),
               ),
+            if (isOwner)
               IconButton(
-                icon: const Icon(Icons.share_outlined),
-                onPressed: () => SharePlus.instance
-                    .share(ShareParams(uri: Uri.parse('semay://post/$postId'))),
-              ),
-              const Spacer(),
-              IconButton(
-                icon: Icon(isSaved ? Icons.bookmark : Icons.bookmark_border),
-                onPressed: () => ref.read(postsServiceProvider).toggleSave(postId),
-              ),
-              if (isOwner)
-                IconButton(
-                  icon: const Icon(Icons.edit_outlined),
-                  onPressed: () => showEditCaptionDialog(
+                icon: const Icon(Icons.delete_outline, color: AppColors.error),
+                onPressed: () async {
+                  final confirmed = await confirmDelete(
                     context,
                     ref,
-                    postId: postId,
-                    currentCaption: caption,
-                  ),
-                ),
-              if (isOwner)
-                IconButton(
-                  icon: const Icon(Icons.delete_outline, color: AppColors.error),
-                  onPressed: () async {
-                    final confirmed = await confirmDelete(
-                      context,
-                      ref,
-                      title: s.deletePostTitle,
-                      body: s.deletePostBody,
-                    );
-                    if (!confirmed) return;
-                    await ref.read(postsServiceProvider).deletePost(postId);
-                    if (context.mounted) Navigator.of(context).pop();
-                  },
-                ),
-            ],
+                    title: s.deletePostTitle,
+                    body: s.deletePostBody,
+                  );
+                  if (!confirmed) return;
+                  await ref.read(postsServiceProvider).deletePost(postId);
+                  if (context.mounted) Navigator.of(context).pop();
+                },
+              ),
+          ],
+        ),
+        if (caption.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Align(alignment: Alignment.centerLeft, child: Text(caption)),
           ),
-          if (caption.isNotEmpty)
-            Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Text(caption)),
-          const SizedBox(height: 24),
-        ],
-      ),
+        const SizedBox(height: 24),
+      ],
     );
   }
 }

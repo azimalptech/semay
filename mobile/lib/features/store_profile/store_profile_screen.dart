@@ -12,6 +12,7 @@ import '../../services/chat_service.dart';
 import '../post_composer/add_content_sheet.dart';
 import '../shared/widgets/error_state_view.dart';
 import '../shared/widgets/posts_grid_view.dart';
+import 'store_posts_pager_screen.dart';
 import 'store_profile_providers.dart';
 
 /// Store Detail: header (avatar, tagline, phone, address, actions) +
@@ -243,7 +244,13 @@ class _PostsTab extends ConsumerWidget {
         posts: posts,
         hasMore: ref.read(storePostsProvider(storeId).notifier).hasMore,
         onLoadMore: () => ref.read(storePostsProvider(storeId).notifier).loadMore(),
-        onTap: (postId) => context.push('/post/$postId'),
+        onTap: (postId) => Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (context) => StorePostsPagerScreen(
+            storeId: storeId,
+            initialPostId: postId,
+            reelsOnly: false,
+          ),
+        )),
         onRefresh: () async => ref.invalidate(storePostsProvider(storeId)),
       ),
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -266,7 +273,13 @@ class _ReelsTab extends ConsumerWidget {
         posts: posts,
         hasMore: ref.read(storeReelsProvider(storeId).notifier).hasMore,
         onLoadMore: () => ref.read(storeReelsProvider(storeId).notifier).loadMore(),
-        onTap: (postId) => context.push('/post/$postId'),
+        onTap: (postId) => Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (context) => StorePostsPagerScreen(
+            storeId: storeId,
+            initialPostId: postId,
+            reelsOnly: true,
+          ),
+        )),
         onRefresh: () async => ref.invalidate(storeReelsProvider(storeId)),
       ),
       loading: () => const Center(child: CircularProgressIndicator()),

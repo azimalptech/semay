@@ -125,7 +125,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state, navigationShell) => _RoleScaffold(
           navigationShell: navigationShell,
           destinations: [
-            _navDestination('home', 'Home'),
+            _homeNavDestination(),
             _navDestination('play_square', 'Reels'),
             _navDestination('trophy_star', 'Leaderboard'),
             _navDestination('send', 'Chat'),
@@ -159,7 +159,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state, navigationShell) => _RoleScaffold(
           navigationShell: navigationShell,
           destinations: [
-            _navDestination('home', 'Home'),
+            _homeNavDestination(),
             _navDestination('play_square', 'Reels'),
             _navDestination('trophy_star', 'Leaderboard'),
             _navDestination('send', 'Chat'),
@@ -222,5 +222,18 @@ NavigationDestination _navDestination(String asset, String label) {
     icon: AppIcon(asset, color: AppColors.textSecondary),
     selectedIcon: AppIcon(asset, color: AppColors.brand),
     label: label,
+  );
+}
+
+// home.svg is the one asset of the five drawn as a solid glyph (the other
+// four — play_square/trophy_star/send/user — are already thin outline
+// paths), so tinting it never reads as "inactive": it looks filled/active
+// at all times. Material's home_outlined stands in for the inactive state
+// only; the active state still uses the real Figma asset, matching the rest.
+NavigationDestination _homeNavDestination() {
+  return NavigationDestination(
+    icon: const Icon(Icons.home_outlined, color: AppColors.textSecondary),
+    selectedIcon: const AppIcon('home', color: AppColors.brand),
+    label: 'Home',
   );
 }
