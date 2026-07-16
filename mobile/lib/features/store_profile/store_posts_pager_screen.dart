@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../core/l10n.dart';
-import '../shared/post_detail_screen.dart';
 import '../shared/widgets/error_state_view.dart';
-import '../shared/widgets/reel_player_view.dart';
+import '../shared/widgets/post_card.dart';
 import 'store_profile_providers.dart';
 
 /// Tapping a tile in a store's grid opens this instead of a single static
-/// post: a vertical swipe-through-the-grid pager (Instagram's profile-grid
-/// behavior), starting on the tapped post. [reelsOnly] picks the same
-/// provider the tapped grid was showing (Posts tab = everything, Reels tab
-/// = reels only), so paging through matches what was actually on screen.
+/// post: a continuously scrollable feed (same PostCard widget the Home tab
+/// uses, so images/carousels/reels all render exactly like Home — no
+/// page-snapping), scrolled to the tapped post's position on open.
+/// [reelsOnly] picks the same provider the tapped grid was showing (Posts
+/// tab = everything, Reels tab = reels only).
 class StorePostsPagerScreen extends ConsumerStatefulWidget {
   const StorePostsPagerScreen({
     super.key,
@@ -29,8 +30,8 @@ class StorePostsPagerScreen extends ConsumerStatefulWidget {
 }
 
 class _StorePostsPagerScreenState extends ConsumerState<StorePostsPagerScreen> {
-  int _activeIndex = 0;
-  bool _initialized = false;
+  final _itemScrollController = ItemScrollController();
+  bool _scrolledToInitial = false;
 
   @override
   Widget build(BuildContext context) {
@@ -44,34 +45,25 @@ class _StorePostsPagerScreenState extends ConsumerState<StorePostsPagerScreen> {
       body: postsAsync.when(
         data: (posts) {
           if (posts.isEmpty) return Center(child: Text(s.postNotFound));
-          if (!_initialized) {
-            final tappedIndex = posts.indexWhere((doc) => doc.id == widget.initialPostId);
-            _activeIndex = tappedIndex >= 0 ? tappedIndex : 0;
-            _initialized = true;
-          }
-          if (_activeIndex >= posts.length) _activeIndex = posts.length - 1;
 
-          return PageView.builder(
-            scrollDirection: Axis.vertical,
-            controller: PageController(initialPage: _activeIndex),
+          if (!_scrolledToInitial) {
+            _scrolledToInitial = true;
+            final tappedIndex = posts.indexWhere((doc) => doc.id == widget.initialPostId);
+            if (tappedIndex > 0) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (_itemScrollController.isAttached) {
+                  _itemScrollController.jumpTo(index: tappedIndex);
+                }
+              });
+            }
+          }
+
+          return ScrollablePositionedList.builder(
+            itemScrollController: _itemScrollController,
             itemCount: posts.length,
-            onPageChanged: (index) => setState(() => _activeIndex = index),
             itemBuilder: (context, index) {
               final doc = posts[index];
-              final data = doc.data();
-              if (data['type'] == 'reel') {
-                return ColoredBox(
-                  color: Colors.black,
-                  child: ReelPlayerView(
-                    postId: doc.id,
-                    post: data,
-                    isActive: index == _activeIndex,
-                  ),
-                );
-              }
-              return SingleChildScrollView(
-                child: ImagePostDetailContent(postId: doc.id, post: data),
-              );
+              return PostCard(postId: doc.id, post: doc.data());
             },
           );
         },

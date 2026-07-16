@@ -1,9 +1,17 @@
 import Link from "next/link";
-import type { Dict, Lang } from "@/lib/l10n";
+import type { ClientDict, Lang } from "@/lib/l10n";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { LogoutButton } from "./LogoutButton";
 
-export function NavBar({ email, lang, t }: { email: string | null; lang: Lang; t: Dict }) {
+export function NavBar({
+  email,
+  lang,
+  t,
+}: {
+  email: string | null;
+  lang: Lang;
+  t: ClientDict;
+}) {
   return (
     <header className="flex items-center justify-between border-b border-gray-200 bg-white px-8 py-4">
       <nav className="flex items-center gap-6 text-sm font-medium text-gray-700">

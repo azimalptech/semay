@@ -4,10 +4,10 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { clientAuth } from "@/lib/firebaseClient";
-import type { Dict, Lang } from "@/lib/l10n";
+import type { ClientDict, Lang } from "@/lib/l10n";
 import { setLanguage } from "@/lib/l10nActions";
 
-export function LoginForm({ lang, t }: { lang: Lang; t: Dict }) {
+export function LoginForm({ lang, t }: { lang: Lang; t: ClientDict }) {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

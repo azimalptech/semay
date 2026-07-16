@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { adminDb } from "@/lib/firebaseAdmin";
-import { getTranslations } from "@/lib/l10n";
+import { getTranslations, toClientDict } from "@/lib/l10n";
 import { CreateStoreForm } from "./_components/CreateStoreForm";
 
 interface StoreRow {
@@ -36,7 +36,7 @@ export default async function StoresPage() {
         <p className="text-sm text-gray-500">{t.storesDesc}</p>
       </div>
 
-      <CreateStoreForm t={t} />
+      <CreateStoreForm t={toClientDict(t)} />
 
       <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
         <table className="w-full text-left text-sm">

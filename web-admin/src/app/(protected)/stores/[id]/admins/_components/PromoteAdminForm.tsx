@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { httpsCallable } from "firebase/functions";
 import { clientFunctions } from "@/lib/firebaseClient";
-import type { Dict } from "@/lib/l10n";
+import type { ClientDict } from "@/lib/l10n";
 
 interface LookupResult {
   uid: string;
@@ -12,7 +12,7 @@ interface LookupResult {
   phone: string;
 }
 
-export function PromoteAdminForm({ storeId, t }: { storeId: string; t: Dict }) {
+export function PromoteAdminForm({ storeId, t }: { storeId: string; t: ClientDict }) {
   const router = useRouter();
   const [phone, setPhone] = useState("");
   const [result, setResult] = useState<LookupResult | null>(null);

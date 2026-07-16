@@ -12,6 +12,12 @@ Future<void> showEditCaptionDialog(
   required String currentCaption,
 }) async {
   final s = ref.read(l10nProvider);
+  // Read once, up front: the dialog can outlive the calling widget's build
+  // (e.g. the post doc stream emits again, or the caller scrolls out of a
+  // recycled list), which invalidates `ref` for later use inside the
+  // async onPressed below. postsServiceProvider is a plain stable
+  // instance, so capturing it now sidesteps that entirely.
+  final postsService = ref.read(postsServiceProvider);
   final controller = TextEditingController(text: currentCaption);
   var submitting = false;
 
@@ -36,10 +42,16 @@ Future<void> showEditCaptionDialog(
                 ? null
                 : () async {
                     setState(() => submitting = true);
-                    await ref
-                        .read(postsServiceProvider)
-                        .updateCaption(postId, controller.text.trim());
-                    if (dialogContext.mounted) Navigator.of(dialogContext).pop();
+                    try {
+                      await postsService.updateCaption(postId, controller.text.trim());
+                      if (dialogContext.mounted) Navigator.of(dialogContext).pop();
+                    } catch (e) {
+                      setState(() => submitting = false);
+                      if (dialogContext.mounted) {
+                        ScaffoldMessenger.of(dialogContext)
+                            .showSnackBar(SnackBar(content: Text('$e')));
+                      }
+                    }
                   },
             child: submitting
                 ? const SizedBox(

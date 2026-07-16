@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { adminDb } from "@/lib/firebaseAdmin";
-import { getTranslations } from "@/lib/l10n";
+import { getTranslations, toClientDict } from "@/lib/l10n";
 import { PromoteAdminForm } from "./_components/PromoteAdminForm";
 import { RevokeAdminButton } from "./_components/RevokeAdminButton";
 
@@ -17,6 +17,7 @@ export default async function StoreAdminsPage({
 }) {
   const { id: storeId } = await params;
   const t = await getTranslations();
+  const clientT = toClientDict(t);
 
   const storeSnap = await adminDb.collection("stores").doc(storeId).get();
   if (!storeSnap.exists) notFound();
@@ -41,7 +42,7 @@ export default async function StoreAdminsPage({
         <p className="text-sm text-gray-500">{t.storeAdminsDesc}</p>
       </div>
 
-      <PromoteAdminForm storeId={storeId} t={t} />
+      <PromoteAdminForm storeId={storeId} t={clientT} />
 
       <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
         <table className="w-full text-left text-sm">
@@ -65,7 +66,7 @@ export default async function StoreAdminsPage({
                 <td className="px-4 py-2 text-gray-900">{admin.name}</td>
                 <td className="px-4 py-2 text-gray-500">{admin.phone}</td>
                 <td className="px-4 py-2 text-right">
-                  <RevokeAdminButton storeId={storeId} userId={admin.uid} t={t} />
+                  <RevokeAdminButton storeId={storeId} userId={admin.uid} t={clientT} />
                 </td>
               </tr>
             ))}

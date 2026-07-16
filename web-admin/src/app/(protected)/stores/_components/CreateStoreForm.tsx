@@ -4,9 +4,9 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { httpsCallable } from "firebase/functions";
 import { clientFunctions } from "@/lib/firebaseClient";
-import type { Dict } from "@/lib/l10n";
+import type { ClientDict } from "@/lib/l10n";
 
-export function CreateStoreForm({ t }: { t: Dict }) {
+export function CreateStoreForm({ t }: { t: ClientDict }) {
   const router = useRouter();
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");

@@ -51,6 +51,19 @@ export interface Dict {
   language: string;
 }
 
+// React Server Components can't serialize functions across the server/client
+// boundary — passing the full Dict (which has 3 template-string functions)
+// into any "use client" component throws "Functions cannot be passed
+// directly to Client Components". Server Components call those functions
+// directly and only ever need to hand *this* stripped-down type to their
+// client children.
+export type ClientDict = Omit<Dict, "ordersReportDesc" | "noOrders" | "storeAdminsTitle">;
+
+export function toClientDict(t: Dict): ClientDict {
+  const { ordersReportDesc: _ordersReportDesc, noOrders: _noOrders, storeAdminsTitle: _storeAdminsTitle, ...rest } = t;
+  return rest;
+}
+
 // Super Admin web panel copy — Turkmen (default) and Russian only, matching
 // the mobile app's language decision (docs/00_PROJECT_OVERVIEW.md §7.5).
 // No English: this app never had English users in scope, it's the same
