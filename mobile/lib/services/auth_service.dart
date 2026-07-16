@@ -105,12 +105,34 @@ final authServiceProvider = Provider<AuthService>((ref) {
   return AuthService(ref.watch(firebaseAuthProvider), ref.watch(firestoreProvider));
 });
 
-final appRoleProvider = FutureProvider<AppRole>((ref) async {
+/// Custom claims (role/storeIds) are baked into the ID token at issuance —
+/// promoting a user to admin (setStoreAdmin) updates both Firestore *and*
+/// the claims server-side, but an already-signed-in client keeps its old
+/// cached token until something forces a refresh. Firebase never does that
+/// automatically. So: watch the live Firestore doc (source of truth,
+/// updated by the same write), and if it disagrees with the cached token,
+/// force a refresh — that's what actually makes a promotion take effect
+/// without the user having to sign out and back in.
+final _syncedIdTokenResultProvider = FutureProvider<IdTokenResult?>((ref) async {
   final user = ref.watch(authStateChangesProvider).value;
-  if (user == null) return AppRole.unauthenticated;
+  if (user == null) return null;
 
-  final idTokenResult = await user.getIdTokenResult();
-  switch (idTokenResult.claims?['role']) {
+  final profile = ref.watch(userProfileProvider).value;
+  final firestoreRole = profile?['role'] as String? ?? 'user';
+
+  var result = await user.getIdTokenResult();
+  final tokenRole = result.claims?['role'] as String? ?? 'user';
+  if (firestoreRole != tokenRole) {
+    result = await user.getIdTokenResult(true);
+  }
+  return result;
+});
+
+final appRoleProvider = FutureProvider<AppRole>((ref) async {
+  final result = await ref.watch(_syncedIdTokenResultProvider.future);
+  if (result == null) return AppRole.unauthenticated;
+
+  switch (result.claims?['role']) {
     case 'admin':
       return AppRole.admin;
     case 'superadmin':
@@ -122,10 +144,9 @@ final appRoleProvider = FutureProvider<AppRole>((ref) async {
 
 /// Store ids an admin manages, from their custom claims. Empty for non-admins.
 final storeIdsProvider = FutureProvider<List<String>>((ref) async {
-  final user = ref.watch(authStateChangesProvider).value;
-  if (user == null) return [];
+  final result = await ref.watch(_syncedIdTokenResultProvider.future);
+  if (result == null) return [];
 
-  final idTokenResult = await user.getIdTokenResult();
-  final storeIds = idTokenResult.claims?['storeIds'] as List<dynamic>?;
+  final storeIds = result.claims?['storeIds'] as List<dynamic>?;
   return storeIds?.cast<String>() ?? [];
 });

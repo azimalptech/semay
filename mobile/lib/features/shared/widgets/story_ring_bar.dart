@@ -40,13 +40,13 @@ class _StoryRingBarState extends ConsumerState<StoryRingBar>
     if (rings.isEmpty) return const SizedBox.shrink();
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
       child: SizedBox(
         height: 108,
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
           itemCount: rings.length,
-          separatorBuilder: (context, index) => const SizedBox(width: 12),
+          separatorBuilder: (context, index) => const SizedBox(width: 16),
           itemBuilder: (context, index) {
             final ring = rings[index];
             return _StoryRing(

@@ -49,6 +49,15 @@ export interface Dict {
   revoking: string;
   revoke: string;
   language: string;
+  filterAll: string;
+  filterShop: string;
+  filterByPhone: string;
+  allShops: string;
+  searchPhonePlaceholder: string;
+  date: string;
+  store: string;
+  quantity: string;
+  noMatchingOrders: string;
 }
 
 // React Server Components can't serialize functions across the server/client
@@ -117,6 +126,15 @@ const dict: Record<Lang, Dict> = {
     revoking: "Aýrylýar...",
     revoke: "Aýyr",
     language: "Dil",
+    filterAll: "Ählisi",
+    filterShop: "Dükan",
+    filterByPhone: "Telefon belgisi boýunça",
+    allShops: "Ähli dükanlar",
+    searchPhonePlaceholder: "Telefon belgisini giriziň...",
+    date: "Sene",
+    store: "Dükan",
+    quantity: "Sany",
+    noMatchingOrders: "Gabat gelýän sargyt ýok.",
   },
   ru: {
     appName: "SeMay Супер Админ",
@@ -166,6 +184,15 @@ const dict: Record<Lang, Dict> = {
     revoking: "Отзыв...",
     revoke: "Отозвать",
     language: "Язык",
+    filterAll: "Все",
+    filterShop: "Магазин",
+    filterByPhone: "По номеру телефона",
+    allShops: "Все магазины",
+    searchPhonePlaceholder: "Введите номер телефона...",
+    date: "Дата",
+    store: "Магазин",
+    quantity: "Количество",
+    noMatchingOrders: "Подходящих заказов нет.",
   },
 };
 

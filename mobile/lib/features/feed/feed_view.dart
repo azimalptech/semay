@@ -94,9 +94,7 @@ class _HomeTopBar extends StatelessWidget {
         color: AppColors.backgroundCard,
         border: Border(bottom: BorderSide(color: AppColors.borderDivider)),
       ),
-      // Figma 195:4300: the top frame hugs its content — the visible gap to
-      // the story bar below comes from the story bar's own padding, not here.
-      padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top, bottom: 8),
+      padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top, bottom: 14),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16),
         child: Row(
