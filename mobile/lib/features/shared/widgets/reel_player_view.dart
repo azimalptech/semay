@@ -55,6 +55,10 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
   // instead of looping forever.
   int _replays = 0;
   bool _ended = false;
+  // While the scrub bar is being dragged, _onVideoTick's end-of-playback
+  // detection must stand down — seeking near the tail end during a drag
+  // would otherwise be misread as natural completion.
+  bool _scrubbing = false;
 
   @override
   void initState() {
@@ -75,7 +79,7 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
 
   void _onVideoTick() {
     final video = _video;
-    if (video == null || !video.value.isInitialized || _ended) return;
+    if (video == null || !video.value.isInitialized || _ended || _scrubbing) return;
     final duration = video.value.duration;
     if (duration <= Duration.zero) return;
     // Android's reported end-of-playback position is reliably a few ms
@@ -132,6 +136,24 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
     if (video == null || !video.value.isInitialized) return;
     video.value.isPlaying ? video.pause() : video.play();
     setState(() {});
+  }
+
+  void _onScrubStart() {
+    _video?.pause();
+    setState(() => _scrubbing = true);
+  }
+
+  void _onScrubSeek(double ratio) {
+    final video = _video;
+    if (video == null || !video.value.isInitialized) return;
+    final duration = video.value.duration;
+    video.seekTo(duration * ratio.clamp(0.0, 1.0));
+    if (_ended) setState(() => _ended = false);
+  }
+
+  void _onScrubEnd() {
+    setState(() => _scrubbing = false);
+    _video?.play();
   }
 
   @override
@@ -314,8 +336,136 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
               ],
             ),
           ),
+          if (_video != null && _video!.value.isInitialized)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: bottomInset,
+              child: _ScrubBar(
+                video: _video!,
+                scrubbing: _scrubbing,
+                onScrubStart: _onScrubStart,
+                onScrubSeek: _onScrubSeek,
+                onScrubEnd: _onScrubEnd,
+              ),
+            ),
         ],
       ),
+    );
+  }
+}
+
+/// Bottom scrub bar: thin filled track showing playback progress, tap/drag
+/// anywhere on it to seek. Expands slightly and shows a playhead handle
+/// while actively being dragged, matching Instagram's own scrubber; pauses
+/// on grab and resumes playback the moment the finger lifts.
+class _ScrubBar extends StatefulWidget {
+  const _ScrubBar({
+    required this.video,
+    required this.scrubbing,
+    required this.onScrubStart,
+    required this.onScrubSeek,
+    required this.onScrubEnd,
+  });
+
+  final VideoPlayerController video;
+  final bool scrubbing;
+  final VoidCallback onScrubStart;
+  final ValueChanged<double> onScrubSeek;
+  final VoidCallback onScrubEnd;
+
+  @override
+  State<_ScrubBar> createState() => _ScrubBarState();
+}
+
+class _ScrubBarState extends State<_ScrubBar> {
+  double? _dragRatio;
+
+  double _ratioFor(double localX, double width) {
+    if (width <= 0) return 0;
+    return (localX / width).clamp(0.0, 1.0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (details) {
+            final ratio = _ratioFor(details.localPosition.dx, width);
+            setState(() => _dragRatio = ratio);
+            widget.onScrubStart();
+            widget.onScrubSeek(ratio);
+          },
+          onTapUp: (_) {
+            setState(() => _dragRatio = null);
+            widget.onScrubEnd();
+          },
+          onHorizontalDragStart: (details) {
+            final ratio = _ratioFor(details.localPosition.dx, width);
+            setState(() => _dragRatio = ratio);
+            widget.onScrubStart();
+            widget.onScrubSeek(ratio);
+          },
+          onHorizontalDragUpdate: (details) {
+            final ratio = _ratioFor(details.localPosition.dx, width);
+            setState(() => _dragRatio = ratio);
+            widget.onScrubSeek(ratio);
+          },
+          onHorizontalDragEnd: (_) {
+            setState(() => _dragRatio = null);
+            widget.onScrubEnd();
+          },
+          child: Container(
+            // Larger invisible hit area than the visible bar, so it's easy
+            // to grab without needing to land exactly on a thin line.
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            color: Colors.transparent,
+            child: AnimatedBuilder(
+              animation: widget.video,
+              builder: (context, _) {
+                final duration = widget.video.value.duration;
+                final position = widget.video.value.position;
+                final liveRatio = duration.inMilliseconds > 0
+                    ? (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0)
+                    : 0.0;
+                final ratio = _dragRatio ?? liveRatio;
+
+                return AnimatedContainer(
+                  duration: const Duration(milliseconds: 120),
+                  height: widget.scrubbing ? 5 : 2.5,
+                  width: double.infinity,
+                  decoration: BoxDecoration(color: Colors.white24),
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      FractionallySizedBox(
+                        widthFactor: ratio,
+                        child: Container(color: Colors.white),
+                      ),
+                      if (widget.scrubbing)
+                        Positioned(
+                          left: (ratio * width - 6).clamp(0.0, width - 12),
+                          top: -4.5,
+                          child: Container(
+                            width: 12,
+                            height: 12,
+                            decoration: const BoxDecoration(
+                              color: Colors.white,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+      },
     );
   }
 }
