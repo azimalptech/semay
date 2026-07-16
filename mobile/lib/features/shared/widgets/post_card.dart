@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:ui';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -302,10 +301,6 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
   // same as the dedicated Reels tab / post-detail player.
   int _replays = 0;
   bool _ended = false;
-  // Brief flash of the mute/unmute icon on tap — a transient confirmation
-  // instead of a persistent always-visible badge sitting on the video.
-  bool _showMuteFlash = false;
-  Timer? _muteFlashTimer;
 
   @override
   void initState() {
@@ -344,17 +339,7 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
   void dispose() {
     _video?.removeListener(_onVideoTick);
     _video?.dispose();
-    _muteFlashTimer?.cancel();
     super.dispose();
-  }
-
-  void _toggleMute() {
-    ref.read(reelsMutedProvider.notifier).toggle();
-    _muteFlashTimer?.cancel();
-    setState(() => _showMuteFlash = true);
-    _muteFlashTimer = Timer(const Duration(milliseconds: 700), () {
-      if (mounted) setState(() => _showMuteFlash = false);
-    });
   }
 
   void _onVisibilityChanged(VisibilityInfo info) {
@@ -394,8 +379,12 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
     return VisibilityDetector(
       key: Key('feed-reel-${widget.postId}'),
       onVisibilityChanged: _onVisibilityChanged,
+      // No onTap on the video area itself (beyond the ended/replay case) —
+      // it needs to fall through to the outer DoubleTapLikeOverlay's
+      // onSingleTap, which opens the reel in the full-screen player. An
+      // earlier attempt at tap-to-mute here stole that tap instead.
       child: GestureDetector(
-        onTap: _ended ? _replay : _toggleMute,
+        onTap: _ended ? _replay : null,
         child: Stack(
           alignment: Alignment.center,
           fit: StackFit.expand,
@@ -414,15 +403,18 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
               CachedNetworkImage(imageUrl: widget.thumbnailUrl, fit: BoxFit.cover),
             if (_ended)
               const Icon(Icons.refresh, color: Colors.white70, size: 56),
-            IgnorePointer(
-              child: AnimatedOpacity(
-                opacity: _showMuteFlash ? 1 : 0,
-                duration: const Duration(milliseconds: 150),
+            // Small, corner-scoped hit area — deliberately not covering the
+            // whole tile, so it can't compete with the outer open-reel tap.
+            Positioned(
+              right: 8,
+              bottom: 8,
+              child: GestureDetector(
+                onTap: () => ref.read(reelsMutedProvider.notifier).toggle(),
                 child: CircleAvatar(
-                  radius: 22,
-                  backgroundColor: Colors.black45,
+                  radius: 14,
+                  backgroundColor: AppColors.overlayAlphaBlack,
                   child: Icon(muted ? Icons.volume_off : Icons.volume_up,
-                      color: Colors.white, size: 22),
+                      color: Colors.white, size: 16),
                 ),
               ),
             ),

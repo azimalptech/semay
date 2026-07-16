@@ -27,6 +27,18 @@ import '../features/store_profile/store_profile_screen.dart';
 import '../features/story_viewer/story_viewer_screen.dart';
 import '../services/auth_service.dart';
 
+// Bare tab roots of each StatefulShellRoute below — used only to detect "is
+// the user sitting in the wrong role's shell", never matched against shared
+// detail routes like /post/:id or /chat/:id that both roles use.
+const _userShellRoots = {'/home', '/reels', '/leaderboard', '/chat', '/profile'};
+const _adminShellRoots = {
+  '/admin/home',
+  '/admin/reels',
+  '/admin/leaderboard',
+  '/admin/chat',
+  '/admin/profile',
+};
+
 // Role-based redirect: unauthenticated -> /auth/phone; authenticated with an
 // incomplete profile (empty users/{uid}.name, set by verifyOtp) -> /auth/name;
 // otherwise -> /home (user) or /admin/home (admin/superadmin).
@@ -49,9 +61,21 @@ final routerProvider = Provider<GoRouter>((ref) {
       final name = profile.value?['name'] as String? ?? '';
       if (name.isEmpty) return loc == '/auth/name' ? null : '/auth/name';
 
+      final isAdminRole = role.value != AppRole.user;
+
       if (isAuthRoute) {
-        return role.value == AppRole.user ? '/home' : '/admin/home';
+        return isAdminRole ? '/admin/home' : '/home';
       }
+
+      // A role promotion/demotion mid-session (e.g. the web-admin panel
+      // granting store-admin rights) only ever updates appRoleProvider —
+      // nothing else moves the user out of whichever shell they were
+      // already sitting in when it happened. Only steer away from a shell
+      // tab's own root, never a shared detail route both roles use
+      // (/post/:id, /store/:id, /chat/:id, /settings/*, ...).
+      if (isAdminRole && _userShellRoots.contains(loc)) return '/admin/home';
+      if (!isAdminRole && _adminShellRoots.contains(loc)) return '/home';
+
       return null;
     },
     routes: [
