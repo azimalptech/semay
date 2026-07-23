@@ -1,6 +1,5 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -41,6 +40,7 @@ class PostComposerScreen extends ConsumerStatefulWidget {
 
 class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
   final _captionController = TextEditingController();
+  final _priceController = TextEditingController();
   bool _submitting = false;
   bool _reframing = false;
   int _page = 0;
@@ -50,6 +50,7 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
   @override
   void dispose() {
     _captionController.dispose();
+    _priceController.dispose();
     super.dispose();
   }
 
@@ -82,13 +83,42 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
 
   Future<void> _submit() async {
     final s = ref.read(l10nProvider);
+    final priceText = _priceController.text.trim();
+    // Optional, not required — but easy to forget, so a confirming nudge
+    // rather than a silent gap. "Skip" proceeds with price left null; any
+    // other dismissal (back button, tapping outside) also just returns to
+    // editing, same as tapping "Go back" explicitly.
+    if (priceText.isEmpty) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(s.priceEmptyTitle),
+          content: Text(s.priceEmptyBody),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: Text(s.goBack),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(s.skip),
+            ),
+          ],
+        ),
+      );
+      if (proceed != true) return;
+    }
+
     setState(() => _submitting = true);
     try {
-      await ref.read(postsServiceProvider).createPost(
+      await ref
+          .read(postsServiceProvider)
+          .createPost(
             storeId: widget.storeId,
             type: widget.type,
             files: widget.type == 'reel' ? widget.files : _displayFiles,
             caption: _captionController.text.trim(),
+            price: priceText.isEmpty ? null : num.tryParse(priceText),
           );
       // The feed/store-profile grids fetch once with .get() rather than a
       // live listener, so without this a freshly published post is
@@ -100,8 +130,9 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _submitting = false);
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('${s.failedToLoad}: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('${s.failedToLoad}: $e')));
       }
     }
   }
@@ -109,10 +140,13 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
   @override
   Widget build(BuildContext context) {
     final s = ref.watch(l10nProvider);
-    final showFrameToggle = widget.type != 'reel' && widget.originalFiles != null;
+    final showFrameToggle =
+        widget.type != 'reel' && widget.originalFiles != null;
 
     return Scaffold(
-      appBar: AppBar(title: Text(widget.type == 'reel' ? s.postStory : s.newPost)),
+      appBar: AppBar(
+        title: Text(widget.type == 'reel' ? s.postStory : s.newPost),
+      ),
       body: Column(
         children: [
           Expanded(
@@ -131,12 +165,19 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
                           child: PageView.builder(
                             itemCount: _displayFiles.length,
                             onPageChanged: (i) => setState(() => _page = i),
-                            itemBuilder: (context, i) => FutureBuilder<Uint8List>(
-                              future: _displayFiles[i].readAsBytes(),
-                              builder: (context, snapshot) => snapshot.hasData
-                                  ? Image.memory(snapshot.data!, fit: BoxFit.cover)
-                                  : const Center(child: CircularProgressIndicator()),
-                            ),
+                            itemBuilder: (context, i) =>
+                                FutureBuilder<Uint8List>(
+                                  future: _displayFiles[i].readAsBytes(),
+                                  builder: (context, snapshot) =>
+                                      snapshot.hasData
+                                      ? Image.memory(
+                                          snapshot.data!,
+                                          fit: BoxFit.cover,
+                                        )
+                                      : const Center(
+                                          child: CircularProgressIndicator(),
+                                        ),
+                                ),
                           ),
                         ),
                         if (_displayFiles.length > 1)
@@ -152,7 +193,9 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
                             child: ColoredBox(
                               color: Colors.black38,
                               child: Center(
-                                child: CircularProgressIndicator(color: Colors.white),
+                                child: CircularProgressIndicator(
+                                  color: Colors.white,
+                                ),
                               ),
                             ),
                           ),
@@ -184,6 +227,20 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
                   decoration: InputDecoration(labelText: s.caption),
                   maxLines: 3,
                 ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _priceController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*')),
+                  ],
+                  decoration: InputDecoration(
+                    labelText: s.price,
+                    suffixText: 'TMT',
+                  ),
+                ),
               ],
             ),
           ),
@@ -195,7 +252,11 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
                 style: FilledButton.styleFrom(backgroundColor: AppColors.brand),
                 onPressed: _submitting ? null : _submit,
                 child: _submitting
-                    ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator())
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(),
+                      )
                     : Text(s.publish),
               ),
             ),
@@ -219,13 +280,20 @@ class _CountBadge extends StatelessWidget {
         color: AppColors.overlayAlphaBlack,
         borderRadius: BorderRadius.circular(16),
       ),
-      child: Text(label, style: AppTypography.bodySmall.copyWith(color: AppColors.textOnPrimary)),
+      child: Text(
+        label,
+        style: AppTypography.bodySmall.copyWith(color: AppColors.textOnPrimary),
+      ),
     );
   }
 }
 
 class _FrameModeChip extends StatelessWidget {
-  const _FrameModeChip({required this.label, required this.selected, required this.onTap});
+  const _FrameModeChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
 
   final String label;
   final bool selected;
@@ -235,7 +303,7 @@ class _FrameModeChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: selected ? AppColors.brand : AppColors.backgroundCard,
-      shape: const StadiumBorder(side: BorderSide(color: AppColors.borderDivider)),
+      shape: StadiumBorder(side: BorderSide(color: AppColors.borderDivider)),
       child: InkWell(
         customBorder: const StadiumBorder(),
         onTap: onTap,
@@ -243,8 +311,9 @@ class _FrameModeChip extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
           child: Text(
             label,
-            style: AppTypography.buttonSmall
-                .copyWith(color: selected ? Colors.white : AppColors.textPrimary),
+            style: AppTypography.buttonSmall.copyWith(
+              color: selected ? Colors.white : AppColors.textPrimary,
+            ),
           ),
         ),
       ),
@@ -264,7 +333,7 @@ class _ReelPreviewTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
       ),
       alignment: Alignment.center,
-      child: const Icon(Icons.movie_outlined, size: 48, color: AppColors.textMuted),
+      child: Icon(Icons.movie_outlined, size: 48, color: AppColors.textMuted),
     );
   }
 }

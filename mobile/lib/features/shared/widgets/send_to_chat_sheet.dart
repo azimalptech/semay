@@ -6,6 +6,7 @@ import '../../../core/l10n.dart';
 import '../../../core/theme.dart';
 import '../../../services/auth_service.dart';
 import '../../../services/chat_service.dart';
+import '../../../services/posts_service.dart';
 import '../../chat/chat_providers.dart';
 import '../../store_profile/store_profile_providers.dart';
 
@@ -28,7 +29,8 @@ Future<void> showSendToChatSheet(
   final role = await ref.read(appRoleProvider.future);
   final storeIds = await ref.read(storeIdsProvider.future);
   final isOwnPost =
-      (role == AppRole.admin || role == AppRole.superadmin) && storeIds.contains(postStoreId);
+      (role == AppRole.admin || role == AppRole.superadmin) &&
+      storeIds.contains(postStoreId);
 
   if (!context.mounted) return;
 
@@ -81,7 +83,8 @@ class _ComposeAndSendSheet extends ConsumerStatefulWidget {
   final String postMediaUrl;
 
   @override
-  ConsumerState<_ComposeAndSendSheet> createState() => _ComposeAndSendSheetState();
+  ConsumerState<_ComposeAndSendSheet> createState() =>
+      _ComposeAndSendSheetState();
 }
 
 class _ComposeAndSendSheetState extends ConsumerState<_ComposeAndSendSheet> {
@@ -98,15 +101,26 @@ class _ComposeAndSendSheetState extends ConsumerState<_ComposeAndSendSheet> {
     if (_sending) return;
     setState(() => _sending = true);
     try {
-      final chatId = await ref.read(chatServiceProvider).createOrGetChat(widget.postStoreId);
-      await ref.read(chatServiceProvider).sendMessage(
+      final chatId = await ref
+          .read(chatServiceProvider)
+          .createOrGetChat(widget.postStoreId);
+      await ref
+          .read(chatServiceProvider)
+          .sendMessage(
             chatId,
             _messageController.text.trim(),
             senderRole: 'user',
             sharedPostId: widget.postId,
             mediaUrl: widget.postMediaUrl,
           );
-      if (mounted) Navigator.of(context).pop();
+      await ref.read(postsServiceProvider).recordSent(widget.postId);
+      if (mounted) {
+        final navigator = Navigator.of(context);
+        final messenger = ScaffoldMessenger.of(context);
+        final s = ref.read(l10nProvider);
+        navigator.pop();
+        messenger.showSnackBar(SnackBar(content: Text(s.messageSent)));
+      }
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -118,7 +132,9 @@ class _ComposeAndSendSheetState extends ConsumerState<_ComposeAndSendSheet> {
     final store = ref.watch(storeDocProvider(widget.postStoreId)).value;
 
     return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+      ),
       child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -126,8 +142,10 @@ class _ComposeAndSendSheetState extends ConsumerState<_ComposeAndSendSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(s.messageStore(store?['name'] as String? ?? ''),
-                  style: AppTypography.titleLarge),
+              Text(
+                s.messageStore(store?['name'] as String? ?? ''),
+                style: AppTypography.titleLarge,
+              ),
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -137,7 +155,10 @@ class _ComposeAndSendSheetState extends ConsumerState<_ComposeAndSendSheet> {
                       width: 48,
                       height: 48,
                       child: widget.postMediaUrl.isNotEmpty
-                          ? CachedNetworkImage(imageUrl: widget.postMediaUrl, fit: BoxFit.cover)
+                          ? CachedNetworkImage(
+                              imageUrl: widget.postMediaUrl,
+                              fit: BoxFit.cover,
+                            )
                           : Container(color: AppColors.borderDivider),
                     ),
                   ),
@@ -148,7 +169,9 @@ class _ComposeAndSendSheetState extends ConsumerState<_ComposeAndSendSheet> {
                         widget.postCaption,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary),
+                        style: AppTypography.bodySmall.copyWith(
+                          color: AppColors.textSecondary,
+                        ),
                       ),
                     ),
                   ],
@@ -165,8 +188,10 @@ class _ComposeAndSendSheetState extends ConsumerState<_ComposeAndSendSheet> {
                         hintText: s.typeMessage,
                         filled: true,
                         fillColor: AppColors.backgroundPrimary,
-                        contentPadding:
-                            const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 10,
+                        ),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(24),
                           borderSide: BorderSide.none,
@@ -181,7 +206,8 @@ class _ComposeAndSendSheetState extends ConsumerState<_ComposeAndSendSheet> {
                         ? const SizedBox(
                             width: 20,
                             height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2))
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
                         : const Icon(Icons.send, color: AppColors.brand),
                     onPressed: _sending ? null : _send,
                   ),
@@ -207,15 +233,28 @@ class _ForwardToConversationSheet extends ConsumerWidget {
   final String postCaption;
   final String postMediaUrl;
 
-  Future<void> _sendTo(BuildContext context, WidgetRef ref, String chatId) async {
-    await ref.read(chatServiceProvider).sendMessage(
+  Future<void> _sendTo(
+    BuildContext context,
+    WidgetRef ref,
+    String chatId,
+  ) async {
+    await ref
+        .read(chatServiceProvider)
+        .sendMessage(
           chatId,
           postCaption,
           senderRole: 'admin',
           sharedPostId: postId,
           mediaUrl: postMediaUrl,
         );
-    if (context.mounted) Navigator.of(context).pop();
+    await ref.read(postsServiceProvider).recordSent(postId);
+    if (context.mounted) {
+      final navigator = Navigator.of(context);
+      final messenger = ScaffoldMessenger.of(context);
+      final s = ref.read(l10nProvider);
+      navigator.pop();
+      messenger.showSnackBar(SnackBar(content: Text(s.messageSent)));
+    }
   }
 
   @override
@@ -237,7 +276,10 @@ class _ForwardToConversationSheet extends ConsumerWidget {
                 if (chats.isEmpty) {
                   return Padding(
                     padding: const EdgeInsets.all(24),
-                    child: Text(s.noConversationsYet, style: AppTypography.bodyMedium),
+                    child: Text(
+                      s.noConversationsYet,
+                      style: AppTypography.bodyMedium,
+                    ),
                   );
                 }
                 return ListView(
@@ -283,8 +325,12 @@ class _ChatTile extends ConsumerWidget {
       leading: CircleAvatar(
         radius: 20,
         backgroundColor: AppColors.backgroundPrimary,
-        backgroundImage: avatarUrl.isNotEmpty ? CachedNetworkImageProvider(avatarUrl) : null,
-        child: avatarUrl.isEmpty ? const Icon(Icons.person, color: AppColors.textMuted) : null,
+        backgroundImage: avatarUrl.isNotEmpty
+            ? CachedNetworkImageProvider(avatarUrl)
+            : null,
+        child: avatarUrl.isEmpty
+            ? Icon(Icons.person, color: AppColors.textMuted)
+            : null,
       ),
       title: Text(name, style: AppTypography.bodyMedium),
       onTap: onTap,

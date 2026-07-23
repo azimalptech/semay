@@ -20,7 +20,9 @@ class PostIdGrid extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final s = ref.watch(l10nProvider);
     final isLiked = kind == PostGridKind.liked;
-    final idsAsync = ref.watch(isLiked ? likedPostIdsProvider : savedPostIdsProvider);
+    final idsAsync = ref.watch(
+      isLiked ? likedPostIdsProvider : savedPostIdsProvider,
+    );
 
     return Scaffold(
       appBar: AppBar(title: Text(isLiked ? s.likes : s.saved)),
@@ -28,8 +30,10 @@ class PostIdGrid extends ConsumerWidget {
         data: (ids) {
           if (ids.isEmpty) {
             return Center(
-              child: Text(isLiked ? s.noLikedYet : s.noSavedYet,
-                  style: AppTypography.bodyMedium),
+              child: Text(
+                isLiked ? s.noLikedYet : s.noSavedYet,
+                style: AppTypography.bodyMedium,
+              ),
             );
           }
           return GridView.builder(
@@ -44,7 +48,8 @@ class PostIdGrid extends ConsumerWidget {
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stack) => Center(child: Text('${s.failedToLoad}: $error')),
+        error: (error, stack) =>
+            Center(child: Text('${s.failedToLoad}: $error')),
       ),
     );
   }
@@ -62,9 +67,11 @@ class _PostTile extends ConsumerWidget {
 
     final type = post['type'] as String? ?? 'image';
     final thumbnailUrl = post['thumbnailUrl'] as String? ?? '';
-    final mediaUrls = (post['mediaUrls'] as List<dynamic>? ?? []).cast<String>();
-    final imageUrl =
-        type == 'reel' && thumbnailUrl.isNotEmpty ? thumbnailUrl : (mediaUrls.isNotEmpty ? mediaUrls.first : '');
+    final mediaUrls = (post['mediaUrls'] as List<dynamic>? ?? [])
+        .cast<String>();
+    final imageUrl = type == 'reel' && thumbnailUrl.isNotEmpty
+        ? thumbnailUrl
+        : (mediaUrls.isNotEmpty ? mediaUrls.first : '');
 
     return GestureDetector(
       onTap: () => context.push('/post/$postId'),

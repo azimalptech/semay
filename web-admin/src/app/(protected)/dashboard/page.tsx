@@ -1,6 +1,7 @@
 import { Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebaseAdmin";
 import { getTranslations, toClientDict } from "@/lib/l10n";
+import { requireSuperAdmin } from "@/lib/session";
 import { OrdersTable, type OrderRow } from "./_components/OrdersTable";
 
 const WINDOW_DAYS = 90;
@@ -33,6 +34,13 @@ async function getOrders(storeNames: Record<string, string>): Promise<OrderRow[]
 }
 
 export default async function DashboardPage() {
+  // Defense in depth — the (protected) layout already checks this, but
+  // layouts don't re-run on client-side navigation between sibling pages,
+  // so without a per-page check here a revoked session keeps working on
+  // this page (which reads customer phone numbers) until the cookie itself
+  // expires (up to 5 days). requireSuperAdmin is cache()-memoized, so this
+  // costs nothing extra when the layout already ran it this request.
+  await requireSuperAdmin();
   const t = await getTranslations();
   const storeNames = await getStoreNames();
   const orders = await getOrders(storeNames);

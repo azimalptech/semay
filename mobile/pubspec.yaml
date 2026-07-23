@@ -46,6 +46,7 @@ dependencies:
   video_player: ^2.11.1
   video_thumbnail: ^0.5.6
   cached_network_image: ^3.4.1
+  flutter_cache_manager: ^3.4.1
   flutter_svg: ^2.2.4
   url_launcher: ^6.3.1
   image_cropper: ^11.0.0
@@ -72,6 +73,23 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
 
+  flutter_launcher_icons: ^0.14.4
+
+# flutter_launcher_icons config — run `dart run flutter_launcher_icons` to
+# (re)generate every platform icon size from assets/app_icon.png.
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/app_icon.png"
+  remove_alpha_ios: true
+  # Android adaptive icon: same flat white background + centered wordmark,
+  # split into its own foreground/background layers so the OS can mask it
+  # into a circle/squircle/etc. without cropping the text (the plain PNG
+  # path above still covers pre-8.0 devices that don't support adaptive
+  # icons at all).
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/app_icon.png"
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
@@ -85,6 +103,8 @@ flutter:
 
   assets:
     - assets/icons/
+    - assets/illustrations/
+    - assets/logo.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

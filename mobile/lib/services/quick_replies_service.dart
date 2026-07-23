@@ -11,8 +11,12 @@ class QuickRepliesService {
   CollectionReference<Map<String, dynamic>> _collection(String storeId) =>
       _firestore.collection('stores').doc(storeId).collection('quickReplies');
 
-  Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>> watch(String storeId) {
-    return _collection(storeId).orderBy('order').snapshots().map((snap) => snap.docs);
+  Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>> watch(
+    String storeId,
+  ) {
+    return _collection(
+      storeId,
+    ).orderBy('order').snapshots().map((snap) => snap.docs);
   }
 
   Future<void> add(String storeId, String text, int order) async {

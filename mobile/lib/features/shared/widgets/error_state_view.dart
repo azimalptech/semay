@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../../core/l10n.dart';
 import '../../../core/theme.dart';
@@ -23,13 +24,26 @@ class ErrorStateView extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.satellite_alt_outlined, size: 72, color: AppColors.textMuted),
+            SvgPicture.asset(
+              'assets/illustrations/no_internet.svg',
+              width: 160,
+              colorFilter: ColorFilter.mode(
+                AppColors.textMuted,
+                BlendMode.srcIn,
+              ),
+            ),
             const SizedBox(height: 20),
-            Text(s.noConnection, style: AppTypography.bodyMediumSemibold, textAlign: TextAlign.center),
+            Text(
+              s.noConnection,
+              style: AppTypography.bodyMediumSemibold,
+              textAlign: TextAlign.center,
+            ),
             const SizedBox(height: 6),
             Text(
               message ?? s.checkConnection,
-              style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary),
+              style: AppTypography.bodySmall.copyWith(
+                color: AppColors.textSecondary,
+              ),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 20),
@@ -40,8 +54,16 @@ class ErrorStateView extends ConsumerWidget {
                 customBorder: const StadiumBorder(),
                 onTap: onRetry,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  child: Text(s.tryAgain, style: AppTypography.buttonSmall.copyWith(color: Colors.white)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                  child: Text(
+                    s.tryAgain,
+                    style: AppTypography.buttonSmall.copyWith(
+                      color: Colors.white,
+                    ),
+                  ),
                 ),
               ),
             ),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/app_icon.dart';
 import '../../services/auth_service.dart';
 import '../settings/settings_screen.dart';
 import '../store_profile/store_profile_screen.dart';
@@ -36,7 +37,7 @@ class AdminOwnStoreScreen extends ConsumerWidget {
         appBar: AppBar(
           actions: [
             IconButton(
-              icon: const Icon(Icons.settings_outlined),
+              icon: const AppIcon('settings'),
               onPressed: () => context.push('/admin/settings'),
             ),
           ],

@@ -11,12 +11,20 @@ class DoubleTapLikeOverlay extends StatefulWidget {
     required this.isLiked,
     required this.onLike,
     this.onSingleTap,
+    this.onHoldStart,
+    this.onHoldEnd,
   });
 
   final Widget child;
   final bool isLiked;
   final VoidCallback onLike;
   final VoidCallback? onSingleTap;
+
+  /// Press-and-hold, release to end — optional, only reels/stories wire
+  /// these up. onHoldStart receives where the press landed so a caller that
+  /// cares which zone was held (e.g. reels: center vs. edges) can tell.
+  final void Function(LongPressStartDetails)? onHoldStart;
+  final VoidCallback? onHoldEnd;
 
   @override
   State<DoubleTapLikeOverlay> createState() => _DoubleTapLikeOverlayState();
@@ -55,6 +63,10 @@ class _DoubleTapLikeOverlayState extends State<DoubleTapLikeOverlay>
     return GestureDetector(
       onTap: widget.onSingleTap,
       onDoubleTap: _handleDoubleTap,
+      onLongPressStart: widget.onHoldStart,
+      onLongPressEnd: widget.onHoldEnd != null
+          ? (_) => widget.onHoldEnd!()
+          : null,
       child: Stack(
         alignment: Alignment.center,
         fit: StackFit.passthrough,

@@ -1,29 +1,38 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:share_plus/share_plus.dart';
+import 'package:go_router/go_router.dart';
 import 'package:video_player/video_player.dart';
 
+import '../../../core/app_icon.dart';
 import '../../../core/l10n.dart';
+import '../../../core/media_cache.dart';
 import '../../../core/theme.dart';
 import '../../../services/auth_service.dart';
+import '../../../services/chat_service.dart';
 import '../../../services/posts_service.dart';
 import '../post_interaction_providers.dart';
 import 'confirm_delete_dialog.dart';
 import 'double_tap_like_overlay.dart';
 import 'edit_caption_dialog.dart';
+import 'pinch_zoom_image.dart';
+import 'send_to_chat_sheet.dart';
 
 /// Shared across every reel player instance (the Reels tab pager *and* a
 /// single reel opened from a post-detail push) so mute state carries over
 /// consistently, same as Instagram — sound is on by default; this toggles it.
 class ReelsMutedNotifier extends Notifier<bool> {
   @override
-  bool build() => false;
+  bool build() => true;
 
   void toggle() => state = !state;
 }
 
-final reelsMutedProvider = NotifierProvider<ReelsMutedNotifier, bool>(ReelsMutedNotifier.new);
+final reelsMutedProvider = NotifierProvider<ReelsMutedNotifier, bool>(
+  ReelsMutedNotifier.new,
+);
 
 /// Full-screen reel player (Figma MyReel layout): video + mute/like/save/share
 /// rail + store/caption footer. Used both as a page inside the Reels tab's
@@ -38,12 +47,18 @@ class ReelPlayerView extends ConsumerStatefulWidget {
     required this.post,
     required this.isActive,
     this.onClose,
+    this.initialPosition,
   });
 
   final String postId;
   final Map<String, dynamic> post;
   final bool isActive;
   final VoidCallback? onClose;
+  // Set when opened from a reel already mid-playback elsewhere (the feed's
+  // in-place autoplay tile) so this full-screen player picks up from the
+  // same frame instead of restarting at 0. Null for every other entry point
+  // (the Reels tab's own pager, a fresh reel just scrolled to).
+  final Duration? initialPosition;
 
   @override
   ConsumerState<ReelPlayerView> createState() => _ReelPlayerViewState();
@@ -51,57 +66,80 @@ class ReelPlayerView extends ConsumerStatefulWidget {
 
 class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
   VideoPlayerController? _video;
-  // Plays twice (first play + one repeat), then stops on a replay icon
-  // instead of looping forever.
-  int _replays = 0;
-  bool _ended = false;
-  // While the scrub bar is being dragged, _onVideoTick's end-of-playback
-  // detection must stand down — seeking near the tail end during a drag
-  // would otherwise be misread as natural completion.
+  // While the scrub bar is being dragged, playback is paused — used to keep
+  // the scrub bar's own pause/resume distinct from a user-initiated pause.
   bool _scrubbing = false;
+  bool _wasPlayingBeforeHold = false;
+  bool _isFastForwarding = false;
+  final _replyController = TextEditingController();
+  bool _sendingReply = false;
+
+  // A reel has no separate "small inline card vs. full detail view" split
+  // the way an image post does (Home's feed tile vs. PostDetailScreen) —
+  // it's already full-screen everywhere it appears, dedicated Reels tab
+  // included — so "detail view only" for view-counting purposes means
+  // "this reel is the active/playing one", tracked via widget.isActive
+  // rather than a fixed screen. Same 2s-dwell-or-liked-or-zoomed signal as
+  // ImagePostDetailContent otherwise.
+  Timer? _viewTimer;
+  bool _viewRecorded = false;
 
   @override
   void initState() {
     super.initState();
-    final url = (widget.post['mediaUrls'] as List<dynamic>? ?? []).cast<String>().firstOrNull;
-    if (url != null) {
-      final vc = VideoPlayerController.networkUrl(Uri.parse(url));
-      _video = vc;
-      vc.setVolume(ref.read(reelsMutedProvider) ? 0 : 1);
-      vc.addListener(_onVideoTick);
-      vc.initialize().then((_) {
-        if (!mounted) return;
-        if (widget.isActive) vc.play();
-        setState(() {});
-      });
-    }
+    final url = (widget.post['mediaUrls'] as List<dynamic>? ?? [])
+        .cast<String>()
+        .firstOrNull;
+    if (url != null) _loadVideo(url);
+    if (widget.isActive) _startViewTimer();
   }
 
-  void _onVideoTick() {
-    final video = _video;
-    if (video == null || !video.value.isInitialized || _ended || _scrubbing) return;
-    final duration = video.value.duration;
-    if (duration <= Duration.zero) return;
-    // Android's reported end-of-playback position is reliably a few ms
-    // short of duration, never >=, so an exact comparison never fires and
-    // the reel just sits paused on the last frame forever.
-    final remaining = duration - video.value.position;
-    final completed = !video.value.isPlaying && remaining < const Duration(milliseconds: 300);
-    if (!completed) return;
-    if (_replays < 1) {
-      _replays++;
-      video.seekTo(Duration.zero);
-      video.play();
-    } else if (mounted) {
-      setState(() => _ended = true);
+  void _startViewTimer() {
+    _viewTimer?.cancel();
+    if (_viewRecorded) return;
+    _viewTimer = Timer(const Duration(seconds: 2), _recordView);
+  }
+
+  void _recordView() {
+    _viewTimer?.cancel();
+    if (_viewRecorded) return;
+    _viewRecorded = true;
+    ref.read(postsServiceProvider).recordView(widget.postId);
+  }
+
+  // Caching the file (not just streaming it via .networkUrl) makes a
+  // rewatch instant from disk instead of re-downloading — same treatment as
+  // the story viewer's video loading.
+  Future<void> _loadVideo(String url) async {
+    final file = await MediaCache.instance.getSingleFile(url);
+    if (!mounted) return;
+    final vc = VideoPlayerController.file(file);
+    _video = vc;
+    vc.setVolume(ref.read(reelsMutedProvider) ? 0 : 1);
+    // Loops indefinitely — user controls when it stops (navigating away,
+    // holding to pause), not a fixed replay count.
+    vc.setLooping(true);
+    await vc.initialize();
+    if (!mounted || _video != vc) return;
+    final initialPosition = widget.initialPosition;
+    debugPrint(
+      'reel_player_view: postId=${widget.postId} '
+      'widget.initialPosition=$initialPosition',
+    );
+    if (initialPosition != null && initialPosition > Duration.zero) {
+      await vc.seekTo(initialPosition);
+      debugPrint(
+        'reel_player_view: postId=${widget.postId} seeked to $initialPosition',
+      );
+      if (!mounted || _video != vc) return;
     }
+    if (widget.isActive) vc.play();
+    setState(() {});
   }
 
   void _restart() {
     final video = _video;
     if (video == null) return;
-    _replays = 0;
-    _ended = false;
     video.seekTo(Duration.zero);
     video.play();
     setState(() {});
@@ -110,10 +148,15 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
   @override
   void didUpdateWidget(covariant ReelPlayerView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.isActive && !oldWidget.isActive) {
+      _startViewTimer();
+    } else if (!widget.isActive && oldWidget.isActive) {
+      _viewTimer?.cancel();
+    }
     final video = _video;
     if (video == null || !video.value.isInitialized) return;
     if (widget.isActive && !oldWidget.isActive) {
-      // Scrolled back into view: fresh watch, fresh loop budget.
+      // Scrolled back into view: fresh watch from the start.
       _restart();
     } else if (!widget.isActive && oldWidget.isActive) {
       video.pause();
@@ -122,16 +165,117 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
 
   @override
   void dispose() {
-    _video?.removeListener(_onVideoTick);
     _video?.dispose();
+    _replyController.dispose();
+    _viewTimer?.cancel();
     super.dispose();
   }
 
-  void _togglePlay() {
-    if (_ended) {
-      _restart();
-      return;
+  Future<void> _sendReply() async {
+    final text = _replyController.text.trim();
+    if (text.isEmpty || _sendingReply) return;
+    final storeId = widget.post['storeId'] as String? ?? '';
+    if (storeId.isEmpty) return;
+    setState(() => _sendingReply = true);
+    try {
+      final role = await ref.read(appRoleProvider.future);
+      final isAdmin = role == AppRole.admin || role == AppRole.superadmin;
+      final chatId = await ref
+          .read(chatServiceProvider)
+          .createOrGetChat(storeId);
+      final thumbnailUrl = widget.post['thumbnailUrl'] as String? ?? '';
+      final mediaUrls = (widget.post['mediaUrls'] as List<dynamic>? ?? [])
+          .cast<String>();
+      await ref
+          .read(chatServiceProvider)
+          .sendMessage(
+            chatId,
+            text,
+            senderRole: isAdmin ? 'admin' : 'user',
+            sharedPostId: widget.postId,
+            mediaUrl: thumbnailUrl.isNotEmpty
+                ? thumbnailUrl
+                : mediaUrls.firstOrNull,
+          );
+      _replyController.clear();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(ref.read(l10nProvider).messageSent)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _sendingReply = false);
     }
+  }
+
+  // Two distinct press-and-hold zones, same as real Instagram Reels:
+  // holding the left/right edges speeds playback up to 2x (release back to
+  // 1x); holding the middle third pauses instead (release resumes) — the
+  // same pause-on-hold behavior Stories uses.
+  bool _holdIsEdge = false;
+
+  void _onHoldStart(LongPressStartDetails details) {
+    final width = MediaQuery.of(context).size.width;
+    final dx = details.globalPosition.dx;
+    _holdIsEdge = dx < width / 3 || dx > width * 2 / 3;
+    if (_holdIsEdge) {
+      _startFastForward();
+    } else {
+      _startPause();
+    }
+  }
+
+  void _onHoldEnd() {
+    if (_holdIsEdge) {
+      _endFastForward();
+    } else {
+      _endPause();
+    }
+  }
+
+  void _startFastForward() {
+    final video = _video;
+    if (video == null || !video.value.isInitialized) return;
+    _wasPlayingBeforeHold = video.value.isPlaying;
+    if (_wasPlayingBeforeHold) {
+      video.setPlaybackSpeed(2.0);
+      setState(() => _isFastForwarding = true);
+    }
+  }
+
+  void _endFastForward() {
+    final video = _video;
+    if (video == null || !video.value.isInitialized) return;
+    if (_wasPlayingBeforeHold) {
+      video.setPlaybackSpeed(1.0);
+      setState(() => _isFastForwarding = false);
+    }
+  }
+
+  void _startPause() {
+    final video = _video;
+    if (video == null || !video.value.isInitialized) return;
+    _wasPlayingBeforeHold = video.value.isPlaying;
+    if (_wasPlayingBeforeHold) {
+      video.pause();
+      setState(() {});
+    }
+  }
+
+  void _endPause() {
+    final video = _video;
+    if (video == null || !video.value.isInitialized) return;
+    if (_wasPlayingBeforeHold) {
+      video.play();
+      setState(() {});
+    }
+  }
+
+  void _togglePlay() {
+    // The video is the main "outside the keyboard" tap target down here —
+    // dismiss an open reply-field keyboard the same way tapping away from it
+    // would anywhere else, rather than leaving it covering the screen.
+    FocusManager.instance.primaryFocus?.unfocus();
     final video = _video;
     if (video == null || !video.value.isInitialized) return;
     video.value.isPlaying ? video.pause() : video.play();
@@ -148,7 +292,6 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
     if (video == null || !video.value.isInitialized) return;
     final duration = video.value.duration;
     video.seekTo(duration * ratio.clamp(0.0, 1.0));
-    if (_ended) setState(() => _ended = false);
   }
 
   void _onScrubEnd() {
@@ -162,195 +305,392 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
     final storeId = widget.post['storeId'] as String? ?? '';
     final caption = widget.post['caption'] as String? ?? '';
     final store = ref.watch(storeSummaryProvider(storeId)).value;
-    final isLiked = ref.watch(isLikedProvider(widget.postId)).value ?? false;
+    final likeState = ref.watch(likeStateProvider(widget.postId));
+    final isLiked = likeState.isLiked;
     final isSaved = ref.watch(isSavedProvider(widget.postId)).value ?? false;
-    final likesCount = widget.post['likesCount'] as int? ?? 0;
+    final likesCount = likeState.likesCount;
     final role = ref.watch(appRoleProvider).value;
     final storeIds = ref.watch(storeIdsProvider).value ?? [];
     final isOwner =
-        (role == AppRole.admin || role == AppRole.superadmin) && storeIds.contains(storeId);
+        (role == AppRole.admin || role == AppRole.superadmin) &&
+        storeIds.contains(storeId);
 
     final muted = ref.watch(reelsMutedProvider);
     ref.listen<bool>(reelsMutedProvider, (_, isMuted) {
       _video?.setVolume(isMuted ? 0 : 1);
     });
+    ref.listen(likeStateProvider(widget.postId), (previous, next) {
+      if (next.isLiked && (previous == null || !previous.isLiked)) {
+        _recordView();
+      }
+    });
 
-    final bottomInset = MediaQuery.of(context).padding.bottom;
     final topInset = MediaQuery.of(context).padding.top;
 
-    return DoubleTapLikeOverlay(
-      isLiked: isLiked,
-      onLike: () => ref.read(postsServiceProvider).toggleLike(widget.postId),
-      onSingleTap: _togglePlay,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (_video?.value.isInitialized ?? false)
-            FittedBox(
-              fit: BoxFit.cover,
-              clipBehavior: Clip.hardEdge,
-              child: SizedBox(
-                width: _video!.value.size.width,
-                height: _video!.value.size.height,
-                child: VideoPlayer(_video!),
-              ),
-            )
-          else
-            const Center(child: CircularProgressIndicator(color: Colors.white)),
-          if (_video != null && _video!.value.isInitialized && !_video!.value.isPlaying)
-            Center(
-              child: Icon(
-                _ended ? Icons.refresh : Icons.play_arrow,
-                color: Colors.white70,
-                size: 72,
-              ),
-            ),
-          if (widget.onClose != null)
-            Positioned(
-              top: topInset + 8,
-              left: 8,
-              child: IconButton(
-                icon: const Icon(Icons.arrow_back, color: Colors.white),
-                onPressed: widget.onClose,
-              ),
-            ),
-          if (isOwner)
-            Positioned(
-              top: topInset + 8,
-              right: 12,
-              child: GestureDetector(
-                onTap: () async {
-                  final confirmed = await confirmDelete(
-                    context,
-                    ref,
-                    title: s.deletePostTitle,
-                    body: s.deletePostBody,
-                  );
-                  if (confirmed) {
-                    await ref.read(postsServiceProvider).deletePost(widget.postId);
-                    if (context.mounted) widget.onClose?.call();
-                  }
-                },
-                child: const CircleAvatar(
-                  radius: 18,
-                  backgroundColor: AppColors.error,
-                  child: Icon(Icons.delete_outline, color: Colors.white, size: 20),
-                ),
-              ),
-            ),
-          if (isOwner)
-            Positioned(
-              top: topInset + 56,
-              right: 12,
-              child: GestureDetector(
-                onTap: () => showEditCaptionDialog(
-                  context,
-                  ref,
-                  postId: widget.postId,
-                  currentCaption: caption,
-                ),
-                child: const CircleAvatar(
-                  radius: 18,
-                  backgroundColor: Colors.black38,
-                  child: Icon(Icons.edit_outlined, color: Colors.white, size: 18),
-                ),
-              ),
-            ),
-          // Mute toggle — kept top-side so the footer stays exactly the
-          // Figma layout (which has no mute glyph); stacks under
-          // delete/edit when the owner is viewing.
-          Positioned(
-            top: topInset + (isOwner ? 104 : 8),
-            right: 12,
-            child: GestureDetector(
-              onTap: () => ref.read(reelsMutedProvider.notifier).toggle(),
-              child: CircleAvatar(
-                radius: 16,
-                backgroundColor: Colors.black38,
-                child: Icon(muted ? Icons.volume_off : Icons.volume_up,
-                    color: Colors.white, size: 18),
-              ),
-            ),
-          ),
-          // Figma MyReel footer: store row with the heart/bookmark/share
-          // actions inline on its right, caption below spanning full width.
-          Positioned(
-            left: 16,
-            right: 16,
-            bottom: 24 + bottomInset,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+    return Column(
+      children: [
+        Expanded(
+          child: DoubleTapLikeOverlay(
+            isLiked: isLiked,
+            onLike: () =>
+                ref.read(likeStateProvider(widget.postId).notifier).like(),
+            onSingleTap: _togglePlay,
+            onHoldStart: _onHoldStart,
+            onHoldEnd: _onHoldEnd,
+            child: Stack(
+              fit: StackFit.expand,
               children: [
-                Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 16,
-                      backgroundColor: Colors.white,
-                      backgroundImage: (store?['avatarUrl'] as String? ?? '').isNotEmpty
-                          ? CachedNetworkImageProvider(store!['avatarUrl'] as String)
-                          : null,
-                      child: (store?['avatarUrl'] as String? ?? '').isEmpty
-                          ? const Icon(Icons.storefront, size: 16, color: AppColors.textMuted)
-                          : null,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        store?['name'] as String? ?? '',
-                        style: AppTypography.bodyMediumSemibold.copyWith(color: Colors.white),
-                        overflow: TextOverflow.ellipsis,
+                if (_video?.value.isInitialized ?? false)
+                  PinchZoomImage(
+                    onZoomStart: _recordView,
+                    child: FittedBox(
+                      fit: BoxFit.cover,
+                      clipBehavior: Clip.hardEdge,
+                      child: SizedBox(
+                        width: _video!.value.size.width,
+                        height: _video!.value.size.height,
+                        child: VideoPlayer(_video!),
                       ),
                     ),
-                    _FooterAction(
-                      icon: isLiked ? Icons.favorite : Icons.favorite_border,
-                      color: isLiked ? AppColors.error : Colors.white,
-                      label: likesCount > 0 ? '$likesCount' : null,
-                      onTap: () => ref.read(postsServiceProvider).toggleLike(widget.postId),
-                    ),
-                    const SizedBox(width: 16),
-                    _FooterAction(
-                      icon: isSaved ? Icons.bookmark : Icons.bookmark_border,
-                      color: Colors.white,
-                      onTap: () => ref.read(postsServiceProvider).toggleSave(widget.postId),
-                    ),
-                    const SizedBox(width: 16),
-                    _FooterAction(
-                      icon: Icons.share_outlined,
-                      color: Colors.white,
-                      onTap: () => SharePlus.instance.share(
-                        ShareParams(uri: Uri.parse('semay://post/${widget.postId}')),
-                      ),
-                    ),
-                  ],
-                ),
-                if (caption.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    caption,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppTypography.bodySmall.copyWith(color: Colors.white),
+                  )
+                else
+                  const Center(
+                    child: CircularProgressIndicator(color: Colors.white),
                   ),
-                ],
+                if (_video != null &&
+                    _video!.value.isInitialized &&
+                    !_video!.value.isPlaying)
+                  const Center(
+                    child: Icon(
+                      Icons.play_arrow,
+                      color: Colors.white70,
+                      size: 72,
+                    ),
+                  ),
+                if (_isFastForwarding)
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(24),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.fast_forward,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                          SizedBox(width: 4),
+                          Text(
+                            '2x',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 16,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (widget.onClose != null)
+                  Positioned(
+                    top: topInset + 8,
+                    left: 8,
+                    child: IconButton(
+                      icon: const AppIcon('arrow_left', color: Colors.white),
+                      onPressed: widget.onClose,
+                    ),
+                  ),
+                if (isOwner)
+                  Positioned(
+                    top: topInset + 8,
+                    right: 12,
+                    child: GestureDetector(
+                      onTap: () async {
+                        final confirmed = await confirmDelete(
+                          context,
+                          ref,
+                          title: s.deletePostTitle,
+                          body: s.deletePostBody,
+                        );
+                        if (confirmed) {
+                          await ref
+                              .read(postsServiceProvider)
+                              .deletePost(widget.postId);
+                          if (context.mounted) widget.onClose?.call();
+                        }
+                      },
+                      child: const CircleAvatar(
+                        radius: 18,
+                        backgroundColor: AppColors.error,
+                        child: AppIcon('trash', color: Colors.white, size: 20),
+                      ),
+                    ),
+                  ),
+                if (isOwner)
+                  Positioned(
+                    top: topInset + 56,
+                    right: 12,
+                    child: GestureDetector(
+                      onTap: () => showEditCaptionDialog(
+                        context,
+                        ref,
+                        postId: widget.postId,
+                        currentCaption: caption,
+                      ),
+                      child: const CircleAvatar(
+                        radius: 18,
+                        backgroundColor: Colors.black38,
+                        child: Icon(
+                          Icons.edit_outlined,
+                          color: Colors.white,
+                          size: 18,
+                        ),
+                      ),
+                    ),
+                  ),
+                // Mute toggle — kept top-side so the footer stays exactly the
+                // Figma layout (which has no mute glyph); stacks under
+                // delete/edit when the owner is viewing.
+                Positioned(
+                  top: topInset + (isOwner ? 104 : 8),
+                  right: 12,
+                  child: GestureDetector(
+                    onTap: () => ref.read(reelsMutedProvider.notifier).toggle(),
+                    child: CircleAvatar(
+                      radius: 16,
+                      backgroundColor: Colors.black38,
+                      child: Icon(
+                        muted ? Icons.volume_off : Icons.volume_up,
+                        color: Colors.white,
+                        size: 18,
+                      ),
+                    ),
+                  ),
+                ),
+                // Figma MyReel footer: store row with the heart/bookmark/share
+                // actions inline on its right, caption below spanning full width.
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 24,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          GestureDetector(
+                            onTap: () => context.push('/store/$storeId'),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                CircleAvatar(
+                                  radius: 16,
+                                  backgroundColor: Colors.white,
+                                  backgroundImage:
+                                      (store?['avatarUrl'] as String? ?? '')
+                                          .isNotEmpty
+                                      ? CachedNetworkImageProvider(
+                                          store!['avatarUrl'] as String,
+                                        )
+                                      : null,
+                                  child:
+                                      (store?['avatarUrl'] as String? ?? '')
+                                          .isEmpty
+                                      ? Icon(
+                                          Icons.storefront,
+                                          size: 16,
+                                          color: AppColors.textMuted,
+                                        )
+                                      : null,
+                                ),
+                                const SizedBox(width: 8),
+                                ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 140,
+                                  ),
+                                  child: Text(
+                                    store?['name'] as String? ?? '',
+                                    style: AppTypography.bodyMediumSemibold
+                                        .copyWith(color: Colors.white),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Spacer(),
+                          _FooterAction(
+                            iconName: isLiked ? 'heart_filled' : 'heart',
+                            color: isLiked ? AppColors.error : Colors.white,
+                            label: likesCount > 0 ? '$likesCount' : null,
+                            onTap: () => ref
+                                .read(likeStateProvider(widget.postId).notifier)
+                                .toggle(),
+                          ),
+                          const SizedBox(width: 16),
+                          _FooterAction(
+                            iconName: 'send',
+                            color: Colors.white,
+                            label: (widget.post['sentCount'] as int? ?? 0) > 0
+                                ? '${widget.post['sentCount']}'
+                                : null,
+                            onTap: () => showSendToChatSheet(
+                              context,
+                              ref,
+                              postId: widget.postId,
+                              postStoreId: storeId,
+                              postCaption: caption,
+                              postMediaUrl:
+                                  widget.post['thumbnailUrl'] as String? ?? '',
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          _FooterAction(
+                            iconName: isSaved ? 'bookmark_filled' : 'bookmark',
+                            color: Colors.white,
+                            onTap: () => toggleSaveAndNotify(
+                              context,
+                              ref,
+                              widget.postId,
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          _FooterAction(
+                            iconName: 'arrow_share',
+                            color: Colors.white,
+                            label: (widget.post['sharesCount'] as int? ?? 0) > 0
+                                ? '${widget.post['sharesCount']}'
+                                : null,
+                            onTap: () =>
+                                shareAndNotify(context, ref, widget.postId),
+                          ),
+                          const SizedBox(width: 16),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.visibility_outlined,
+                                color: Colors.white,
+                                size: 24,
+                              ),
+                              if ((widget.post['viewsCount'] as int? ?? 0) >
+                                  0) ...[
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${widget.post['viewsCount']}',
+                                  style: AppTypography.bodySmall.copyWith(
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ],
+                      ),
+                      if (caption.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          caption,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTypography.bodySmall.copyWith(
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                      if (widget.post['price'] != null) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          '${widget.post['price']} TMT',
+                          style: AppTypography.bodyMediumSemibold.copyWith(
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (_video != null && _video!.value.isInitialized)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: _ScrubBar(
+                      video: _video!,
+                      scrubbing: _scrubbing,
+                      onScrubStart: _onScrubStart,
+                      onScrubSeek: _onScrubSeek,
+                      onScrubEnd: _onScrubEnd,
+                    ),
+                  ),
               ],
             ),
           ),
-          if (_video != null && _video!.value.isInitialized)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: bottomInset,
-              child: _ScrubBar(
-                video: _video!,
-                scrubbing: _scrubbing,
-                onScrubStart: _onScrubStart,
-                onScrubSeek: _onScrubSeek,
-                onScrubEnd: _onScrubEnd,
-              ),
+        ),
+        // Message box — sends straight to the reel's store, same pattern as
+        // the story viewer's reply box. A real Column sibling below the
+        // video (not a Positioned overlay) so the keyboard pushes it up
+        // properly instead of covering it.
+        SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _replyController,
+                    style: const TextStyle(color: Colors.white),
+                    cursorColor: Colors.white,
+                    decoration: InputDecoration(
+                      hintText: s.typeMessage,
+                      hintStyle: const TextStyle(color: Colors.white54),
+                      filled: true,
+                      fillColor: Colors.white.withValues(alpha: 0.15),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
+                    // Keyboard's Done key only dismisses the keyboard — it
+                    // isn't a second send button. Sending is exclusively the
+                    // explicit send icon below.
+                    onSubmitted: (_) =>
+                        FocusManager.instance.primaryFocus?.unfocus(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  icon: _sendingReply
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.send, color: Colors.white),
+                  onPressed: _sendingReply ? null : _sendReply,
+                ),
+              ],
             ),
-        ],
-      ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -403,6 +743,15 @@ class _ScrubBarState extends State<_ScrubBar> {
             setState(() => _dragRatio = null);
             widget.onScrubEnd();
           },
+          // A touch that starts here but resolves as a vertical swipe (the
+          // reels pager's own gesture) cancels the tap — without this,
+          // onScrubStart's pause() never gets a matching onScrubEnd(), so
+          // the reel stays paused and _onVideoTick's completion detection
+          // (gated on !_scrubbing) stays dead for that reel indefinitely.
+          onTapCancel: () {
+            setState(() => _dragRatio = null);
+            widget.onScrubEnd();
+          },
           onHorizontalDragStart: (details) {
             final ratio = _ratioFor(details.localPosition.dx, width);
             setState(() => _dragRatio = ratio);
@@ -429,7 +778,10 @@ class _ScrubBarState extends State<_ScrubBar> {
                 final duration = widget.video.value.duration;
                 final position = widget.video.value.position;
                 final liveRatio = duration.inMilliseconds > 0
-                    ? (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0)
+                    ? (position.inMilliseconds / duration.inMilliseconds).clamp(
+                        0.0,
+                        1.0,
+                      )
                     : 0.0;
                 final ratio = _dragRatio ?? liveRatio;
 
@@ -471,9 +823,14 @@ class _ScrubBarState extends State<_ScrubBar> {
 }
 
 class _FooterAction extends StatelessWidget {
-  const _FooterAction({required this.icon, required this.color, this.label, this.onTap});
+  const _FooterAction({
+    required this.iconName,
+    required this.color,
+    this.label,
+    this.onTap,
+  });
 
-  final IconData icon;
+  final String iconName;
   final Color color;
   final String? label;
   final VoidCallback? onTap;
@@ -485,10 +842,13 @@ class _FooterAction extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: color, size: 24),
+          AppIcon(iconName, color: color, size: 24),
           if (label != null) ...[
             const SizedBox(width: 4),
-            Text(label!, style: AppTypography.bodySmall.copyWith(color: Colors.white)),
+            Text(
+              label!,
+              style: AppTypography.bodySmall.copyWith(color: Colors.white),
+            ),
           ],
         ],
       ),

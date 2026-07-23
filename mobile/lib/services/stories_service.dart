@@ -31,7 +31,9 @@ class StoriesService {
     final storyRef = _firestore.collection('stories').doc();
     final ext = mediaType == 'video' ? 'mp4' : 'jpg';
     final contentType = mediaType == 'video' ? 'video/mp4' : 'image/jpeg';
-    final ref = _storage.ref('stores/$storeId/stories/${storyRef.id}/media.$ext');
+    final ref = _storage.ref(
+      'stores/$storeId/stories/${storyRef.id}/media.$ext',
+    );
     await ref.putData(bytes, SettableMetadata(contentType: contentType));
     final mediaUrl = await ref.getDownloadURL();
 
@@ -78,7 +80,10 @@ class StoriesService {
 
 /// How many unique users watched this story — shown to the owning store's
 /// admin in the story viewer footer.
-final storyViewCountProvider = StreamProvider.family<int, String>((ref, storyId) {
+final storyViewCountProvider = StreamProvider.family<int, String>((
+  ref,
+  storyId,
+) {
   return ref
       .watch(firestoreProvider)
       .collection('stories')
@@ -86,7 +91,7 @@ final storyViewCountProvider = StreamProvider.family<int, String>((ref, storyId)
       .collection('views')
       .snapshots()
       .map((snap) => snap.docs.length);
-});
+}, isAutoDispose: true);
 
 final storiesServiceProvider = Provider<StoriesService>((ref) {
   return StoriesService(

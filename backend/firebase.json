@@ -22,6 +22,9 @@
   "storage": {
     "rules": "storage.rules"
   },
+  "hosting": {
+    "source": "../web-admin"
+  },
   "emulators": {
     "auth": {
       "host": "0.0.0.0",

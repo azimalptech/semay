@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../core/l10n.dart';
+import '../../services/auth_service.dart';
 import '../shared/widgets/error_state_view.dart';
 import '../shared/widgets/post_card.dart';
 import 'store_profile_providers.dart';
@@ -26,7 +27,8 @@ class StorePostsPagerScreen extends ConsumerStatefulWidget {
   final bool reelsOnly;
 
   @override
-  ConsumerState<StorePostsPagerScreen> createState() => _StorePostsPagerScreenState();
+  ConsumerState<StorePostsPagerScreen> createState() =>
+      _StorePostsPagerScreenState();
 }
 
 class _StorePostsPagerScreenState extends ConsumerState<StorePostsPagerScreen> {
@@ -39,6 +41,11 @@ class _StorePostsPagerScreenState extends ConsumerState<StorePostsPagerScreen> {
     final postsAsync = widget.reelsOnly
         ? ref.watch(storeReelsProvider(widget.storeId))
         : ref.watch(storePostsProvider(widget.storeId));
+    final role = ref.watch(appRoleProvider).value;
+    final storeIds = ref.watch(storeIdsProvider).value ?? [];
+    final isOwner =
+        (role == AppRole.admin || role == AppRole.superadmin) &&
+        storeIds.contains(widget.storeId);
 
     return Scaffold(
       appBar: AppBar(title: Text(s.post)),
@@ -48,7 +55,9 @@ class _StorePostsPagerScreenState extends ConsumerState<StorePostsPagerScreen> {
 
           if (!_scrolledToInitial) {
             _scrolledToInitial = true;
-            final tappedIndex = posts.indexWhere((doc) => doc.id == widget.initialPostId);
+            final tappedIndex = posts.indexWhere(
+              (doc) => doc.id == widget.initialPostId,
+            );
             if (tappedIndex > 0) {
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 if (_itemScrollController.isAttached) {
@@ -63,14 +72,20 @@ class _StorePostsPagerScreenState extends ConsumerState<StorePostsPagerScreen> {
             itemCount: posts.length,
             itemBuilder: (context, index) {
               final doc = posts[index];
-              return PostCard(postId: doc.id, post: doc.data());
+              return PostCard(
+                postId: doc.id,
+                post: doc.data(),
+                showOwnerActions: isOwner,
+              );
             },
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, stack) => ErrorStateView(
           onRetry: () => ref.invalidate(
-            widget.reelsOnly ? storeReelsProvider(widget.storeId) : storePostsProvider(widget.storeId),
+            widget.reelsOnly
+                ? storeReelsProvider(widget.storeId)
+                : storePostsProvider(widget.storeId),
           ),
         ),
       ),

@@ -24,6 +24,10 @@ ui-debug.log
 *.emulator-data/
 firebase-export-*/
 
+# `firebase auth:export` output — contains every user's password hash
+# (including superadmin accounts). Never commit; regenerate on demand.
+auth-export.json
+
 # graphify (generated knowledge-graph output, not source)
 graphify-out/
 

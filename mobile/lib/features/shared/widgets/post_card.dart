@@ -4,25 +4,39 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
 import '../../../core/app_icon.dart';
+import '../../../core/l10n.dart';
+import '../../../core/media_cache.dart';
 import '../../../core/theme.dart';
 import '../../../services/posts_service.dart';
 import '../post_interaction_providers.dart';
+import 'confirm_delete_dialog.dart';
 import 'double_tap_like_overlay.dart';
+import 'edit_caption_dialog.dart';
 import 'pinch_zoom_image.dart';
 import 'reel_player_view.dart' show reelsMutedProvider;
 import 'send_to_chat_sheet.dart';
+import 'views_badge.dart';
 
 /// Post card — Figma frame 195:4299, node 195:4325 (post block).
 class PostCard extends ConsumerStatefulWidget {
-  const PostCard({super.key, required this.postId, required this.post});
+  const PostCard({
+    super.key,
+    required this.postId,
+    required this.post,
+    this.showOwnerActions = false,
+  });
 
   final String postId;
   final Map<String, dynamic> post;
+  // Set by StorePostsPagerScreen (the store's own grid pager, which reuses
+  // this same card for both images and reels) when the signed-in admin owns
+  // this post's store — the public Home feed never sets this, since it mixes
+  // in every store's posts, not just the current admin's own.
+  final bool showOwnerActions;
 
   @override
   ConsumerState<PostCard> createState() => _PostCardState();
@@ -30,6 +44,17 @@ class PostCard extends ConsumerStatefulWidget {
 
 class _PostCardState extends ConsumerState<PostCard> {
   int _page = 0;
+  // Written by _FeedReelPlayer as it plays, read at tap-time so opening the
+  // full-screen player (PostDetailScreen -> ReelPlayerView) can resume from
+  // here instead of restarting at 0 — no ValueListenableBuilder attached, so
+  // this is just a cheap place to stash the latest position.
+  final _reelPosition = ValueNotifier<Duration>(Duration.zero);
+
+  @override
+  void dispose() {
+    _reelPosition.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -41,7 +66,8 @@ class _PostCardState extends ConsumerState<PostCard> {
     final post = ref.watch(postDocProvider(postId)).value ?? widget.post;
     final type = post['type'] as String? ?? 'image';
     final storeId = post['storeId'] as String? ?? '';
-    final mediaUrls = (post['mediaUrls'] as List<dynamic>? ?? []).cast<String>();
+    final mediaUrls = (post['mediaUrls'] as List<dynamic>? ?? [])
+        .cast<String>();
     final thumbnailUrl = post['thumbnailUrl'] as String? ?? '';
     final caption = post['caption'] as String? ?? '';
 
@@ -49,9 +75,10 @@ class _PostCardState extends ConsumerState<PostCard> {
     final storeName = store?['name'] as String? ?? '';
     final storeAvatarUrl = store?['avatarUrl'] as String? ?? '';
 
-    final isLiked = ref.watch(isLikedProvider(postId)).value ?? false;
+    final likeState = ref.watch(likeStateProvider(postId));
+    final isLiked = likeState.isLiked;
     final isSaved = ref.watch(isSavedProvider(postId)).value ?? false;
-    final likesCount = post['likesCount'] as int? ?? 0;
+    final likesCount = likeState.likesCount;
     // A reel's mediaUrls[0] is a video file — sharing that as an "image"
     // preview breaks the chat bubble, so prefer the thumbnail whenever one
     // exists (matches posts_grid_view.dart / liked_screen.dart).
@@ -60,14 +87,14 @@ class _PostCardState extends ConsumerState<PostCard> {
         : (mediaUrls.isNotEmpty ? mediaUrls.first : '');
 
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: AppColors.borderDivider)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
             child: GestureDetector(
               onTap: () => context.push('/store/$storeId'),
               child: Row(
@@ -75,19 +102,30 @@ class _PostCardState extends ConsumerState<PostCard> {
                   CircleAvatar(
                     radius: 16,
                     backgroundColor: AppColors.backgroundCard,
-                    backgroundImage:
-                        storeAvatarUrl.isNotEmpty ? CachedNetworkImageProvider(storeAvatarUrl) : null,
+                    backgroundImage: storeAvatarUrl.isNotEmpty
+                        ? CachedNetworkImageProvider(storeAvatarUrl)
+                        : null,
                     child: storeAvatarUrl.isEmpty
-                        ? const Icon(Icons.storefront, size: 16, color: AppColors.textMuted)
+                        ? Icon(
+                            Icons.storefront,
+                            size: 16,
+                            color: AppColors.textMuted,
+                          )
                         : null,
                   ),
                   const SizedBox(width: 8),
-                  Expanded(child: Text(storeName, style: AppTypography.bodyMediumSemibold)),
+                  Expanded(
+                    child: Text(
+                      storeName,
+                      style: AppTypography.bodyMediumSemibold,
+                    ),
+                  ),
                   IconButton(
-                    icon: isSaved
-                        ? const Icon(Icons.bookmark, color: Colors.black)
-                        : const AppIcon('bookmark', color: AppColors.textPrimary),
-                    onPressed: () => ref.read(postsServiceProvider).toggleSave(postId),
+                    icon: AppIcon(
+                      isSaved ? 'bookmark_filled' : 'bookmark',
+                      color: AppColors.textPrimary,
+                    ),
+                    onPressed: () => toggleSaveAndNotify(context, ref, postId),
                   ),
                 ],
               ),
@@ -95,18 +133,58 @@ class _PostCardState extends ConsumerState<PostCard> {
           ),
           DoubleTapLikeOverlay(
             isLiked: isLiked,
-            onLike: () => ref.read(postsServiceProvider).toggleLike(postId),
-            onSingleTap: type == 'reel' ? () => context.push('/post/$postId') : null,
+            onLike: () => ref.read(likeStateProvider(postId).notifier).like(),
+            onSingleTap: type == 'reel'
+                ? () {
+                    debugPrint(
+                      'post_card: opening reel $postId at position '
+                      '${_reelPosition.value}',
+                    );
+                    context.push(
+                      '/post/$postId',
+                      extra: _reelPosition.value.inMilliseconds,
+                    );
+                  }
+                : null,
             child: AspectRatio(
               aspectRatio: 1,
-              child: _PostMedia(
-                postId: postId,
-                type: type,
-                mediaUrls: mediaUrls,
-                thumbnailUrl: thumbnailUrl,
-                page: _page,
-                onPageChanged: (i) => setState(() => _page = i),
-              ),
+              // Reel tiles keep the eye+count inline in the action row below
+              // (no carousel dots to collide with, and matches the dedicated
+              // Reels tab's own footer layout) — only image/carousel posts
+              // get the count pulled onto the media as a corner badge.
+              child: type == 'reel'
+                  ? _PostMedia(
+                      postId: postId,
+                      type: type,
+                      mediaUrls: mediaUrls,
+                      thumbnailUrl: thumbnailUrl,
+                      page: _page,
+                      onPageChanged: (i) => setState(() => _page = i),
+                      positionNotifier: _reelPosition,
+                    )
+                  : Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        _PostMedia(
+                          postId: postId,
+                          type: type,
+                          mediaUrls: mediaUrls,
+                          thumbnailUrl: thumbnailUrl,
+                          page: _page,
+                          onPageChanged: (i) => setState(() => _page = i),
+                          positionNotifier: _reelPosition,
+                        ),
+                        Positioned(
+                          right: 12,
+                          bottom: 12,
+                          child: IgnorePointer(
+                            child: ViewsBadge(
+                              viewsCount: post['viewsCount'] as int? ?? 0,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
             ),
           ),
           Padding(
@@ -127,7 +205,9 @@ class _PostCardState extends ConsumerState<PostCard> {
                           height: 6,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            color: i == _page ? AppColors.brand : AppColors.buttonMuted,
+                            color: i == _page
+                                ? AppColors.brand
+                                : AppColors.buttonMuted,
                           ),
                         ),
                     ],
@@ -135,13 +215,21 @@ class _PostCardState extends ConsumerState<PostCard> {
                 Row(
                   children: [
                     InkWell(
-                      onTap: () => ref.read(postsServiceProvider).toggleLike(postId),
+                      onTap: () =>
+                          ref.read(likeStateProvider(postId).notifier).toggle(),
                       child: Row(
                         children: [
                           isLiked
-                              ? const AppIcon('heart', size: 24, color: AppColors.error)
-                              : const Icon(Icons.favorite_border,
-                                  size: 24, color: AppColors.textPrimary),
+                              ? const AppIcon(
+                                  'heart_filled',
+                                  size: 24,
+                                  color: AppColors.error,
+                                )
+                              : AppIcon(
+                                  'heart',
+                                  size: 24,
+                                  color: AppColors.textPrimary,
+                                ),
                           const SizedBox(width: 4),
                           Text('$likesCount', style: AppTypography.bodySmall),
                         ],
@@ -157,14 +245,100 @@ class _PostCardState extends ConsumerState<PostCard> {
                         postCaption: caption,
                         postMediaUrl: previewImageUrl,
                       ),
-                      child: const AppIcon('send_to_chat', size: 24, color: AppColors.textPrimary),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          AppIcon(
+                            'send_to_chat',
+                            size: 24,
+                            color: AppColors.textPrimary,
+                          ),
+                          if ((post['sentCount'] as int? ?? 0) > 0) ...[
+                            const SizedBox(width: 4),
+                            Text(
+                              '${post['sentCount']}',
+                              style: AppTypography.bodySmall,
+                            ),
+                          ],
+                        ],
+                      ),
                     ),
-                    const Spacer(),
+                    const SizedBox(width: 16),
                     InkWell(
-                      onTap: () => SharePlus.instance
-                          .share(ShareParams(uri: Uri.parse('semay://post/$postId'))),
-                      child: const AppIcon('arrow_share', size: 24, color: AppColors.textPrimary),
+                      onTap: () => shareAndNotify(context, ref, postId),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          AppIcon(
+                            'arrow_share',
+                            size: 24,
+                            color: AppColors.textPrimary,
+                          ),
+                          if ((post['sharesCount'] as int? ?? 0) > 0) ...[
+                            const SizedBox(width: 4),
+                            Text(
+                              '${post['sharesCount']}',
+                              style: AppTypography.bodySmall,
+                            ),
+                          ],
+                        ],
+                      ),
                     ),
+                    if (type == 'reel') ...[
+                      const SizedBox(width: 16),
+                      Icon(
+                        Icons.visibility_outlined,
+                        size: 24,
+                        color: AppColors.textMuted,
+                      ),
+                      if ((post['viewsCount'] as int? ?? 0) > 0) ...[
+                        const SizedBox(width: 4),
+                        Text(
+                          '${post['viewsCount']}',
+                          style: AppTypography.bodySmall.copyWith(
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                      ],
+                    ],
+                    const Spacer(),
+                    if (widget.showOwnerActions) ...[
+                      const SizedBox(width: 16),
+                      InkWell(
+                        onTap: () => showEditCaptionDialog(
+                          context,
+                          ref,
+                          postId: postId,
+                          currentCaption: caption,
+                        ),
+                        child: Icon(
+                          Icons.edit_outlined,
+                          size: 24,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      InkWell(
+                        onTap: () async {
+                          final s = ref.read(l10nProvider);
+                          final confirmed = await confirmDelete(
+                            context,
+                            ref,
+                            title: s.deletePostTitle,
+                            body: s.deletePostBody,
+                          );
+                          if (!confirmed) return;
+                          await ref
+                              .read(postsServiceProvider)
+                              .deletePost(postId);
+                        },
+                        child: const AppIcon(
+                          'trash',
+                          size: 24,
+                          color: AppColors.error,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ],
@@ -177,7 +351,10 @@ class _PostCardState extends ConsumerState<PostCard> {
                 TextSpan(
                   style: AppTypography.bodyMedium,
                   children: [
-                    TextSpan(text: '$storeName ', style: AppTypography.bodyMediumSemibold),
+                    TextSpan(
+                      text: '$storeName ',
+                      style: AppTypography.bodyMediumSemibold,
+                    ),
                     TextSpan(text: caption),
                   ],
                 ),
@@ -185,11 +362,23 @@ class _PostCardState extends ConsumerState<PostCard> {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
+          if (post['price'] != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+              child: Text(
+                '${post['price']} TMT',
+                style: AppTypography.bodyMediumSemibold.copyWith(
+                  color: AppColors.brand,
+                ),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
             child: Text(
               _formatDate(post['createdAt']),
-              style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary),
+              style: AppTypography.bodySmall.copyWith(
+                color: AppColors.textSecondary,
+              ),
             ),
           ),
         ],
@@ -202,8 +391,18 @@ String _formatDate(dynamic timestamp) {
   final date = timestamp?.toDate();
   if (date == null) return '';
   const months = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December',
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
   ];
   final hour = date.hour.toString().padLeft(2, '0');
   final minute = date.minute.toString().padLeft(2, '0');
@@ -218,6 +417,7 @@ class _PostMedia extends StatelessWidget {
     required this.thumbnailUrl,
     required this.page,
     required this.onPageChanged,
+    required this.positionNotifier,
   });
 
   final String postId;
@@ -226,6 +426,7 @@ class _PostMedia extends StatelessWidget {
   final String thumbnailUrl;
   final int page;
   final ValueChanged<int> onPageChanged;
+  final ValueNotifier<Duration> positionNotifier;
 
   @override
   Widget build(BuildContext context) {
@@ -236,6 +437,7 @@ class _PostMedia extends StatelessWidget {
         postId: postId,
         videoUrl: mediaUrls.first,
         thumbnailUrl: thumbnailUrl.isNotEmpty ? thumbnailUrl : mediaUrls.first,
+        positionNotifier: positionNotifier,
       );
     }
 
@@ -251,7 +453,10 @@ class _PostMedia extends StatelessWidget {
           itemCount: mediaUrls.length,
           onPageChanged: onPageChanged,
           itemBuilder: (context, i) => PinchZoomImage(
-            child: CachedNetworkImage(imageUrl: mediaUrls[i], fit: BoxFit.cover),
+            child: CachedNetworkImage(
+              imageUrl: mediaUrls[i],
+              fit: BoxFit.cover,
+            ),
           ),
         ),
         Positioned(
@@ -269,7 +474,9 @@ class _PostMedia extends StatelessWidget {
                 ),
                 child: Text(
                   '${page + 1}/${mediaUrls.length}',
-                  style: AppTypography.bodySmall.copyWith(color: AppColors.textOnPrimary),
+                  style: AppTypography.bodySmall.copyWith(
+                    color: AppColors.textOnPrimary,
+                  ),
                 ),
               ),
             ),
@@ -284,11 +491,17 @@ class _PostMedia extends StatelessWidget {
 /// (VisibilityDetector), muted/unmuted following the same shared toggle as
 /// the dedicated Reels tab so the setting is consistent app-wide.
 class _FeedReelPlayer extends ConsumerStatefulWidget {
-  const _FeedReelPlayer({required this.postId, required this.videoUrl, required this.thumbnailUrl});
+  const _FeedReelPlayer({
+    required this.postId,
+    required this.videoUrl,
+    required this.thumbnailUrl,
+    required this.positionNotifier,
+  });
 
   final String postId;
   final String videoUrl;
   final String thumbnailUrl;
+  final ValueNotifier<Duration> positionNotifier;
 
   @override
   ConsumerState<_FeedReelPlayer> createState() => _FeedReelPlayerState();
@@ -297,76 +510,68 @@ class _FeedReelPlayer extends ConsumerStatefulWidget {
 class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
   VideoPlayerController? _video;
   bool _visible = false;
-  // Plays twice (first play + one repeat) then stops on a replay icon,
-  // same as the dedicated Reels tab / post-detail player.
-  int _replays = 0;
-  bool _ended = false;
 
   @override
   void initState() {
     super.initState();
-    final vc = VideoPlayerController.networkUrl(Uri.parse(widget.videoUrl));
-    _video = vc;
-    vc.setVolume(ref.read(reelsMutedProvider) ? 0 : 1);
-    vc.addListener(_onVideoTick);
-    vc.initialize().then((_) {
-      if (!mounted) return;
-      if (_visible) vc.play();
-      setState(() {});
-    });
+    _loadVideo();
   }
 
-  void _onVideoTick() {
+  // Caching the file (not just streaming it via .networkUrl) makes a
+  // rewatch instant from disk instead of re-downloading — same treatment as
+  // the story viewer's video loading.
+  Future<void> _loadVideo() async {
+    final file = await MediaCache.instance.getSingleFile(widget.videoUrl);
+    if (!mounted) return;
+    final vc = VideoPlayerController.file(file);
+    _video = vc;
+    vc.setVolume(ref.read(reelsMutedProvider) ? 0 : 1);
+    // Loops indefinitely — user controls when it stops (scrolling away),
+    // not a fixed replay count.
+    vc.setLooping(true);
+    vc.addListener(_reportPosition);
+    await vc.initialize();
+    if (!mounted || _video != vc) return;
+    if (_visible) vc.play();
+    setState(() {});
+  }
+
+  // Keeps the parent PostCard's positionNotifier current so tapping through
+  // to the full-screen player (see PostCard's onSingleTap) can resume from
+  // here instead of restarting at 0 — video_player's listener already fires
+  // on every position update during playback, cheap to just mirror it.
+  void _reportPosition() {
     final video = _video;
-    if (video == null || !video.value.isInitialized || _ended) return;
-    final duration = video.value.duration;
-    if (duration <= Duration.zero) return;
-    // Android's reported end-of-playback position is reliably a few ms
-    // short of duration, never >=, so an exact comparison never fires.
-    final remaining = duration - video.value.position;
-    final completed = !video.value.isPlaying && remaining < const Duration(milliseconds: 300);
-    if (!completed) return;
-    if (_replays < 1) {
-      _replays++;
-      video.seekTo(Duration.zero);
-      video.play();
-    } else if (mounted) {
-      setState(() => _ended = true);
-    }
+    if (video == null || !video.value.isInitialized) return;
+    widget.positionNotifier.value = video.value.position;
   }
 
   @override
   void dispose() {
-    _video?.removeListener(_onVideoTick);
+    _video?.removeListener(_reportPosition);
     _video?.dispose();
     super.dispose();
   }
 
   void _onVisibilityChanged(VisibilityInfo info) {
+    // VisibilityDetector can deliver one last callback just after this
+    // widget leaves the tree (e.g. a pull-to-refresh removing this card),
+    // arriving after dispose() — _video isn't nulled out there, so without
+    // this guard a disposed controller's pause()/play() gets called and
+    // throws.
+    if (!mounted) return;
     final isVisible = info.visibleFraction > 0.6;
     if (isVisible == _visible) return;
     _visible = isVisible;
     final video = _video;
     if (video == null || !video.value.isInitialized) return;
     if (isVisible) {
-      // Scrolled back into view: fresh watch, fresh loop budget.
-      _replays = 0;
-      _ended = false;
+      // Scrolled back into view: fresh watch from the start.
       video.seekTo(Duration.zero);
       video.play();
     } else {
       video.pause();
     }
-  }
-
-  void _replay() {
-    final video = _video;
-    if (video == null) return;
-    _replays = 0;
-    _ended = false;
-    video.seekTo(Duration.zero);
-    video.play();
-    setState(() {});
   }
 
   @override
@@ -379,18 +584,17 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
     return VisibilityDetector(
       key: Key('feed-reel-${widget.postId}'),
       onVisibilityChanged: _onVisibilityChanged,
-      // No onTap on the video area itself (beyond the ended/replay case) —
-      // it needs to fall through to the outer DoubleTapLikeOverlay's
-      // onSingleTap, which opens the reel in the full-screen player. An
-      // earlier attempt at tap-to-mute here stole that tap instead.
-      child: GestureDetector(
-        onTap: _ended ? _replay : null,
-        child: Stack(
-          alignment: Alignment.center,
-          fit: StackFit.expand,
-          children: [
-            if (_video?.value.isInitialized ?? false)
-              FittedBox(
+      // No onTap on the video area itself — it needs to fall through to the
+      // outer DoubleTapLikeOverlay's onSingleTap, which opens the reel in
+      // the full-screen player. An earlier attempt at tap-to-mute here stole
+      // that tap instead.
+      child: Stack(
+        alignment: Alignment.center,
+        fit: StackFit.expand,
+        children: [
+          if (_video?.value.isInitialized ?? false)
+            PinchZoomImage(
+              child: FittedBox(
                 fit: BoxFit.cover,
                 clipBehavior: Clip.hardEdge,
                 child: SizedBox(
@@ -398,28 +602,32 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
                   height: _video!.value.size.height,
                   child: VideoPlayer(_video!),
                 ),
-              )
-            else
-              CachedNetworkImage(imageUrl: widget.thumbnailUrl, fit: BoxFit.cover),
-            if (_ended)
-              const Icon(Icons.refresh, color: Colors.white70, size: 56),
-            // Small, corner-scoped hit area — deliberately not covering the
-            // whole tile, so it can't compete with the outer open-reel tap.
-            Positioned(
-              right: 8,
-              bottom: 8,
-              child: GestureDetector(
-                onTap: () => ref.read(reelsMutedProvider.notifier).toggle(),
-                child: CircleAvatar(
-                  radius: 14,
-                  backgroundColor: AppColors.overlayAlphaBlack,
-                  child: Icon(muted ? Icons.volume_off : Icons.volume_up,
-                      color: Colors.white, size: 16),
+              ),
+            )
+          else
+            CachedNetworkImage(
+              imageUrl: widget.thumbnailUrl,
+              fit: BoxFit.cover,
+            ),
+          // Small, corner-scoped hit area — deliberately not covering the
+          // whole tile, so it can't compete with the outer open-reel tap.
+          Positioned(
+            right: 8,
+            bottom: 8,
+            child: GestureDetector(
+              onTap: () => ref.read(reelsMutedProvider.notifier).toggle(),
+              child: CircleAvatar(
+                radius: 14,
+                backgroundColor: AppColors.overlayAlphaBlack,
+                child: Icon(
+                  muted ? Icons.volume_off : Icons.volume_up,
+                  color: Colors.white,
+                  size: 16,
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

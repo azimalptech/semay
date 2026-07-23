@@ -4,9 +4,13 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
 
+import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
@@ -31,17 +35,47 @@ class ChatThreadScreen extends ConsumerStatefulWidget {
   ConsumerState<ChatThreadScreen> createState() => _ChatThreadScreenState();
 }
 
-class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen> {
+class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
+    with WidgetsBindingObserver {
   final _controller = TextEditingController();
-  bool _markedRead = false;
+  final _scrollController = ScrollController();
   bool _hasText = false;
   bool _isAdminHere = false;
   DateTime _lastTypingWrite = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _staleness;
+  bool _isAttaching = false;
+  // Messages load oldest-first (see chatMessagesProvider), so a plain
+  // ListView opens scrolled to the top — jump straight to the newest
+  // message on first load, then smoothly follow along as new ones arrive.
+  int _lastMessageCount = -1;
+  // Set by swiping a bubble (see _SwipeToReply's onReply); shown as a
+  // preview strip above the composer, cleared on send/cancel.
+  Map<String, String?>? _replyingTo;
+
+  void _scrollToBottom({required bool animate}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      final max = _scrollController.position.maxScrollExtent;
+      if (animate) {
+        _scrollController.animateTo(
+          max,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      } else {
+        _scrollController.jumpTo(max);
+      }
+    });
+  }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Read by onMessageCreated to suppress a push notification for a chat
+    // the recipient already has open — see chat_service.dart's
+    // setActiveChat and that function's comment.
+    ref.read(chatServiceProvider).setActiveChat(widget.chatId);
     _controller.addListener(_onTextChanged);
     // Re-evaluates typing-indicator freshness so it disappears when the other
     // side goes quiet without another snapshot arriving.
@@ -50,11 +84,28 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen> {
     });
   }
 
+  // A backgrounded app still has this screen mounted in Flutter's tree, but
+  // the user obviously isn't looking at it — clear activeChatId so push
+  // notifications resume, and restore it on return (as long as this screen
+  // is still the one on top; if they navigated away first, dispose() has
+  // already cleared it and this would just needlessly reset it back).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+    final service = ref.read(chatServiceProvider);
+    if (state == AppLifecycleState.resumed) {
+      service.setActiveChat(widget.chatId);
+    } else {
+      service.setActiveChat(null);
+    }
+  }
+
   void _onTextChanged() {
     final hasText = _controller.text.trim().isNotEmpty;
     if (hasText != _hasText) setState(() => _hasText = hasText);
 
-    if (hasText && DateTime.now().difference(_lastTypingWrite) > _typingWriteGap) {
+    if (hasText &&
+        DateTime.now().difference(_lastTypingWrite) > _typingWriteGap) {
       _lastTypingWrite = DateTime.now();
       ref
           .read(chatServiceProvider)
@@ -64,25 +115,110 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    ref.read(chatServiceProvider).setActiveChat(null);
     _staleness?.cancel();
     _controller.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  void _markReadOnce(bool isAdmin) {
-    if (_markedRead) return;
-    _markedRead = true;
-    ref.read(chatServiceProvider).markThreadRead(widget.chatId, asAdmin: isAdmin);
+  // Runs on every messages emission while this screen is mounted, not just
+  // once on open — a message arriving while the thread is already open
+  // needs to land as read too, not sit at "delivered" until the user
+  // backs out and back in. markMessagesRead/markThreadRead both no-op
+  // cheaply once already applied (see chat_service.dart), so calling this
+  // on every rebuild is fine, not just wasteful-looking.
+  void _syncReadStatus(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> messages,
+    bool isAdmin,
+  ) {
+    final counterpartRole = isAdmin ? 'user' : 'admin';
+    final theirMessages = messages
+        .where((m) => m.data()['senderRole'] == counterpartRole)
+        .toList();
+    final service = ref.read(chatServiceProvider);
+    if (theirMessages.isNotEmpty) {
+      service.markMessagesRead(widget.chatId, theirMessages);
+    }
+    service.markThreadRead(widget.chatId, asAdmin: isAdmin);
   }
 
   void _send() {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     final service = ref.read(chatServiceProvider);
-    service.sendMessage(widget.chatId, text, senderRole: _isAdminHere ? 'admin' : 'user');
+    final replyingTo = _replyingTo;
+    service.sendMessage(
+      widget.chatId,
+      text,
+      senderRole: _isAdminHere ? 'admin' : 'user',
+      replyToMessageId: replyingTo?['messageId'],
+      replyToText: replyingTo?['text'],
+      replyToSenderRole: replyingTo?['senderRole'],
+    );
     service.setTyping(widget.chatId, asAdmin: _isAdminHere, isTyping: false);
     _lastTypingWrite = DateTime.fromMillisecondsSinceEpoch(0);
     _controller.clear();
+    if (replyingTo != null) setState(() => _replyingTo = null);
+  }
+
+  void _startReply(QueryDocumentSnapshot<Map<String, dynamic>> message) {
+    final data = message.data();
+    final text = data['text'] as String? ?? '';
+    final preview = text.isNotEmpty
+        ? text
+        : (data['mediaType'] != null
+              ? '📎'
+              : (data['sharedPostId'] != null ? '📷' : ''));
+    setState(() {
+      _replyingTo = {
+        'messageId': message.id,
+        'text': preview,
+        'senderRole': data['senderRole'] as String?,
+      };
+    });
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  Future<void> _attachMedia() async {
+    if (_isAttaching) return;
+    final file = await ImagePicker().pickMedia();
+    if (file == null || !mounted) return;
+
+    final mime = file.mimeType ?? '';
+    final name = file.name.toLowerCase();
+    final isVideo =
+        mime.startsWith('video/') ||
+        name.endsWith('.mp4') ||
+        name.endsWith('.mov') ||
+        name.endsWith('.webm');
+    final mediaType = isVideo ? 'video' : 'image';
+
+    setState(() => _isAttaching = true);
+    try {
+      final service = ref.read(chatServiceProvider);
+      final url = await service.uploadChatMedia(
+        chatId: widget.chatId,
+        file: file,
+        mediaType: mediaType,
+      );
+      await service.sendMessage(
+        widget.chatId,
+        '',
+        senderRole: _isAdminHere ? 'admin' : 'user',
+        mediaUrl: url,
+        mediaType: mediaType,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.toString())));
+      }
+    } finally {
+      if (mounted) setState(() => _isAttaching = false);
+    }
   }
 
   static bool _isFresh(Timestamp? at) =>
@@ -95,92 +231,255 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen> {
     final myUid = ref.watch(firebaseAuthProvider).currentUser?.uid;
     final role = ref.watch(appRoleProvider).value;
     final storeIds = ref.watch(storeIdsProvider).value ?? [];
-    final isAdminHere = (role == AppRole.admin || role == AppRole.superadmin) &&
+    final isAdminHere =
+        (role == AppRole.admin || role == AppRole.superadmin) &&
         chat != null &&
         storeIds.contains(chat['storeId']);
     _isAdminHere = isAdminHere;
 
-    if (chat != null) _markReadOnce(isAdminHere);
+    final store = chat != null
+        ? ref.watch(storeDocProvider(chat['storeId'] as String)).value
+        : null;
+    final customer = chat != null
+        ? ref.watch(userDocProvider(chat['userId'] as String)).value
+        : null;
+    final title = isAdminHere
+        ? (customer?['name'] as String? ?? '…')
+        : (store?['name'] as String? ?? '…');
 
-    final store = chat != null ? ref.watch(storeDocProvider(chat['storeId'] as String)).value : null;
-    final customer = chat != null ? ref.watch(userDocProvider(chat['userId'] as String)).value : null;
-    final title = isAdminHere ? (customer?['name'] as String? ?? '…') : (store?['name'] as String? ?? '…');
-
-    // Counterpart state, derived from the chat doc: their typing heartbeat,
-    // and whether they've read everything I sent (their unread == 0).
-    final counterpartTyping =
-        _isFresh(chat?[isAdminHere ? 'typingUserAt' : 'typingAdminAt'] as Timestamp?);
-    final counterpartRead = (chat?[isAdminHere ? 'unreadByUser' : 'unreadByAdmin'] as int? ?? 0) == 0;
+    // Counterpart's typing heartbeat, from the chat doc.
+    final counterpartTyping = _isFresh(
+      chat?[isAdminHere ? 'typingUserAt' : 'typingAdminAt'] as Timestamp?,
+    );
+    final isMuted =
+        (chat?[isAdminHere ? 'mutedByAdmin' : 'mutedByUser'] as bool?) ?? false;
 
     final messagesAsync = ref.watch(chatMessagesProvider(widget.chatId));
 
+    final storeId = chat?['storeId'] as String?;
+    // Only the customer side taps through to the store's profile — the
+    // title here shows the *counterpart's* name (store for a customer,
+    // customer for a store admin), and there's no equivalent profile screen
+    // to open for a customer name.
+    final canOpenStoreProfile = !isAdminHere && storeId != null;
+    debugPrint(
+      'chat_thread_screen: role=$role isAdminHere=$isAdminHere '
+      'storeId=$storeId canOpenStoreProfile=$canOpenStoreProfile',
+    );
+
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title),
-            if (counterpartTyping)
-              Text(s.typing,
-                  style: AppTypography.caption.copyWith(color: AppColors.brand)),
-          ],
+        titleSpacing: 0,
+        title: GestureDetector(
+          // opaque, not the GestureDetector default (deferToChild) — a Row
+          // sized to its content only paints across its own tight bounding
+          // box, so deferToChild would leave any gap between/around the
+          // avatar and text as a dead zone that looks tappable (it's inside
+          // the visible AppBar title strip) but never actually registers a
+          // hit. opaque claims the whole padded rectangle below regardless
+          // of what's actually painted in it.
+          behavior: HitTestBehavior.opaque,
+          onTap: canOpenStoreProfile
+              ? () {
+                  debugPrint(
+                    'chat_thread_screen: store title tapped, storeId=$storeId',
+                  );
+                  context.push('/store/$storeId');
+                }
+              : null,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              // No mainAxisSize.min here (was previously set) — that made
+              // this Row report only its content's own intrinsic width, so
+              // a long name rendered at full width and visually overlapped
+              // the actions (mute/call icons) instead of stopping before
+              // them. Defaulting to max fills the title's actual available
+              // width, which is what lets the Expanded below give the name
+              // Text a real width cap to ellipsize against.
+              children: [
+                if (canOpenStoreProfile) ...[
+                  CircleAvatar(
+                    radius: 16,
+                    backgroundColor: AppColors.buttonMuted,
+                    backgroundImage:
+                        (store?['avatarUrl'] as String? ?? '').isNotEmpty
+                        ? CachedNetworkImageProvider(
+                            store!['avatarUrl'] as String,
+                          )
+                        : null,
+                    child: (store?['avatarUrl'] as String? ?? '').isEmpty
+                        ? Icon(
+                            Icons.storefront,
+                            size: 16,
+                            color: AppColors.textMuted,
+                          )
+                        : null,
+                  ),
+                  const SizedBox(width: 10),
+                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      if (counterpartTyping)
+                        Text(
+                          s.typing,
+                          style: AppTypography.caption.copyWith(
+                            color: AppColors.brand,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
         actions: [
-          Builder(builder: (context) {
-            final counterpartData = isAdminHere ? customer : store;
-            final counterpartPhone = counterpartData?['phone'] as String?;
-            return IconButton(
-              icon: const Icon(Icons.call_outlined, color: AppColors.textPrimary),
-              onPressed: (counterpartPhone == null || counterpartPhone.isEmpty)
-                  ? null
-                  : () async {
-                      final uri = Uri(scheme: 'tel', path: counterpartPhone);
-                      if (!await launchUrl(uri) && context.mounted) {
-                        ScaffoldMessenger.of(context)
-                            .showSnackBar(SnackBar(content: Text(s.couldNotOpenDialer)));
-                      }
-                    },
-            );
-          }),
+          IconButton(
+            icon: Icon(
+              isMuted
+                  ? Icons.notifications_off_outlined
+                  : Icons.notifications_outlined,
+              color: AppColors.textPrimary,
+            ),
+            onPressed: () {
+              ref
+                  .read(chatServiceProvider)
+                  .setChatMuted(
+                    widget.chatId,
+                    asAdmin: isAdminHere,
+                    muted: !isMuted,
+                  );
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    isMuted ? s.notificationsUnmuted : s.notificationsMuted,
+                  ),
+                ),
+              );
+            },
+            tooltip: isMuted ? s.unmuteNotifications : s.muteNotifications,
+          ),
+          Builder(
+            builder: (context) {
+              final counterpartData = isAdminHere ? customer : store;
+              final counterpartPhone = counterpartData?['phone'] as String?;
+              return IconButton(
+                icon: AppIcon('phone', color: AppColors.textPrimary),
+                onPressed:
+                    (counterpartPhone == null || counterpartPhone.isEmpty)
+                    ? null
+                    : () async {
+                        final uri = Uri(scheme: 'tel', path: counterpartPhone);
+                        if (!await launchUrl(uri) && context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(s.couldNotOpenDialer)),
+                          );
+                        }
+                      },
+              );
+            },
+          ),
         ],
       ),
       body: Column(
         children: [
           Expanded(
             child: messagesAsync.when(
-              data: (messages) => ListView.builder(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-                itemCount: messages.length + (counterpartTyping ? 1 : 0),
-                itemBuilder: (context, index) {
-                  if (index == messages.length) return const _TypingBubble();
-
-                  final data = messages[index].data();
-                  final createdAt = data['createdAt'] as Timestamp?;
-                  final previousCreatedAt =
-                      index > 0 ? messages[index - 1].data()['createdAt'] as Timestamp? : null;
-                  final showDateDivider = _isNewDay(createdAt, previousCreatedAt);
-                  final isMine = data['senderId'] == myUid;
-
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (showDateDivider) _DateDivider(timestamp: createdAt),
-                      _MessageBubble(
-                        text: data['text'] as String? ?? '',
-                        sharedPostId: data['sharedPostId'] as String?,
-                        sharedStoryId: data['sharedStoryId'] as String?,
-                        sharedMediaUrl: data['mediaUrl'] as String?,
-                        repliedToStoryLabel: s.repliedToStory,
-                        isMine: isMine,
-                        timestamp: createdAt,
-                        seen: isMine && counterpartRead,
-                      ),
-                    ],
+              data: (messages) {
+                if (messages.length != _lastMessageCount) {
+                  final isFirstLoad = _lastMessageCount == -1;
+                  if (!isFirstLoad && messages.isNotEmpty) {
+                    final newest = messages.last.data();
+                    final createdAt = (newest['createdAt'] as Timestamp?)
+                        ?.toDate();
+                    debugPrint(
+                      'chat_thread_screen: message stream emitted, count '
+                      '$_lastMessageCount->${messages.length}, newest '
+                      'createdAt=$createdAt now=${DateTime.now()} '
+                      'lagMs=${createdAt != null ? DateTime.now().difference(createdAt).inMilliseconds : "n/a"}',
+                    );
+                  }
+                  _lastMessageCount = messages.length;
+                  _scrollToBottom(animate: !isFirstLoad);
+                }
+                _syncReadStatus(messages, isAdminHere);
+                if (messages.isEmpty && !counterpartTyping) {
+                  return _EmptyThreadView(
+                    title: s.noMessagesYetTitle,
+                    subtitle: s.typeMessageToStart,
                   );
-                },
-              ),
+                }
+                return ListView.builder(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 16,
+                  ),
+                  itemCount: messages.length + (counterpartTyping ? 1 : 0),
+                  itemBuilder: (context, index) {
+                    if (index == messages.length) {
+                      return const _TypingBubble();
+                    }
+
+                    final data = messages[index].data();
+                    final createdAt = data['createdAt'] as Timestamp?;
+                    final previousCreatedAt = index > 0
+                        ? messages[index - 1].data()['createdAt'] as Timestamp?
+                        : null;
+                    final showDateDivider = _isNewDay(
+                      createdAt,
+                      previousCreatedAt,
+                    );
+                    final isMine = data['senderId'] == myUid;
+
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (showDateDivider) _DateDivider(timestamp: createdAt),
+                        _SwipeToReply(
+                          isMine: isMine,
+                          onReply: () => _startReply(messages[index]),
+                          child: _MessageBubble(
+                            text: data['text'] as String? ?? '',
+                            sharedPostId: data['sharedPostId'] as String?,
+                            sharedStoryId: data['sharedStoryId'] as String?,
+                            sharedMediaUrl: data['mediaUrl'] as String?,
+                            attachmentType: data['mediaType'] as String?,
+                            repliedToStoryLabel: s.repliedToStory,
+                            replyToText: data['replyToText'] as String?,
+                            // Whoever's viewing this thread wrote the quoted
+                            // message iff its role matches their own current
+                            // role in this chat.
+                            replyToSenderLabel:
+                                data['replyToSenderRole'] == null
+                                ? null
+                                : (data['replyToSenderRole'] ==
+                                          (isAdminHere ? 'admin' : 'user')
+                                      ? s.you
+                                      : title),
+                            isMine: isMine,
+                            timestamp: createdAt,
+                            deliveredAt: data['deliveredAt'] as Timestamp?,
+                            readAt: data['readAt'] as Timestamp?,
+                            // Instagram shows "Seen HH:MM" once, under the
+                            // newest message, not repeated on every bubble.
+                            showSeenCaption: index == messages.length - 1,
+                            seenLabel: s.seenAt,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                );
+              },
               loading: () => const Center(child: CircularProgressIndicator()),
-              error: (error, stack) => Center(child: Text('${s.failedToLoad}: $error')),
+              error: (error, stack) =>
+                  Center(child: Text('${s.failedToLoad}: $error')),
             ),
           ),
           if (isAdminHere) ...[
@@ -201,23 +500,44 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen> {
               storeId: chat['storeId'] as String,
               onPick: (text) {
                 _controller.text = text;
-                _controller.selection = TextSelection.collapsed(offset: text.length);
+                _controller.selection = TextSelection.collapsed(
+                  offset: text.length,
+                );
               },
             ),
           ],
           SafeArea(
             top: false,
             child: Container(
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 color: AppColors.backgroundCard,
                 border: Border(top: BorderSide(color: AppColors.borderDivider)),
               ),
-              padding: const EdgeInsets.fromLTRB(16, 17, 16, 16),
-              child: _Composer(
-                controller: _controller,
-                hasText: _hasText,
-                hint: s.typeMessage,
-                onSend: _send,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_replyingTo != null)
+                    _ReplyPreviewBar(
+                      senderLabel:
+                          _replyingTo!['senderRole'] ==
+                              (isAdminHere ? 'admin' : 'user')
+                          ? s.you
+                          : title,
+                      text: _replyingTo!['text'] ?? '',
+                      onCancel: () => setState(() => _replyingTo = null),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                    child: _Composer(
+                      controller: _controller,
+                      hasText: _hasText,
+                      hint: s.typeMessage,
+                      onSend: _send,
+                      onAttach: _attachMedia,
+                      isAttaching: _isAttaching,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -232,6 +552,53 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen> {
     final a = current.toDate();
     final b = previous.toDate();
     return a.year != b.year || a.month != b.month || a.day != b.day;
+  }
+}
+
+/// Figma "No conversation yet" empty state — mailbox illustration, title,
+/// subtitle. Shown only when this specific thread has zero messages (not
+/// the chat *list* being empty, which is chat_list_screen.dart's own
+/// noConversationsYet state).
+class _EmptyThreadView extends StatelessWidget {
+  const _EmptyThreadView({required this.title, required this.subtitle});
+
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SvgPicture.asset(
+              'assets/illustrations/no_message.svg',
+              width: 140,
+              colorFilter: ColorFilter.mode(
+                AppColors.textMuted,
+                BlendMode.srcIn,
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              title,
+              style: AppTypography.bodyMediumSemibold,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              subtitle,
+              style: AppTypography.bodySmall.copyWith(
+                color: AppColors.textSecondary,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -266,17 +633,78 @@ class _QuickRepliesRow extends ConsumerWidget {
                 // actually makes the ellipsis kick in.
                 label: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 140),
-                  child: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  child: Text(
+                    text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
                 labelStyle: AppTypography.bodySmall,
                 backgroundColor: AppColors.backgroundCard,
-                side: const BorderSide(color: AppColors.borderDivider),
+                side: BorderSide(color: AppColors.borderDivider),
                 onPressed: () => onPick(text),
               );
             },
           ),
         );
       },
+    );
+  }
+}
+
+/// Preview strip above the composer showing which message a long-press
+/// picked to reply to — mirrors the quoted block _MessageBubble itself
+/// renders once the reply is actually sent, minus the sender label (redundant
+/// with the "Reply to X" heading here).
+class _ReplyPreviewBar extends ConsumerWidget {
+  const _ReplyPreviewBar({
+    required this.senderLabel,
+    required this.text,
+    required this.onCancel,
+  });
+
+  final String senderLabel;
+  final String text;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final s = ref.watch(l10nProvider);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
+      child: Row(
+        children: [
+          Container(width: 3, height: 32, color: AppColors.brand),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${s.reply} $senderLabel',
+                  style: AppTypography.caption.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.brand,
+                  ),
+                ),
+                Text(
+                  text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTypography.bodySmall.copyWith(
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: AppIcon('close', size: 18, color: AppColors.textMuted),
+            onPressed: onCancel,
+          ),
+        ],
+      ),
     );
   }
 }
@@ -289,9 +717,12 @@ class _TypingBubble extends StatefulWidget {
   State<_TypingBubble> createState() => _TypingBubbleState();
 }
 
-class _TypingBubbleState extends State<_TypingBubble> with SingleTickerProviderStateMixin {
-  late final AnimationController _controller =
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat();
+class _TypingBubbleState extends State<_TypingBubble>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..repeat();
 
   @override
   void dispose() {
@@ -306,9 +737,9 @@ class _TypingBubbleState extends State<_TypingBubble> with SingleTickerProviderS
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 3),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           color: AppColors.backgroundCard,
-          borderRadius: BorderRadius.only(
+          borderRadius: const BorderRadius.only(
             topLeft: Radius.circular(16),
             topRight: Radius.circular(16),
             bottomRight: Radius.circular(16),
@@ -323,12 +754,16 @@ class _TypingBubbleState extends State<_TypingBubble> with SingleTickerProviderS
                 if (i > 0) const SizedBox(width: 4),
                 Opacity(
                   // Triangle wave per dot, staggered by a third of a cycle.
-                  opacity: 0.25 +
-                      0.75 * (1 - (((_controller.value + i / 3) % 1.0) * 2 - 1).abs()),
+                  opacity:
+                      0.25 +
+                      0.75 *
+                          (1 -
+                              (((_controller.value + i / 3) % 1.0) * 2 - 1)
+                                  .abs()),
                   child: Container(
                     width: 7,
                     height: 7,
-                    decoration: const BoxDecoration(
+                    decoration: BoxDecoration(
                       color: AppColors.textSecondary,
                       shape: BoxShape.circle,
                     ),
@@ -352,13 +787,28 @@ class _DateDivider extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Center(child: Text(_label(ref.watch(l10nProvider), timestamp), style: AppTypography.label)),
+      child: Center(
+        child: Text(
+          _label(ref.watch(l10nProvider), timestamp),
+          style: AppTypography.label,
+        ),
+      ),
     );
   }
 
   static const _months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
 
   static String _label(S s, Timestamp? timestamp) {
@@ -375,36 +825,176 @@ class _DateDivider extends ConsumerWidget {
   }
 }
 
+/// Instagram/WhatsApp-style swipe-to-reply: drag a bubble past
+/// [_replyThreshold] and release to reply to it, instead of a long-press.
+/// Direction is fixed per bubble (matches Telegram, not WhatsApp's
+/// always-swipe-right): mine (right-aligned) swipes left, theirs
+/// (left-aligned) swipes right — i.e. always toward the center, away from
+/// whichever edge the bubble is anchored to. The bubble follows the finger
+/// (clamped to [_maxDrag]) with a reply icon fading in behind it on the
+/// trailing edge, then springs back once the drag ends.
+///
+/// Forces a tight full-width constraint onto the bubble via SizedBox (not
+/// Stack's own `alignment`, and not Positioned.fill either) — [child] is
+/// `_MessageBubble`, which positions itself left/right via its *own*
+/// internal Column(crossAxisAlignment: isMine ? end : start), and that only
+/// works when its parent hands it a tight full width, same as it gets one
+/// layer up from the stretched item Column. Two things that would each
+/// break it: letting Stack's own `alignment` float the whole (shrink-
+/// wrapped) bubble instead (the first version of this widget — collapsed
+/// every bubble, mine or theirs, onto the same side), or Positioned.fill
+/// (forces the *height* to match the stack's, which — since the small reply
+/// icon is the only other, non-positioned child informing that height —
+/// would clip any bubble taller than the icon). SizedBox(width: infinity)
+/// only ever constrains width, leaving height to size off the bubble's own
+/// content like before.
+class _SwipeToReply extends StatefulWidget {
+  const _SwipeToReply({
+    required this.child,
+    required this.isMine,
+    required this.onReply,
+  });
+
+  final Widget child;
+  final bool isMine;
+  final VoidCallback onReply;
+
+  @override
+  State<_SwipeToReply> createState() => _SwipeToReplyState();
+}
+
+class _SwipeToReplyState extends State<_SwipeToReply>
+    with SingleTickerProviderStateMixin {
+  static const _maxDrag = 64.0;
+  static const _replyThreshold = 48.0;
+
+  late final AnimationController _snapBack =
+      AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 200),
+      )..addListener(() {
+        setState(() => _dragExtent = _snapBackTween.evaluate(_snapBack));
+      });
+  Tween<double> _snapBackTween = Tween<double>(begin: 0, end: 0);
+  double _dragExtent = 0;
+
+  @override
+  void dispose() {
+    _snapBack.dispose();
+    super.dispose();
+  }
+
+  void _onDragUpdate(DragUpdateDetails details) {
+    setState(() {
+      final next = _dragExtent + details.delta.dx;
+      // Mine only ever goes negative (left), theirs only ever positive
+      // (right) — clamping the *other* direction to 0 means a stray drag
+      // the wrong way just does nothing instead of dragging backwards.
+      _dragExtent = widget.isMine
+          ? next.clamp(-_maxDrag, 0.0)
+          : next.clamp(0.0, _maxDrag);
+    });
+  }
+
+  void _onDragEnd(DragEndDetails details) {
+    if (_dragExtent.abs() >= _replyThreshold) widget.onReply();
+    _snapBackTween = Tween<double>(begin: _dragExtent, end: 0);
+    _snapBack
+      ..reset()
+      ..forward();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = (_dragExtent.abs() / _replyThreshold).clamp(0.0, 1.0);
+    return GestureDetector(
+      onHorizontalDragUpdate: _onDragUpdate,
+      onHorizontalDragEnd: _onDragEnd,
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: widget.isMine ? Alignment.centerRight : Alignment.centerLeft,
+        children: [
+          Opacity(
+            opacity: progress,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: AppIcon('send', size: 18, color: AppColors.textMuted),
+            ),
+          ),
+          SizedBox(
+            width: double.infinity,
+            child: Transform.translate(
+              offset: Offset(_dragExtent, 0),
+              child: widget.child,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.text,
     this.sharedPostId,
     this.sharedStoryId,
     this.sharedMediaUrl,
+    this.attachmentType,
     required this.repliedToStoryLabel,
+    this.replyToText,
+    this.replyToSenderLabel,
     required this.isMine,
     required this.timestamp,
-    required this.seen,
+    required this.deliveredAt,
+    required this.readAt,
+    required this.showSeenCaption,
+    required this.seenLabel,
   });
 
   final String text;
   final String? sharedPostId;
   final String? sharedStoryId;
   final String? sharedMediaUrl;
+  // Denormalized quote of whichever message this one replies to (see
+  // ChatService.sendMessage) — null on a message that isn't a reply.
+  final String? replyToText;
+  final String? replyToSenderLabel;
+
+  /// "image" | "video" — set only for a raw gallery attachment (as opposed
+  /// to a "send to chat" shared post/story, which use sharedPostId/
+  /// sharedStoryId instead and carry their own preview rendering).
+  final String? attachmentType;
   final String repliedToStoryLabel;
   final bool isMine;
   final Timestamp? timestamp;
-  final bool seen;
+
+  /// Set by the *recipient's* client (see chat_service.dart's
+  /// markMessagesDelivered/markMessagesRead) — null/null means only sent,
+  /// deliveredAt-only means delivered-not-read, both set means read. Only
+  /// meaningful (rendered) on my own messages — there's no status icon on
+  /// an incoming bubble.
+  final Timestamp? deliveredAt;
+  final Timestamp? readAt;
+
+  /// True only for the newest message in the thread — Instagram shows
+  /// "Seen HH:MM" once under the last message, not repeated on every bubble.
+  final bool showSeenCaption;
+  final String Function(String time) seenLabel;
 
   @override
   Widget build(BuildContext context) {
     final isSharedPost = sharedPostId != null;
     final isStoryReply = sharedStoryId != null;
+    final isAttachment =
+        attachmentType != null && (sharedMediaUrl?.isNotEmpty ?? false);
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Column(
-        crossAxisAlignment: isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        crossAxisAlignment: isMine
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
         children: [
           if (isStoryReply)
             Padding(
@@ -412,18 +1002,29 @@ class _MessageBubble extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.reply, size: 14, color: AppColors.textSecondary),
+                  Icon(Icons.reply, size: 14, color: AppColors.textSecondary),
                   const SizedBox(width: 4),
-                  Text(repliedToStoryLabel,
-                      style: AppTypography.caption.copyWith(color: AppColors.textSecondary)),
+                  Text(
+                    repliedToStoryLabel,
+                    style: AppTypography.caption.copyWith(
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
                 ],
               ),
             ),
           GestureDetector(
-            onTap: isSharedPost ? () => context.push('/post/$sharedPostId') : null,
+            onTap: isSharedPost
+                ? () => context.push('/post/$sharedPostId')
+                : isAttachment
+                ? () =>
+                      _openAttachment(context, sharedMediaUrl!, attachmentType!)
+                : null,
             child: Container(
-              constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
-              padding: isSharedPost || isStoryReply
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.78,
+              ),
+              padding: isSharedPost || isStoryReply || isAttachment
                   ? const EdgeInsets.all(6)
                   : const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -435,25 +1036,93 @@ class _MessageBubble extends StatelessWidget {
                   bottomRight: Radius.circular(isMine ? 0 : 16),
                 ),
               ),
-              child: isSharedPost
-                  ? _SharedPostPreview(
-                      postId: sharedPostId,
-                      mediaUrl: sharedMediaUrl ?? '',
-                      caption: text,
-                      onLight: !isMine,
-                    )
-                  : isStoryReply && (sharedMediaUrl?.isNotEmpty ?? false)
+              child: Column(
+                // start, not stretch — a Container here has only a maxWidth
+                // cap (no fixed width), so stretch would force every bubble
+                // to render at the full cap regardless of how short its
+                // content is, instead of hugging it like before this reply
+                // quote block was added.
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (replyToText != null && replyToText!.isNotEmpty)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        border: Border(
+                          left: BorderSide(
+                            width: 3,
+                            color: isMine
+                                ? AppColors.textOnPrimary.withValues(alpha: 0.6)
+                                : AppColors.brand,
+                          ),
+                        ),
+                        color: isMine
+                            ? AppColors.textOnPrimary.withValues(alpha: 0.12)
+                            : AppColors.backgroundPrimary,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (replyToSenderLabel != null)
+                            Text(
+                              replyToSenderLabel!,
+                              style: AppTypography.caption.copyWith(
+                                fontWeight: FontWeight.w600,
+                                color: isMine
+                                    ? AppColors.textOnPrimary
+                                    : AppColors.brand,
+                              ),
+                            ),
+                          Text(
+                            replyToText!,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTypography.caption.copyWith(
+                              color: isMine
+                                  ? AppColors.textOnPrimary.withValues(
+                                      alpha: 0.85,
+                                    )
+                                  : AppColors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  isSharedPost
+                      ? _SharedPostPreview(
+                          postId: sharedPostId,
+                          mediaUrl: sharedMediaUrl ?? '',
+                          caption: text,
+                          onLight: !isMine,
+                        )
+                      : isStoryReply && (sharedMediaUrl?.isNotEmpty ?? false)
                       ? _SharedPostPreview(
                           mediaUrl: sharedMediaUrl!,
                           caption: text,
                           onLight: !isMine,
                         )
+                      : isAttachment
+                      ? _AttachmentThumbnail(
+                          mediaUrl: sharedMediaUrl!,
+                          mediaType: attachmentType!,
+                        )
                       : Text(
                           text,
                           style: AppTypography.bodyMedium.copyWith(
-                            color: isMine ? AppColors.textOnPrimary : AppColors.textPrimary,
+                            color: isMine
+                                ? AppColors.textOnPrimary
+                                : AppColors.textPrimary,
                           ),
                         ),
+                ],
+              ),
             ),
           ),
           const SizedBox(height: 2),
@@ -461,16 +1130,35 @@ class _MessageBubble extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (isMine) ...[
-                Icon(
-                  seen ? Icons.done_all : Icons.done,
+                AppIcon(
+                  // Single check = sent only; double gray = delivered to
+                  // their device; double blue = they've opened the thread
+                  // and read it. See chat_service.dart's
+                  // markMessagesDelivered/markMessagesRead for who sets
+                  // these and when.
+                  readAt != null || deliveredAt != null
+                      ? 'check_double'
+                      : 'check',
                   size: 16,
-                  color: seen ? AppColors.brand : AppColors.textSecondary,
+                  color: readAt != null
+                      ? AppColors.brand
+                      : AppColors.textSecondary,
                 ),
                 const SizedBox(width: 2),
               ],
               Text(_formatTime(timestamp), style: AppTypography.caption),
             ],
           ),
+          if (isMine && showSeenCaption && readAt != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                seenLabel(_formatTime(readAt)),
+                style: AppTypography.caption.copyWith(
+                  color: AppColors.textMuted,
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -511,12 +1199,15 @@ class _SharedPostPreview extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final textColor = onLight ? AppColors.textPrimary : AppColors.textOnPrimary;
 
-    final post = postId != null ? ref.watch(postDocProvider(postId!)).value : null;
+    final post = postId != null
+        ? ref.watch(postDocProvider(postId!)).value
+        : null;
     final isReel = post?['type'] == 'reel';
     String imageUrl = mediaUrl;
     if (post != null) {
       final thumbnailUrl = post['thumbnailUrl'] as String? ?? '';
-      final mediaUrls = (post['mediaUrls'] as List<dynamic>? ?? []).cast<String>();
+      final mediaUrls = (post['mediaUrls'] as List<dynamic>? ?? [])
+          .cast<String>();
       imageUrl = isReel
           ? thumbnailUrl // may be empty (no thumbnail generated) — placeholder below
           : (mediaUrls.isNotEmpty ? mediaUrls.first : mediaUrl);
@@ -537,7 +1228,8 @@ class _SharedPostPreview extends ConsumerWidget {
                   CachedNetworkImage(
                     imageUrl: imageUrl,
                     fit: BoxFit.cover,
-                    errorWidget: (context, url, error) => const _VideoPlaceholder(),
+                    errorWidget: (context, url, error) =>
+                        const _VideoPlaceholder(),
                   )
                 else if (isReel)
                   const _VideoPlaceholder()
@@ -546,7 +1238,11 @@ class _SharedPostPreview extends ConsumerWidget {
                 // Reels read as videos, not broken images: play badge on top.
                 if (isReel)
                   const Center(
-                    child: Icon(Icons.play_circle_fill, color: Colors.white, size: 40),
+                    child: Icon(
+                      Icons.play_circle_fill,
+                      color: Colors.white,
+                      size: 40,
+                    ),
                   ),
               ],
             ),
@@ -574,6 +1270,136 @@ class _VideoPlaceholder extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(color: const Color(0xFF3A3A3A));
+  }
+}
+
+void _openAttachment(BuildContext context, String mediaUrl, String mediaType) {
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (context) =>
+          _AttachmentViewerScreen(mediaUrl: mediaUrl, mediaType: mediaType),
+    ),
+  );
+}
+
+/// A gallery-picked photo/video attached directly to a message (as opposed
+/// to a "send to chat" shared post/story, which get their own
+/// _SharedPostPreview) — square thumbnail matching that same layout, tap
+/// opens the full-size viewer below.
+class _AttachmentThumbnail extends StatelessWidget {
+  const _AttachmentThumbnail({required this.mediaUrl, required this.mediaType});
+
+  final String mediaUrl;
+  final String mediaType;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: AspectRatio(
+        aspectRatio: 1,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (mediaType == 'video')
+              const _VideoPlaceholder()
+            else
+              CachedNetworkImage(
+                imageUrl: mediaUrl,
+                fit: BoxFit.cover,
+                errorWidget: (context, url, error) => const _VideoPlaceholder(),
+              ),
+            if (mediaType == 'video')
+              const Center(
+                child: Icon(
+                  Icons.play_circle_fill,
+                  color: Colors.white,
+                  size: 40,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AttachmentViewerScreen extends StatefulWidget {
+  const _AttachmentViewerScreen({
+    required this.mediaUrl,
+    required this.mediaType,
+  });
+
+  final String mediaUrl;
+  final String mediaType;
+
+  @override
+  State<_AttachmentViewerScreen> createState() =>
+      _AttachmentViewerScreenState();
+}
+
+class _AttachmentViewerScreenState extends State<_AttachmentViewerScreen> {
+  VideoPlayerController? _video;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.mediaType == 'video') {
+      final vc = VideoPlayerController.networkUrl(Uri.parse(widget.mediaUrl));
+      _video = vc;
+      vc.initialize().then((_) {
+        if (mounted) setState(() {});
+        vc.play();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _video?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final video = _video;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          Center(
+            child: widget.mediaType == 'video'
+                ? (video != null && video.value.isInitialized)
+                      ? AspectRatio(
+                          aspectRatio: video.value.aspectRatio,
+                          child: GestureDetector(
+                            onTap: () => setState(
+                              () => video.value.isPlaying
+                                  ? video.pause()
+                                  : video.play(),
+                            ),
+                            child: VideoPlayer(video),
+                          ),
+                        )
+                      : const CircularProgressIndicator(color: Colors.white)
+                : InteractiveViewer(
+                    child: CachedNetworkImage(
+                      imageUrl: widget.mediaUrl,
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+          ),
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 8,
+            left: 8,
+            child: IconButton(
+              icon: const AppIcon('close', color: Colors.white),
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -614,12 +1440,16 @@ class _Composer extends StatelessWidget {
     required this.hasText,
     required this.hint,
     required this.onSend,
+    required this.onAttach,
+    required this.isAttaching,
   });
 
   final TextEditingController controller;
   final bool hasText;
   final String hint;
   final VoidCallback onSend;
+  final VoidCallback onAttach;
+  final bool isAttaching;
 
   @override
   Widget build(BuildContext context) {
@@ -637,16 +1467,41 @@ class _Composer extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 8),
               child: Row(
                 children: [
-                  const Icon(Icons.image_outlined, size: 24, color: AppColors.textMuted),
+                  GestureDetector(
+                    onTap: isAttaching ? null : onAttach,
+                    child: isAttaching
+                        ? SizedBox(
+                            width: 24,
+                            height: 24,
+                            child: Padding(
+                              padding: const EdgeInsets.all(2),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: AppColors.textMuted,
+                              ),
+                            ),
+                          )
+                        : AppIcon(
+                            'image',
+                            size: 24,
+                            color: AppColors.textMuted,
+                          ),
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: TextField(
                       controller: controller,
                       style: AppTypography.bodyMedium,
-                      onSubmitted: (_) => onSend(),
+                      // Keyboard's Done key only dismisses the keyboard —
+                      // it isn't a second send button. Sending is
+                      // exclusively the explicit send icon on the right.
+                      onSubmitted: (_) =>
+                          FocusManager.instance.primaryFocus?.unfocus(),
                       decoration: InputDecoration(
                         hintText: hint,
-                        hintStyle: AppTypography.bodyMedium.copyWith(color: AppColors.textMuted),
+                        hintStyle: AppTypography.bodyMedium.copyWith(
+                          color: AppColors.textMuted,
+                        ),
                         border: InputBorder.none,
                         isDense: true,
                       ),

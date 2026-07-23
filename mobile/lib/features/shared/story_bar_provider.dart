@@ -38,15 +38,18 @@ final _activeStoriesProvider = StreamProvider<Map<String, Timestamp>>((ref) {
       .where('expiresAt', isGreaterThan: Timestamp.now())
       .snapshots()
       .map((snap) {
-    final latest = <String, Timestamp>{};
-    for (final doc in snap.docs) {
-      final storeId = doc.data()['storeId'] as String;
-      final createdAt = doc.data()['createdAt'] as Timestamp? ?? Timestamp.now();
-      final current = latest[storeId];
-      if (current == null || createdAt.compareTo(current) > 0) latest[storeId] = createdAt;
-    }
-    return latest;
-  });
+        final latest = <String, Timestamp>{};
+        for (final doc in snap.docs) {
+          final storeId = doc.data()['storeId'] as String;
+          final createdAt =
+              doc.data()['createdAt'] as Timestamp? ?? Timestamp.now();
+          final current = latest[storeId];
+          if (current == null || createdAt.compareTo(current) > 0) {
+            latest[storeId] = createdAt;
+          }
+        }
+        return latest;
+      });
 });
 
 /// storeId -> when the signed-in user last watched that store's stories
@@ -61,10 +64,13 @@ final _storySeenProvider = StreamProvider<Map<String, Timestamp>>((ref) {
       .doc(user.uid)
       .collection('storySeen')
       .snapshots()
-      .map((snap) => {
-            for (final doc in snap.docs)
-              if (doc.data()['seenAt'] is Timestamp) doc.id: doc.data()['seenAt'] as Timestamp,
-          });
+      .map(
+        (snap) => {
+          for (final doc in snap.docs)
+            if (doc.data()['seenAt'] is Timestamp)
+              doc.id: doc.data()['seenAt'] as Timestamp,
+        },
+      );
 });
 
 /// Homepage story bar rows: admin's own store pinned first (always shown, as
@@ -86,17 +92,23 @@ final storyBarProvider = FutureProvider<List<StoryRingInfo>>((ref) async {
 
     final latestAt = active[storeId];
     final seenAt = seenMap[storeId];
-    infos.add(StoryRingInfo(
-      storeId: storeId,
-      storeName: data['name'] as String? ?? '',
-      avatarUrl: data['avatarUrl'] as String? ?? '',
-      hasStories: latestAt != null,
-      seen: latestAt != null && seenAt != null && seenAt.compareTo(latestAt) >= 0,
-      isOwn: ownStoreIds.contains(storeId),
-    ));
+    infos.add(
+      StoryRingInfo(
+        storeId: storeId,
+        storeName: data['name'] as String? ?? '',
+        avatarUrl: data['avatarUrl'] as String? ?? '',
+        hasStories: latestAt != null,
+        seen:
+            latestAt != null &&
+            seenAt != null &&
+            seenAt.compareTo(latestAt) >= 0,
+        isOwn: ownStoreIds.contains(storeId),
+      ),
+    );
   }
 
-  int latestMillis(StoryRingInfo r) => active[r.storeId]?.millisecondsSinceEpoch ?? 0;
+  int latestMillis(StoryRingInfo r) =>
+      active[r.storeId]?.millisecondsSinceEpoch ?? 0;
   infos.sort((a, b) {
     if (a.isOwn != b.isOwn) return a.isOwn ? -1 : 1;
     if (a.seen != b.seen) return a.seen ? 1 : -1;

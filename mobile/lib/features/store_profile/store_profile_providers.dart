@@ -4,14 +4,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../services/firestore_service.dart';
 import '../feed/feed_providers.dart';
 
-final storeDocProvider = StreamProvider.family<Map<String, dynamic>?, String>((ref, storeId) {
+final storeDocProvider = StreamProvider.family<Map<String, dynamic>?, String>((
+  ref,
+  storeId,
+) {
   return ref
       .watch(firestoreProvider)
       .collection('stores')
       .doc(storeId)
       .snapshots()
       .map((snap) => snap.data());
-});
+}, isAutoDispose: true);
 
 class StorePostsNotifier extends AsyncNotifier<List<PostDoc>> {
   StorePostsNotifier(this.storeId);
@@ -35,6 +38,15 @@ class StorePostsNotifier extends AsyncNotifier<List<PostDoc>> {
   Future<List<PostDoc>> build() async {
     _lastDoc = null;
     hasMore = true;
+
+    // See FeedNotifier.build()'s comment — same cache-first instant paint.
+    try {
+      final cached = await _baseQuery
+          .limit(feedPageSize)
+          .get(const GetOptions(source: Source.cache));
+      if (cached.docs.isNotEmpty) state = AsyncData(cached.docs);
+    } catch (_) {}
+
     final snap = await _baseQuery.limit(feedPageSize).get();
     if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
     hasMore = snap.docs.length == feedPageSize;
@@ -44,16 +56,20 @@ class StorePostsNotifier extends AsyncNotifier<List<PostDoc>> {
   Future<void> loadMore() async {
     if (!hasMore || _lastDoc == null) return;
     final current = state.value ?? [];
-    final snap = await _baseQuery.startAfterDocument(_lastDoc!).limit(feedPageSize).get();
+    final snap = await _baseQuery
+        .startAfterDocument(_lastDoc!)
+        .limit(feedPageSize)
+        .get();
     if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
     hasMore = snap.docs.length == feedPageSize;
     state = AsyncData([...current, ...snap.docs]);
   }
 }
 
-final storePostsProvider = AsyncNotifierProvider.family<StorePostsNotifier, List<PostDoc>, String>(
-  (storeId) => StorePostsNotifier(storeId),
-);
+final storePostsProvider =
+    AsyncNotifierProvider.family<StorePostsNotifier, List<PostDoc>, String>(
+      (storeId) => StorePostsNotifier(storeId),
+    );
 
 class StoreReelsNotifier extends AsyncNotifier<List<PostDoc>> {
   StoreReelsNotifier(this.storeId);
@@ -78,6 +94,15 @@ class StoreReelsNotifier extends AsyncNotifier<List<PostDoc>> {
   Future<List<PostDoc>> build() async {
     _lastDoc = null;
     hasMore = true;
+
+    // See FeedNotifier.build()'s comment — same cache-first instant paint.
+    try {
+      final cached = await _baseQuery
+          .limit(feedPageSize)
+          .get(const GetOptions(source: Source.cache));
+      if (cached.docs.isNotEmpty) state = AsyncData(cached.docs);
+    } catch (_) {}
+
     final snap = await _baseQuery.limit(feedPageSize).get();
     if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
     hasMore = snap.docs.length == feedPageSize;
@@ -87,13 +112,17 @@ class StoreReelsNotifier extends AsyncNotifier<List<PostDoc>> {
   Future<void> loadMore() async {
     if (!hasMore || _lastDoc == null) return;
     final current = state.value ?? [];
-    final snap = await _baseQuery.startAfterDocument(_lastDoc!).limit(feedPageSize).get();
+    final snap = await _baseQuery
+        .startAfterDocument(_lastDoc!)
+        .limit(feedPageSize)
+        .get();
     if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
     hasMore = snap.docs.length == feedPageSize;
     state = AsyncData([...current, ...snap.docs]);
   }
 }
 
-final storeReelsProvider = AsyncNotifierProvider.family<StoreReelsNotifier, List<PostDoc>, String>(
-  (storeId) => StoreReelsNotifier(storeId),
-);
+final storeReelsProvider =
+    AsyncNotifierProvider.family<StoreReelsNotifier, List<PostDoc>, String>(
+      (storeId) => StoreReelsNotifier(storeId),
+    );

@@ -38,15 +38,18 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
   Future<void> _submit(String userPhone) async {
     setState(() => _submitting = true);
     try {
-      await ref.read(chatServiceProvider).acceptOrder(
+      await ref
+          .read(chatServiceProvider)
+          .acceptOrder(
             chatId: widget.chatId,
             itemQuantity: _quantity,
             userPhone: userPhone,
           );
       if (mounted) Navigator.of(context).pop();
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(ref.read(l10nProvider).orderAccepted)));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(ref.read(l10nProvider).orderAccepted)),
+        );
       }
     } catch (e) {
       _showError('$e');
@@ -56,7 +59,9 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
   }
 
   void _showError(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -84,7 +89,9 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
               const Spacer(),
               IconButton(
                 icon: const Icon(Icons.remove),
-                onPressed: _quantity > 1 ? () => setState(() => _quantity--) : null,
+                onPressed: _quantity > 1
+                    ? () => setState(() => _quantity--)
+                    : null,
               ),
               Text('$_quantity'),
               IconButton(
@@ -97,14 +104,23 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
             children: [
               Text(s.phoneLabel),
               const Spacer(),
-              Text(userPhone ?? '...', style: Theme.of(context).textTheme.bodyMedium),
+              Text(
+                userPhone ?? '...',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
             ],
           ),
           const SizedBox(height: 16),
           FilledButton(
-            onPressed: (_submitting || userPhone == null) ? null : () => _submit(userPhone),
+            onPressed: (_submitting || userPhone == null)
+                ? null
+                : () => _submit(userPhone),
             child: _submitting
-                ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator())
+                ? const SizedBox(
+                    height: 20,
+                    width: 20,
+                    child: CircularProgressIndicator(),
+                  )
                 : Text(s.acceptOrder),
           ),
         ],

@@ -1,8 +1,10 @@
 import { notFound } from "next/navigation";
 import { adminDb } from "@/lib/firebaseAdmin";
 import { getTranslations, toClientDict } from "@/lib/l10n";
+import { requireSuperAdmin } from "@/lib/session";
 import { PromoteAdminForm } from "./_components/PromoteAdminForm";
 import { RevokeAdminButton } from "./_components/RevokeAdminButton";
+import { DeleteStoreButton } from "./_components/DeleteStoreButton";
 
 interface AdminRow {
   uid: string;
@@ -15,6 +17,10 @@ export default async function StoreAdminsPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  // Defense in depth — see dashboard/page.tsx's comment; this page reads
+  // admin phone numbers and can grant/revoke store-admin claims, so it
+  // needs its own check regardless of the layout's.
+  await requireSuperAdmin();
   const { id: storeId } = await params;
   const t = await getTranslations();
   const clientT = toClientDict(t);
@@ -72,6 +78,16 @@ export default async function StoreAdminsPage({
             ))}
           </tbody>
         </table>
+      </div>
+
+      <div>
+        <h2 className="mb-2 text-sm font-semibold text-gray-500">{t.dangerZone}</h2>
+        <DeleteStoreButton
+          storeId={storeId}
+          storeName={store.name as string}
+          confirmLabel={t.deleteStoreConfirmLabel(store.name as string)}
+          t={clientT}
+        />
       </div>
     </div>
   );

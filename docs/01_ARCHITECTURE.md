@@ -56,6 +56,7 @@ See `02_DATA_MODEL.md` for full schema. Security rules will:
 /stores/{storeId}/posts/{postId}/{index}.jpg|mp4
 /stores/{storeId}/stories/{storyId}.jpg|mp4
 /users/{uid}/avatar.jpg
+/chats/{chatId}/{timestamp}.jpg|mp4    # gallery attachments sent in-thread
 ```
 Cloud Function trigger on upload can generate thumbnails for videos (reels) so the feed doesn't have to
 load full video files just to show a preview frame.

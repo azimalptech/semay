@@ -1,9 +1,14 @@
 import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
-import 'package:flutter/foundation.dart' show kIsWeb, TargetPlatform, defaultTargetPlatform;
+import 'package:flutter/foundation.dart'
+    show kIsWeb, TargetPlatform, defaultTargetPlatform;
 
-// TODO(phase-0-followup): This file is a placeholder. Run `flutterfire configure`
-// from mobile/ against the real Firebase project to generate the actual values
-// (requires the user's Firebase console login) — do not deploy with these.
+// Real values for the semay-b57ee Firebase project (fetched via
+// `firebase apps:sdkconfig` after registering each platform's app —
+// `flutterfire configure` needs an interactive browser login this
+// environment can't do, so these were pulled directly instead). Debug
+// builds still route through the local emulator regardless of these values
+// (see main.dart's kDebugMode block) — only release builds actually talk to
+// this real backend.
 class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
     if (kIsWeb) return web;
@@ -19,45 +24,30 @@ class DefaultFirebaseOptions {
     }
   }
 
-  // Demo values matching the emulator suite's `--project demo-semay` — only
-  // valid against the local emulator (see main.dart), never a real project.
   static const FirebaseOptions android = FirebaseOptions(
-    // Must match ^AIza[0-9A-Za-z_-]{35}$ — like the appId below, the native
-    // SDK (Firebase Installations) format-checks it before ANY server call,
-    // including Cloud Functions callables pointed at the local emulator
-    // ("Please set a valid API key" killed acceptOrder/sendOtp otherwise).
-    apiKey: 'AIzaSyDemoKeyForEmulatorTesting12345678',
-    // Must match ^1:\d+:android:[0-9a-f]+$ — the native SDK (Firebase
-    // Installations) rejects non-hex suffixes at runtime even against the
-    // emulator ("Please set your Application ID").
-    appId: '1:12345678901:android:1234567890abcdef1234',
-    messagingSenderId: 'demo-sender-id',
-    projectId: 'demo-semay',
-    storageBucket: 'demo-semay.appspot.com',
+    apiKey: 'AIzaSyBBhT-Wy2FljkUYkm6lWB1iAI8a0bq6dJ8',
+    appId: '1:185543007684:android:8330f92b64b7072011d891',
+    messagingSenderId: '185543007684',
+    projectId: 'semay-b57ee',
+    storageBucket: 'semay-b57ee.firebasestorage.app',
   );
 
-  // Same demo-emulator values as Android (see the format notes there) so an
-  // iOS build at least boots; run `flutterfire configure` before shipping.
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyDemoKeyForEmulatorTesting12345678',
-    appId: '1:12345678901:ios:1234567890abcdef1234',
-    messagingSenderId: 'demo-sender-id',
-    projectId: 'demo-semay',
-    storageBucket: 'demo-semay.appspot.com',
-    iosBundleId: 'com.semay.app',
+    apiKey: 'AIzaSyDL5artgZH2cgS9DwkLyG9oBDkxzsavclg',
+    appId: '1:185543007684:ios:097de46705573a8d11d891',
+    messagingSenderId: '185543007684',
+    projectId: 'semay-b57ee',
+    storageBucket: 'semay-b57ee.firebasestorage.app',
+    iosBundleId: 'com.semay.semay',
   );
 
-  // Demo values matching the emulator suite's `--project demo-semay` — only
-  // valid against the local emulator (see main.dart), never a real project.
-  // Web is enabled purely so Phase 1 can be verified on this machine (no
-  // Android/iOS SDK installed); run `flutterfire configure` for the real
-  // project before shipping a web build.
   static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'demo-api-key',
-    appId: 'demo-app-id',
-    messagingSenderId: 'demo-sender-id',
-    projectId: 'demo-semay',
-    authDomain: 'demo-semay.firebaseapp.com',
-    storageBucket: 'demo-semay.appspot.com',
+    apiKey: 'AIzaSyDIyPUH5ft_Nru0okq-VVOJ_cUiVXYs61k',
+    appId: '1:185543007684:web:025b97f3d38e2f0511d891',
+    messagingSenderId: '185543007684',
+    projectId: 'semay-b57ee',
+    authDomain: 'semay-b57ee.firebaseapp.com',
+    storageBucket: 'semay-b57ee.firebasestorage.app',
+    measurementId: 'G-7FRGNS6MKK',
   );
 }

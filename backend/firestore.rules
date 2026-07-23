@@ -23,12 +23,27 @@ service cloud.firestore {
 
     // users/{uid}
     match /users/{uid} {
-      // Any signed-in reader: store admins must see the customer's
-      // name/avatar in their chat list and the customer's phone in the
-      // accept-order sheet — isSelf-only reads left all of those
-      // permanently blank ('…' names, disabled "accept order" button).
-      allow read: if isSignedIn();
-      allow write: if isSelf(uid) || isSuperAdmin();
+      // get (fetch-by-known-id) vs list (collection query) split deliberately
+      // — every real client read is get-by-uid (store admins resolving a
+      // specific chat's customer name/avatar/phone; isSelf-only reads left
+      // all of those permanently blank). A bare `allow read` grants list
+      // too, which let any signed-in user page through the entire
+      // collection and harvest every user's phone number and fcmTokens —
+      // nothing in the app actually needs that, so it's just denied.
+      allow get: if isSignedIn();
+      allow list: if isSuperAdmin();
+      // phone is the identity key verifyOtp looks up on every login, so a
+      // self-write can touch anything *except* phone — changing it has to
+      // go through the changePhone Cloud Function, which re-verifies
+      // ownership of the new number via the same OTP flow as login first.
+      // role/storeIds are equally protected: verifyOtp re-stamps custom
+      // claims from these exact fields on every login, so a self-write here
+      // would be a direct privilege-escalation path to admin/superadmin —
+      // both are Cloud-Function-only (setStoreAdmin), same as phone.
+      allow write: if isSuperAdmin()
+        || (isSelf(uid) &&
+            !request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['phone', 'role', 'storeIds']));
 
       // users/{uid}/saved/{postId}
       match /saved/{postId} {
@@ -45,36 +60,119 @@ service cloud.firestore {
       match /storySeen/{storeId} {
         allow read, write: if isSelf(uid);
       }
+
+      // users/{uid}/notifications/{id} — server-written only
+      // (broadcastNotification, onMessageCreated); the client can read its
+      // own and mark them read, not create or delete them directly.
+      match /notifications/{notificationId} {
+        allow read: if isSelf(uid);
+        allow update: if isSelf(uid) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      }
     }
 
     // stores/{storeId}
     match /stores/{storeId} {
       allow read: if isSignedIn();
       allow create: if isSuperAdmin();
-      allow update, delete: if isSuperAdmin() || isStoreAdmin(storeId);
+      // A bare doc delete orphans this store's posts/stories/chats/orders —
+      // deleteStore (Cloud Function, Super-Admin-only) is the only supported
+      // path: it cascades through all of that plus Storage before removing
+      // this doc, then calls Admin SDK's delete, which bypasses these rules
+      // entirely. Denying it here (rather than `if isSuperAdmin()`) closes
+      // off the direct client delete that used to leave those orphans behind.
+      allow delete: if false;
+      // adminIds controls who setStoreAdmin/custom claims treat as that
+      // store's admins — Super-Admin-only, same as create/delete above.
+      // campaignStartAt/campaignImageUrl/leaderboardOrder are also
+      // Super-Admin-only (set via setLeaderboardCampaignStart and the web
+      // panel's leaderboard page) — without excluding them here, a store
+      // admin could self-write a campaignStartAt to backdate their own
+      // leaderboard credit, which is exactly the control this field exists
+      // to prevent. A store admin can still update their own store's
+      // profile fields (name/tagline/address/phone/avatarUrl, see
+      // edit_store_screen.dart) but not adminIds, the campaign fields, or
+      // delete the doc outright.
+      allow update: if isSuperAdmin()
+        || (isStoreAdmin(storeId) &&
+            !request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['adminIds', 'campaignStartAt', 'campaignImageUrl', 'leaderboardOrder']));
 
       // stores/{storeId}/quickReplies/{replyId} — canned chat responses,
       // managed and used only by that store's admins.
       match /quickReplies/{replyId} {
         allow read, write: if isStoreAdmin(storeId);
       }
+
+      // stores/{storeId}/leaderboard/{userId} — denormalized order-quantity
+      // aggregate (see docs/02_DATA_MODEL.md), server-written only
+      // (onOrderCreated, setLeaderboardCampaignStart's recompute). A
+      // deliberately public read even for a non-signed-in-to-that-store
+      // user — the whole point is any user can see any store's leaderboard.
+      match /leaderboard/{userId} {
+        allow read: if isSignedIn();
+      }
+    }
+
+    // config/{docId} — small set of app-wide settings written from the
+    // Super Admin web panel (server-side, via Admin SDK — bypasses these
+    // rules) or leaderboard-specific Cloud Functions. Read-only to clients.
+    match /config/{docId} {
+      allow read: if isSignedIn();
     }
 
     // posts/{postId}
     match /posts/{postId} {
       allow read: if isSignedIn();
-      allow create, update, delete: if isStoreAdmin(resource == null ? request.resource.data.storeId : resource.data.storeId);
+      allow create: if isStoreAdmin(request.resource.data.storeId);
+      // update also requires storeId itself stays put — otherwise an admin
+      // could "update" one of their own posts to re-home it under a
+      // different store (they only need to admin the *old* store to pass
+      // this check), silently moving it into that other store's feed and
+      // desyncing postsCount/reelsCount on both sides.
+      //
+      // viewsCount/sentCount/sharesCount are never listed here — all three
+      // are written only server-side, by onViewCreated/onSentCreated/
+      // onShareCreated's triggers (Admin SDK, bypasses these rules
+      // entirely) off their respective unique-per-user subcollections below.
+      allow update: if isStoreAdmin(resource.data.storeId)
+          && request.resource.data.storeId == resource.data.storeId;
+      allow delete: if isStoreAdmin(resource.data.storeId);
 
       match /likes/{uid} {
         allow read: if isSignedIn();
         allow write: if isSelf(uid);
+      }
+
+      // posts/{postId}/views/{uid}, /sent/{uid}, /shares/{uid} — unique-
+      // per-user records, same shape as stories/{storyId}/views/{uid}
+      // above. Anyone signed-in may record their own view/send/share;
+      // only that post's own store admins can read/count them (the
+      // aggregate counts themselves are public via the post doc already,
+      // these subcollections are just the underlying per-user records that
+      // keep a repeat send/share from the same person from inflating the
+      // count — see PostsService.recordView/recordSent/recordShare).
+      match /views/{uid} {
+        allow write: if isSelf(uid);
+        allow read: if isStoreAdmin(get(/databases/$(database)/documents/posts/$(postId)).data.storeId);
+      }
+      match /sent/{uid} {
+        allow write: if isSelf(uid);
+        allow read: if isStoreAdmin(get(/databases/$(database)/documents/posts/$(postId)).data.storeId);
+      }
+      match /shares/{uid} {
+        allow write: if isSelf(uid);
+        allow read: if isStoreAdmin(get(/databases/$(database)/documents/posts/$(postId)).data.storeId);
       }
     }
 
     // stories/{storyId}
     match /stories/{storyId} {
       allow read: if isSignedIn();
-      allow create, update, delete: if isStoreAdmin(resource == null ? request.resource.data.storeId : resource.data.storeId);
+      allow create: if isStoreAdmin(request.resource.data.storeId);
+      allow update: if isStoreAdmin(resource.data.storeId)
+        && request.resource.data.storeId == resource.data.storeId;
+      allow delete: if isStoreAdmin(resource.data.storeId);
 
       // stories/{storyId}/views/{uid} — unique-viewer records ("seen by N").
       // Anyone signed-in may record their own view; listing (counting) them
@@ -99,21 +197,67 @@ service cloud.firestore {
           || isStoreAdmin(resource.data.storeId));
 
       allow create: if isSignedIn()
-        && (request.resource.data.userId == request.auth.uid
-          || isStoreAdmin(request.resource.data.storeId));
+        && request.resource.data.userId == request.auth.uid;
 
+      // Restricted to the exact fields the client ever writes directly
+      // (markThreadRead resets unreadByAdmin/unreadByUser to 0; setTyping;
+      // setChatMuted — all in chat_service.dart). The *increments* to
+      // unreadByAdmin/unreadByUser and lastMessageText/lastMessageAt are the
+      // onMessageCreated trigger's job instead (Admin SDK, bypasses rules
+      // entirely, so it isn't constrained by this allowlist). Without this
+      // allowlist, a participant could rewrite userId/storeId on their own
+      // chat doc: pointing userId at a victim re-homes every future order
+      // (and its leaderboard credit) onto that victim, and pointing storeId
+      // elsewhere re-homes the whole thread — history included — into a
+      // different store's admin chat list.
       allow update: if isSignedIn()
-        && (resource.data.userId == request.auth.uid || isStoreAdmin(resource.data.storeId));
+        && (resource.data.userId == request.auth.uid || isStoreAdmin(resource.data.storeId))
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly([
+              'unreadByAdmin', 'unreadByUser', 'typingAdminAt', 'typingUserAt',
+              'mutedByUser', 'mutedByAdmin',
+              // Per-side "delete from my list" soft-hide stamps (ChatService.
+              // hideChat) — each side hides its own view without touching the
+              // conversation itself; the counterpart keeps the thread.
+              'hiddenByUserAt', 'hiddenByAdminAt',
+            ]);
 
       match /messages/{messageId} {
         allow read: if isSignedIn()
           && (get(/databases/$(database)/documents/chats/$(chatId)).data.userId == request.auth.uid
             || isStoreAdmin(get(/databases/$(database)/documents/chats/$(chatId)).data.storeId));
 
+        // senderRole must match which side of the chat the caller actually
+        // is (previously unchecked — a user could post with senderRole:
+        // 'admin' to flip which unread counter/notification onMessageCreated
+        // fires), and orderId must be null — only acceptOrder's own system
+        // message sets a real one, via the Admin SDK, which bypasses these
+        // rules entirely. Without this, any user could forge a "✅ Order
+        // accepted" message with an orderId of their choosing.
         allow create: if isSignedIn()
           && request.resource.data.senderId == request.auth.uid
-          && (get(/databases/$(database)/documents/chats/$(chatId)).data.userId == request.auth.uid
-            || isStoreAdmin(get(/databases/$(database)/documents/chats/$(chatId)).data.storeId));
+          && request.resource.data.orderId == null
+          && (
+            (get(/databases/$(database)/documents/chats/$(chatId)).data.userId == request.auth.uid
+              && request.resource.data.senderRole == 'user')
+            || (isStoreAdmin(get(/databases/$(database)/documents/chats/$(chatId)).data.storeId)
+              && request.resource.data.senderRole == 'admin')
+          );
+
+        // deliveredAt/readAt (read-receipt timestamps) are set by whichever
+        // side did *not* send the message — the sender's own client has no
+        // business marking its own message delivered/read. Restricted to
+        // exactly those two fields so this can't be repurposed to rewrite
+        // text/senderId/etc. after the fact.
+        allow update: if isSignedIn()
+          && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['deliveredAt', 'readAt'])
+          && (
+            (resource.data.senderRole == 'user'
+              && isStoreAdmin(get(/databases/$(database)/documents/chats/$(chatId)).data.storeId))
+            || (resource.data.senderRole == 'admin'
+              && get(/databases/$(database)/documents/chats/$(chatId)).data.userId == request.auth.uid)
+          );
       }
     }
 
@@ -125,8 +269,29 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // notificationRequests/{requestId} — a store admin's request to Super
+    // Admin to broadcast a notification (see requestBroadcastNotification.ts
+    // / decideNotificationRequest.ts). Created/decided only via those two
+    // callables (admin SDK bypasses rules) — clients only ever read: the
+    // requesting store's own admins see their request history/status,
+    // Super Admin sees the whole queue to act on.
+    match /notificationRequests/{requestId} {
+      allow read: if isSuperAdmin() || isStoreAdmin(resource.data.storeId);
+      allow write: if false;
+    }
+
     // otp_codes/{phone} — Cloud Functions / admin SDK only
     match /otp_codes/{phone} {
+      allow read, write: if false;
+    }
+
+    // sms_dispatch_queue/{id}, sms_dispatch_queue_state/cursor — internal
+    // pacing queue for the SMS gateway (see sendOtp.ts / dispatchQueuedSms.ts
+    // / smsDispatchQueue.ts). Cloud Functions / admin SDK only.
+    match /sms_dispatch_queue/{id} {
+      allow read, write: if false;
+    }
+    match /sms_dispatch_queue_state/{id} {
       allow read, write: if false;
     }
   }

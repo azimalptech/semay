@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/app_icon.dart';
 import '../../../core/theme.dart';
 import '../../story_composer/add_story_flow.dart';
+import '../../story_viewer/story_viewer_screen.dart' show StoryViewerArgs;
 import '../story_bar_provider.dart';
 
 /// Homepage story bar — Figma frame 195:4299 node 195:4308 (user) and
@@ -25,8 +27,10 @@ class StoryRingBar extends ConsumerStatefulWidget {
 
 class _StoryRingBarState extends ConsumerState<StoryRingBar>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _spin =
-      AnimationController(vsync: this, duration: const Duration(seconds: 6))..repeat();
+  late final AnimationController _spin = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 6),
+  )..repeat();
 
   @override
   void dispose() {
@@ -40,11 +44,17 @@ class _StoryRingBarState extends ConsumerState<StoryRingBar>
     if (rings.isEmpty) return const SizedBox.shrink();
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
+      padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
       child: SizedBox(
-        height: 108,
+        height: 116,
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
+          // Each _StoryRing is shifted up 15px via Transform.translate below
+          // (paint-only — its layout box doesn't grow to match), which the
+          // viewport's default Clip.hardEdge then slices off since it now
+          // paints above y=0. Clip.none lets that shifted paint through
+          // instead of cutting the top off every ring.
+          clipBehavior: Clip.none,
           itemCount: rings.length,
           separatorBuilder: (context, index) => const SizedBox(width: 16),
           itemBuilder: (context, index) {
@@ -54,7 +64,20 @@ class _StoryRingBarState extends ConsumerState<StoryRingBar>
               spin: _spin,
               onTap: () {
                 if (ring.hasStories) {
-                  context.push('${widget.storyRoutePrefix}/${ring.storeId}');
+                  // The full ordered queue (not just the tapped ring) so the
+                  // viewer can swipe horizontally between users, Instagram-
+                  // style, instead of only showing whichever one was tapped.
+                  final queue = [
+                    for (final r in rings)
+                      if (r.hasStories) r.storeId,
+                  ];
+                  context.push(
+                    '${widget.storyRoutePrefix}/${ring.storeId}',
+                    extra: StoryViewerArgs(
+                      storeIds: queue,
+                      initialIndex: queue.indexOf(ring.storeId),
+                    ),
+                  );
                 } else if (ring.isOwn) {
                   showAddStorySheet(context, ref, storeId: ring.storeId);
                 }
@@ -71,7 +94,12 @@ class _StoryRingBarState extends ConsumerState<StoryRingBar>
 }
 
 class _StoryRing extends StatelessWidget {
-  const _StoryRing({required this.ring, required this.spin, required this.onTap, this.onAdd});
+  const _StoryRing({
+    required this.ring,
+    required this.spin,
+    required this.onTap,
+    this.onAdd,
+  });
 
   final StoryRingInfo ring;
   final Animation<double> spin;
@@ -82,79 +110,102 @@ class _StoryRing extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 76,
-            height: 76,
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Positioned.fill(
-                  child: AnimatedBuilder(
-                    animation: spin,
-                    builder: (context, child) => CustomPaint(
-                      painter: _RingPainter(
-                        rotation: ring.hasStories && !ring.seen ? spin.value * 2 * math.pi : 0,
-                        gradient: ring.hasStories && !ring.seen,
-                        color: ring.hasStories ? AppColors.buttonMuted : Colors.transparent,
-                      ),
-                      child: child,
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(4),
-                      child: CircleAvatar(
-                        backgroundColor: AppColors.backgroundCard,
-                        backgroundImage: ring.avatarUrl.isNotEmpty
-                            ? CachedNetworkImageProvider(ring.avatarUrl)
-                            : null,
-                        child: ring.avatarUrl.isEmpty
-                            ? const Icon(Icons.storefront, color: AppColors.textMuted)
-                            : null,
-                      ),
-                    ),
-                  ),
-                ),
-                if (onAdd != null)
-                  Positioned(
-                    right: -2,
-                    bottom: -2,
-                    child: GestureDetector(
-                      onTap: onAdd,
-                      child: Container(
-                        width: 24,
-                        height: 24,
-                        decoration: BoxDecoration(
-                          color: AppColors.brand,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: AppColors.backgroundPrimary, width: 1.5),
+      child: Transform.translate(
+        offset: const Offset(0, -15),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 90,
+              height: 90,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Positioned.fill(
+                    child: AnimatedBuilder(
+                      animation: spin,
+                      builder: (context, child) => CustomPaint(
+                        painter: _RingPainter(
+                          rotation: ring.hasStories && !ring.seen
+                              ? spin.value * 2 * math.pi
+                              : 0,
+                          gradient: ring.hasStories && !ring.seen,
+                          color: ring.hasStories
+                              ? AppColors.buttonMuted
+                              : Colors.transparent,
                         ),
-                        child: const Icon(Icons.add, size: 16, color: Colors.white),
+                        child: child,
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: CircleAvatar(
+                          backgroundColor: AppColors.backgroundCard,
+                          backgroundImage: ring.avatarUrl.isNotEmpty
+                              ? CachedNetworkImageProvider(ring.avatarUrl)
+                              : null,
+                          child: ring.avatarUrl.isEmpty
+                              ? Icon(
+                                  Icons.storefront,
+                                  color: AppColors.textMuted,
+                                )
+                              : null,
+                        ),
                       ),
                     ),
                   ),
-              ],
+                  if (onAdd != null)
+                    Positioned(
+                      right: -2,
+                      bottom: -2,
+                      child: GestureDetector(
+                        onTap: onAdd,
+                        child: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: AppColors.brand,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: AppColors.backgroundPrimary,
+                              width: 1.5,
+                            ),
+                          ),
+                          child: const AppIcon(
+                            'plus',
+                            size: 16,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: 76,
-            child: Text(
-              ring.storeName,
-              textAlign: TextAlign.center,
-              overflow: TextOverflow.ellipsis,
-              style: AppTypography.caption.copyWith(color: AppColors.textPrimary),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: 76,
+              child: Text(
+                ring.storeName,
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis,
+                style: AppTypography.caption.copyWith(
+                  color: AppColors.textPrimary,
+                ),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
 
 class _RingPainter extends CustomPainter {
-  _RingPainter({required this.rotation, required this.gradient, required this.color});
+  _RingPainter({
+    required this.rotation,
+    required this.gradient,
+    required this.color,
+  });
 
   final double rotation;
   final bool gradient;

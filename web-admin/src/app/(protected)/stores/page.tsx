@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { adminDb } from "@/lib/firebaseAdmin";
 import { getTranslations, toClientDict } from "@/lib/l10n";
+import { requireSuperAdmin } from "@/lib/session";
 import { CreateStoreForm } from "./_components/CreateStoreForm";
 
 interface StoreRow {
@@ -26,6 +27,10 @@ async function getStores(): Promise<StoreRow[]> {
 }
 
 export default async function StoresPage() {
+  // Defense in depth — see dashboard/page.tsx's comment; layouts don't
+  // re-run on client-side navigation, so per-page checks are what actually
+  // makes session revocation take effect promptly on this page.
+  await requireSuperAdmin();
   const t = await getTranslations();
   const stores = await getStores();
 

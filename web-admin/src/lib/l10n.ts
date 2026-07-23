@@ -58,6 +58,55 @@ export interface Dict {
   store: string;
   quantity: string;
   noMatchingOrders: string;
+  broadcast: string;
+  broadcastTitle: string;
+  broadcastDesc: string;
+  notificationTitle: string;
+  notificationBody: string;
+  send: string;
+  sending: string;
+  broadcastSentPrefix: string;
+  broadcastFailed: string;
+  leaderboard: string;
+  leaderboardTitle: string;
+  selectStoreForCampaign: string;
+  campaignStartLabel: string;
+  campaignStartDesc: string;
+  saveDate: string;
+  savingDate: string;
+  saveDateFailed: string;
+  dateSaved: string;
+  giftImageLabel: string;
+  giftImageDesc: string;
+  upload: string;
+  uploading: string;
+  remove: string;
+  removing: string;
+  noImageUploaded: string;
+  uploadFailed: string;
+  storeOrderLabel: string;
+  storeOrderDesc: string;
+  noStoresForOrder: string;
+  reorderFailed: string;
+  dangerZone: string;
+  deleteStoreTitle: string;
+  deleteStoreDesc: string;
+  deleteStoreConfirmLabel: (storeName: string) => string;
+  deleteStore: string;
+  deletingStore: string;
+  deleteStoreFailed: string;
+  notificationRequests: string;
+  notificationRequestsTitle: string;
+  notificationRequestsDesc: string;
+  requestedBy: string;
+  noPendingRequests: string;
+  approve: string;
+  approving: string;
+  reject: string;
+  rejecting: string;
+  decideRequestFailed: string;
+  requestApprovedSentPrefix: string;
+  maintenance: string;
 }
 
 // React Server Components can't serialize functions across the server/client
@@ -66,10 +115,19 @@ export interface Dict {
 // directly to Client Components". Server Components call those functions
 // directly and only ever need to hand *this* stripped-down type to their
 // client children.
-export type ClientDict = Omit<Dict, "ordersReportDesc" | "noOrders" | "storeAdminsTitle">;
+export type ClientDict = Omit<
+  Dict,
+  "ordersReportDesc" | "noOrders" | "storeAdminsTitle" | "deleteStoreConfirmLabel"
+>;
 
 export function toClientDict(t: Dict): ClientDict {
-  const { ordersReportDesc: _ordersReportDesc, noOrders: _noOrders, storeAdminsTitle: _storeAdminsTitle, ...rest } = t;
+  const {
+    ordersReportDesc: _ordersReportDesc,
+    noOrders: _noOrders,
+    storeAdminsTitle: _storeAdminsTitle,
+    deleteStoreConfirmLabel: _deleteStoreConfirmLabel,
+    ...rest
+  } = t;
   return rest;
 }
 
@@ -125,6 +183,28 @@ const dict: Record<Lang, Dict> = {
     noAdminsYet: "Häzirlikçe admin ýok.",
     revoking: "Aýrylýar...",
     revoke: "Aýyr",
+    dangerZone: "Howply zolak",
+    deleteStoreTitle: "Dükany poz",
+    deleteStoreDesc:
+      "Bu dükanyň ähli ýazgylaryny (posty, story, chat, sargyt) we ýüklenen suratlary hemişelik pozýar. Yzyna alyp bolmaýar.",
+    deleteStoreConfirmLabel: (storeName: string) =>
+      `Tassyklamak üçin "${storeName}" ýazyň:`,
+    deleteStore: "Dükany hemişelik poz",
+    deletingStore: "Pozulýar...",
+    deleteStoreFailed: "Dükany pozup bolmady",
+    notificationRequests: "Bildiriş soraglary",
+    notificationRequestsTitle: "Bildiriş soraglary",
+    notificationRequestsDesc:
+      "Dükan adminleriniň iberen bildiriş soraglary. Tassyklasaňyz, ähli ulanyjylara iberiler.",
+    requestedBy: "Dükan",
+    noPendingRequests: "Garaşylýan sorag ýok",
+    approve: "Tassykla",
+    approving: "Tassyklanýar...",
+    reject: "Ret et",
+    rejecting: "Ret edilýär...",
+    decideRequestFailed: "Amal ýerine ýetip bolmady",
+    requestApprovedSentPrefix: "Iberildi:",
+    maintenance: "Hyzmat",
     language: "Dil",
     filterAll: "Ählisi",
     filterShop: "Dükan",
@@ -135,6 +215,37 @@ const dict: Record<Lang, Dict> = {
     store: "Dükan",
     quantity: "Sany",
     noMatchingOrders: "Gabat gelýän sargyt ýok.",
+    broadcast: "Bildiriş",
+    broadcastTitle: "Bildiriş iber",
+    broadcastDesc: "Ähli ulanyjylara push bildirişi iberiň.",
+    notificationTitle: "Sözbaşy",
+    notificationBody: "Tekst",
+    send: "Iber",
+    sending: "Iberilýär...",
+    broadcastSentPrefix: "Iberildi:",
+    broadcastFailed: "Bildiriş iberip bolmady",
+    leaderboard: "Sanaw",
+    leaderboardTitle: "Sanaw sazlamalary",
+    selectStoreForCampaign: "Dükany saýlaň",
+    campaignStartLabel: "Kampaniýanyň başlangyç senesi",
+    campaignStartDesc:
+      "Diňe şu senäden soň kabul edilen sargytlar saýlanan dükanyň sanawyna girer. Senäni üýtgetmek şol dükanyň sanawyny täzeden hasaplar.",
+    saveDate: "Ýatda sakla",
+    savingDate: "Ýatda saklanýar...",
+    saveDateFailed: "Senäni ýatda saklap bolmady",
+    dateSaved: "Sene ýatda saklandy",
+    giftImageLabel: "Sowgat suraty (3x2)",
+    giftImageDesc: "Saýlanan dükanyň sanawynyň astynda görkezilýär.",
+    upload: "Ýükle",
+    uploading: "Ýüklenýär...",
+    remove: "Aýyr",
+    removing: "Aýrylýar...",
+    noImageUploaded: "Surat ýüklenmedi.",
+    uploadFailed: "Surat ýüklenip bilmedi",
+    storeOrderLabel: "Dükanlaryň tertibi",
+    storeOrderDesc: "Sanaw sahypasyndaky dükan tablarynyň tertibini üýtgediň.",
+    noStoresForOrder: "Häzirlikçe aktiw dükan ýok.",
+    reorderFailed: "Tertibi ýatda saklap bolmady",
   },
   ru: {
     appName: "SeMay Супер Админ",
@@ -183,6 +294,28 @@ const dict: Record<Lang, Dict> = {
     noAdminsYet: "Пока нет админов.",
     revoking: "Отзыв...",
     revoke: "Отозвать",
+    dangerZone: "Опасная зона",
+    deleteStoreTitle: "Удалить магазин",
+    deleteStoreDesc:
+      "Навсегда удаляет все данные этого магазина (посты, истории, чаты, заказы) и загруженные файлы. Это действие необратимо.",
+    deleteStoreConfirmLabel: (storeName: string) =>
+      `Введите "${storeName}" для подтверждения:`,
+    deleteStore: "Удалить магазин навсегда",
+    deletingStore: "Удаление...",
+    deleteStoreFailed: "Не удалось удалить магазин",
+    notificationRequests: "Запросы уведомлений",
+    notificationRequestsTitle: "Запросы уведомлений",
+    notificationRequestsDesc:
+      "Запросы на уведомления от администраторов магазинов. Одобрение отправит уведомление всем пользователям.",
+    requestedBy: "Магазин",
+    noPendingRequests: "Нет запросов на рассмотрении",
+    approve: "Одобрить",
+    approving: "Одобрение...",
+    reject: "Отклонить",
+    rejecting: "Отклонение...",
+    decideRequestFailed: "Не удалось выполнить действие",
+    requestApprovedSentPrefix: "Отправлено:",
+    maintenance: "Обслуживание",
     language: "Язык",
     filterAll: "Все",
     filterShop: "Магазин",
@@ -193,6 +326,37 @@ const dict: Record<Lang, Dict> = {
     store: "Магазин",
     quantity: "Количество",
     noMatchingOrders: "Подходящих заказов нет.",
+    broadcast: "Уведомление",
+    broadcastTitle: "Отправить уведомление",
+    broadcastDesc: "Отправьте push-уведомление всем пользователям.",
+    notificationTitle: "Заголовок",
+    notificationBody: "Текст",
+    send: "Отправить",
+    sending: "Отправка...",
+    broadcastSentPrefix: "Отправлено:",
+    broadcastFailed: "Не удалось отправить уведомление",
+    leaderboard: "Рейтинг",
+    leaderboardTitle: "Настройки рейтинга",
+    selectStoreForCampaign: "Выберите магазин",
+    campaignStartLabel: "Дата начала кампании",
+    campaignStartDesc:
+      "В рейтинг выбранного магазина попадут только заказы, принятые после этой даты. Изменение даты пересчитает рейтинг этого магазина заново.",
+    saveDate: "Сохранить",
+    savingDate: "Сохранение...",
+    saveDateFailed: "Не удалось сохранить дату",
+    dateSaved: "Дата сохранена",
+    giftImageLabel: "Изображение приза (3x2)",
+    giftImageDesc: "Показывается под рейтингом выбранного магазина.",
+    upload: "Загрузить",
+    uploading: "Загрузка...",
+    remove: "Удалить",
+    removing: "Удаление...",
+    noImageUploaded: "Изображение не загружено.",
+    uploadFailed: "Не удалось загрузить изображение",
+    storeOrderLabel: "Порядок магазинов",
+    storeOrderDesc: "Измените порядок вкладок магазинов на странице рейтинга.",
+    noStoresForOrder: "Пока нет активных магазинов.",
+    reorderFailed: "Не удалось сохранить порядок",
   },
 };
 

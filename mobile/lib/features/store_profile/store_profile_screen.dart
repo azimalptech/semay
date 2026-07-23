@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
@@ -36,32 +37,59 @@ class StoreProfileScreen extends ConsumerWidget {
       length: 2,
       child: Scaffold(
         appBar: AppBar(
-          title: Text(store?['name'] as String? ?? ''),
           actions: [
             if (isOwnStore)
               IconButton(
-                icon: const Icon(Icons.settings_outlined),
+                icon: AppIcon('settings', color: AppColors.textPrimary),
                 onPressed: () => context.push('/admin/settings'),
+              )
+            else
+              Builder(
+                builder: (context) => IconButton(
+                  icon: const Icon(Icons.ios_share_outlined),
+                  onPressed: () {
+                    Clipboard.setData(
+                      ClipboardData(text: 'semay://store/$storeId'),
+                    );
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(ref.read(l10nProvider).storeLinkCopied),
+                      ),
+                    );
+                  },
+                ),
               ),
           ],
         ),
         floatingActionButton: isOwnStore
             ? FloatingActionButton(
-                onPressed: () => showAddContentSheet(context, ref, storeId: storeId),
+                onPressed: () =>
+                    showAddContentSheet(context, ref, storeId: storeId),
                 backgroundColor: AppColors.brand,
-                child: const Icon(Icons.add, color: Colors.white),
+                child: const AppIcon('plus', color: Colors.white),
               )
             : null,
         body: Column(
           children: [
-            _StoreHeader(storeId: storeId, store: store, isOwnStore: isOwnStore),
+            _StoreHeader(
+              storeId: storeId,
+              store: store,
+              isOwnStore: isOwnStore,
+            ),
             TabBar(
               labelColor: AppColors.brand,
               unselectedLabelColor: AppColors.textSecondary,
               indicatorColor: AppColors.brand,
               tabs: [
-                Tab(child: _TabLabel(icon: Icons.grid_view, count: postsCount + reelsCount)),
-                Tab(child: _TabLabel(icon: Icons.play_circle_outline, count: reelsCount)),
+                Tab(
+                  child: _TabLabel(
+                    iconName: 'grid',
+                    count: postsCount + reelsCount,
+                  ),
+                ),
+                Tab(
+                  child: _TabLabel(iconName: 'play_square', count: reelsCount),
+                ),
               ],
             ),
             Expanded(
@@ -80,9 +108,9 @@ class StoreProfileScreen extends ConsumerWidget {
 }
 
 class _TabLabel extends StatelessWidget {
-  const _TabLabel({required this.icon, required this.count});
+  const _TabLabel({required this.iconName, required this.count});
 
-  final IconData icon;
+  final String iconName;
   final int count;
 
   @override
@@ -90,7 +118,7 @@ class _TabLabel extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 20),
+        AppIcon(iconName, size: 20, color: IconTheme.of(context).color),
         const SizedBox(width: 6),
         Text('$count', style: AppTypography.bodySmall.copyWith(color: null)),
       ],
@@ -99,7 +127,11 @@ class _TabLabel extends StatelessWidget {
 }
 
 class _StoreHeader extends ConsumerWidget {
-  const _StoreHeader({required this.storeId, required this.store, required this.isOwnStore});
+  const _StoreHeader({
+    required this.storeId,
+    required this.store,
+    required this.isOwnStore,
+  });
 
   final String storeId;
   final Map<String, dynamic>? store;
@@ -111,6 +143,7 @@ class _StoreHeader extends ConsumerWidget {
     final s = ref.watch(l10nProvider);
 
     final avatarUrl = store!['avatarUrl'] as String? ?? '';
+    final name = store!['name'] as String? ?? '';
     final tagline = store!['tagline'] as String? ?? '';
     final phone = store!['phone'] as String? ?? '';
     final address = store!['address'] as String? ?? '';
@@ -118,27 +151,58 @@ class _StoreHeader extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          CircleAvatar(
-            radius: 40,
-            backgroundColor: AppColors.backgroundCard,
-            backgroundImage: avatarUrl.isNotEmpty ? CachedNetworkImageProvider(avatarUrl) : null,
-            child: avatarUrl.isEmpty
-                ? const Icon(Icons.storefront, size: 32, color: AppColors.textMuted)
-                : null,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Same gradient-ring treatment as the story bar's avatars
+              // (AppColors.storyGradient) — static here, no spin, since this
+              // isn't indicating unseen-story state.
+              Container(
+                padding: const EdgeInsets.all(2.5),
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: SweepGradient(colors: AppColors.storyGradient),
+                ),
+                child: CircleAvatar(
+                  radius: 32,
+                  backgroundColor: AppColors.backgroundCard,
+                  backgroundImage: avatarUrl.isNotEmpty
+                      ? CachedNetworkImageProvider(avatarUrl)
+                      : null,
+                  child: avatarUrl.isEmpty
+                      ? Icon(
+                          Icons.storefront,
+                          size: 28,
+                          color: AppColors.textMuted,
+                        )
+                      : null,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(name, style: AppTypography.titleLarge),
+                    if (tagline.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          tagline,
+                          style: AppTypography.bodySmall.copyWith(
+                            color: AppColors.textSecondary,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
           ),
-          if (tagline.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(tagline, style: AppTypography.bodyMedium),
-            ),
-          if (address.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(address,
-                  style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary)),
-            ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
           Row(
             children: [
               if (isOwnStore) ...[
@@ -153,9 +217,12 @@ class _StoreHeader extends ConsumerWidget {
                   child: _PillButton(
                     label: s.share,
                     onTap: () {
-                      Clipboard.setData(ClipboardData(text: 'semay://store/$storeId'));
-                      ScaffoldMessenger.of(context)
-                          .showSnackBar(SnackBar(content: Text(s.storeLinkCopied)));
+                      Clipboard.setData(
+                        ClipboardData(text: 'semay://store/$storeId'),
+                      );
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(s.storeLinkCopied)),
+                      );
                     },
                   ),
                 ),
@@ -165,10 +232,15 @@ class _StoreHeader extends ConsumerWidget {
                     label: s.message,
                     onTap: () async {
                       final role = await ref.read(appRoleProvider.future);
-                      final isAdmin = role == AppRole.admin || role == AppRole.superadmin;
-                      final chatId = await ref.read(chatServiceProvider).createOrGetChat(storeId);
+                      final isAdmin =
+                          role == AppRole.admin || role == AppRole.superadmin;
+                      final chatId = await ref
+                          .read(chatServiceProvider)
+                          .createOrGetChat(storeId);
                       if (context.mounted) {
-                        context.push(isAdmin ? '/admin/chat/$chatId' : '/chat/$chatId');
+                        context.push(
+                          isAdmin ? '/admin/chat/$chatId' : '/chat/$chatId',
+                        );
                       }
                     },
                   ),
@@ -177,14 +249,16 @@ class _StoreHeader extends ConsumerWidget {
                 Expanded(
                   child: _PillButton(
                     label: s.call,
+                    filled: true,
                     onTap: phone.isEmpty
                         ? null
                         : () async {
                             final uri = Uri(scheme: 'tel', path: phone);
                             if (!await launchUrl(uri)) {
                               if (context.mounted) {
-                                ScaffoldMessenger.of(context)
-                                    .showSnackBar(SnackBar(content: Text(s.couldNotOpenDialer)));
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text(s.couldNotOpenDialer)),
+                                );
                               }
                             }
                           },
@@ -193,25 +267,86 @@ class _StoreHeader extends ConsumerWidget {
               ],
             ],
           ),
+          if (phone.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _InfoRow(iconName: 'phone', label: s.phoneNumber, value: phone),
+          ],
+          if (address.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _InfoRow(iconName: 'location', label: s.address, value: address),
+          ],
         ],
       ),
     );
   }
 }
 
-/// Figma: full-width white pill buttons with hairline border ("Edit Profile"
-/// / "Share" pair on Store Detail).
-class _PillButton extends StatelessWidget {
-  const _PillButton({required this.label, required this.onTap});
+/// "Phone" / "Location" labeled rows below the action buttons (Figma Store
+/// Detail) — small muted label on top, value below, leading icon.
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.iconName,
+    required this.label,
+    required this.value,
+  });
 
+  final String iconName;
   final String label;
-  final VoidCallback? onTap;
+  final String value;
 
   @override
   Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        AppIcon(iconName, size: 20, color: AppColors.textSecondary),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: AppTypography.caption.copyWith(
+                  color: AppColors.textMuted,
+                ),
+              ),
+              Text(value, style: AppTypography.bodyMedium),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Figma: full-width pill buttons on Store Detail — hairline-bordered white
+/// by default ("Edit Profile" / "Share" / "Message"), solid [callGreen] when
+/// [filled] (the "Call" action specifically — reads as a call button
+/// everywhere else in the app too, deliberately distinct from [brand]).
+class _PillButton extends StatelessWidget {
+  const _PillButton({
+    required this.label,
+    required this.onTap,
+    this.filled = false,
+  });
+
+  final String label;
+  final VoidCallback? onTap;
+  final bool filled;
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = onTap == null;
     return Material(
-      color: AppColors.backgroundCard,
-      shape: const StadiumBorder(side: BorderSide(color: AppColors.borderDivider)),
+      color: filled && !disabled
+          ? AppColors.callGreen
+          : AppColors.backgroundCard,
+      shape: StadiumBorder(
+        side: filled
+            ? BorderSide.none
+            : BorderSide(color: AppColors.borderDivider),
+      ),
       child: InkWell(
         customBorder: const StadiumBorder(),
         onTap: onTap,
@@ -221,7 +356,11 @@ class _PillButton extends StatelessWidget {
             child: Text(
               label,
               style: AppTypography.buttonSmall.copyWith(
-                color: onTap == null ? AppColors.textMuted : AppColors.textPrimary,
+                color: disabled
+                    ? AppColors.textMuted
+                    : (filled
+                          ? AppColors.textOnPrimary
+                          : AppColors.textPrimary),
               ),
             ),
           ),
@@ -239,24 +378,34 @@ class _PostsTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final postsAsync = ref.watch(storePostsProvider(storeId));
-    return postsAsync.when(
-      data: (posts) => PostsGridView(
+    // hasValue first (not a bare .when()) — ref.invalidate() preserves the
+    // previous list in .value while it reloads, so without this check
+    // pull-to-refresh blanks the whole grid to a spinner every time.
+    if (postsAsync.hasValue) {
+      final posts = postsAsync.value!;
+      return PostsGridView(
         posts: posts,
         hasMore: ref.read(storePostsProvider(storeId).notifier).hasMore,
-        onLoadMore: () => ref.read(storePostsProvider(storeId).notifier).loadMore(),
-        onTap: (postId) => Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (context) => StorePostsPagerScreen(
-            storeId: storeId,
-            initialPostId: postId,
-            reelsOnly: false,
+        onLoadMore: () =>
+            ref.read(storePostsProvider(storeId).notifier).loadMore(),
+        onTap: (postId) => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (context) => StorePostsPagerScreen(
+              storeId: storeId,
+              initialPostId: postId,
+              reelsOnly: false,
+            ),
           ),
-        )),
+        ),
         onRefresh: () async => ref.invalidate(storePostsProvider(storeId)),
-      ),
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (error, stack) =>
-          ErrorStateView(onRetry: () => ref.invalidate(storePostsProvider(storeId))),
-    );
+      );
+    }
+    if (postsAsync.hasError) {
+      return ErrorStateView(
+        onRetry: () => ref.invalidate(storePostsProvider(storeId)),
+      );
+    }
+    return const Center(child: CircularProgressIndicator());
   }
 }
 
@@ -268,23 +417,30 @@ class _ReelsTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final reelsAsync = ref.watch(storeReelsProvider(storeId));
-    return reelsAsync.when(
-      data: (posts) => PostsGridView(
+    if (reelsAsync.hasValue) {
+      final posts = reelsAsync.value!;
+      return PostsGridView(
         posts: posts,
         hasMore: ref.read(storeReelsProvider(storeId).notifier).hasMore,
-        onLoadMore: () => ref.read(storeReelsProvider(storeId).notifier).loadMore(),
-        onTap: (postId) => Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (context) => StorePostsPagerScreen(
-            storeId: storeId,
-            initialPostId: postId,
-            reelsOnly: true,
+        onLoadMore: () =>
+            ref.read(storeReelsProvider(storeId).notifier).loadMore(),
+        onTap: (postId) => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (context) => StorePostsPagerScreen(
+              storeId: storeId,
+              initialPostId: postId,
+              reelsOnly: true,
+            ),
           ),
-        )),
+        ),
         onRefresh: () async => ref.invalidate(storeReelsProvider(storeId)),
-      ),
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (error, stack) =>
-          ErrorStateView(onRetry: () => ref.invalidate(storeReelsProvider(storeId))),
-    );
+      );
+    }
+    if (reelsAsync.hasError) {
+      return ErrorStateView(
+        onRetry: () => ref.invalidate(storeReelsProvider(storeId)),
+      );
+    }
+    return const Center(child: CircularProgressIndicator());
   }
 }

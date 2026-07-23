@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../core/app_icon.dart';
 import '../../core/image_crop.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
@@ -49,14 +50,19 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
   }
 
   Future<void> _pickAvatar() async {
-    final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 85,
+    );
     if (picked == null) return;
     final image = await cropSquare(picked);
     if (image == null) return;
     setState(() => _uploadingAvatar = true);
     try {
       final bytes = await image.readAsBytes();
-      final ref0 = ref.read(storageProvider).ref('stores/${widget.storeId}/avatar.jpg');
+      final ref0 = ref
+          .read(storageProvider)
+          .ref('stores/${widget.storeId}/avatar.jpg');
       await ref0.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
       final url = await ref0.getDownloadURL();
       setState(() => _avatarUrl = url);
@@ -67,26 +73,30 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
 
   Future<void> _save() async {
     setState(() => _saving = true);
-    await ref.read(firestoreProvider).collection('stores').doc(widget.storeId).update({
-      'name': _nameController.text.trim(),
-      'tagline': _taglineController.text.trim(),
-      'address': _addressController.text.trim(),
-      'phone': _phoneController.text.trim(),
-      if (_avatarUrl != null) 'avatarUrl': _avatarUrl,
-    });
+    await ref
+        .read(firestoreProvider)
+        .collection('stores')
+        .doc(widget.storeId)
+        .update({
+          'name': _nameController.text.trim(),
+          'tagline': _taglineController.text.trim(),
+          'address': _addressController.text.trim(),
+          'phone': _phoneController.text.trim(),
+          if (_avatarUrl != null) 'avatarUrl': _avatarUrl,
+        });
     if (mounted) Navigator.of(context).pop();
   }
 
   InputDecoration _pillDecoration([String? hint]) => InputDecoration(
-        hintText: hint,
-        filled: true,
-        fillColor: AppColors.backgroundCard,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(28),
-          borderSide: BorderSide.none,
-        ),
-      );
+    hintText: hint,
+    filled: true,
+    fillColor: AppColors.backgroundCard,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+    border: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(28),
+      borderSide: BorderSide.none,
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -106,7 +116,9 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
             .map((s) => s.data()),
         builder: (context, snapshot) {
           final data = snapshot.data;
-          if (data == null) return const Center(child: CircularProgressIndicator());
+          if (data == null) {
+            return const Center(child: CircularProgressIndicator());
+          }
           _loadFrom(data);
 
           return ListView(
@@ -125,7 +137,11 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
                             : null,
                         child: (_avatarUrl?.isNotEmpty ?? false)
                             ? null
-                            : const Icon(Icons.image_outlined, color: AppColors.textMuted, size: 32),
+                            : AppIcon(
+                                'image',
+                                color: AppColors.textMuted,
+                                size: 32,
+                              ),
                       ),
                       if (_uploadingAvatar)
                         const Positioned.fill(
@@ -134,7 +150,10 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
                             child: SizedBox(
                               width: 20,
                               height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
                             ),
                           ),
                         )
@@ -145,7 +164,11 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
                           child: CircleAvatar(
                             radius: 14,
                             backgroundColor: AppColors.brand,
-                            child: const Icon(Icons.add, size: 18, color: Colors.white),
+                            child: const AppIcon(
+                              'plus',
+                              size: 18,
+                              color: Colors.white,
+                            ),
                           ),
                         ),
                     ],
@@ -166,6 +189,8 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
               TextField(
                 controller: _taglineController,
                 style: AppTypography.bodyMedium,
+                maxLength: 120,
+                maxLines: 3,
                 decoration: _pillDecoration(),
               ),
               const SizedBox(height: 16),
@@ -197,7 +222,10 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
                   onPressed: _saving ? null : _save,
                   child: _saving
                       ? const SizedBox(
-                          width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
                       : Text(s.save),
                 ),
               ),

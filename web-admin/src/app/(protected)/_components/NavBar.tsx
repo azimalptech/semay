@@ -22,6 +22,18 @@ export function NavBar({
         <Link href="/stores" className="hover:text-gray-900">
           {t.stores}
         </Link>
+        <Link href="/broadcast" className="hover:text-gray-900">
+          {t.broadcast}
+        </Link>
+        <Link href="/notification-requests" className="hover:text-gray-900">
+          {t.notificationRequests}
+        </Link>
+        <Link href="/leaderboard" className="hover:text-gray-900">
+          {t.leaderboard}
+        </Link>
+        <Link href="/maintenance" className="hover:text-gray-900">
+          {t.maintenance}
+        </Link>
       </nav>
       <div className="flex items-center gap-4 text-sm text-gray-500">
         <LanguageSwitcher lang={lang} />

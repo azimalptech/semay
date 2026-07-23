@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionClaims } from "@/lib/session";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
+import { adminDb } from "@/lib/firebaseAdmin";
 
 export async function GET(request: NextRequest) {
   // proxy.ts already gates /api/users/:path* optimistically — this is the
@@ -15,32 +15,31 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "phone is required" }, { status: 400 });
   }
 
-  // Prefer the uid the mobile app's own dev-mode OTP bypass actually signs
-  // into (mobile/lib/services/auth_service.dart's verifyOtp): phone digits
-  // -> a deterministic "<digits>@dev.semay.local" Auth account. Falling
-  // straight to a `where("phone", "==", ...)` Firestore query is what broke
-  // this before — that collection has accumulated duplicate docs sharing a
-  // phone (this dev-bypass replaced an earlier phone-auth-style scheme, and
-  // old seed/test records were never cleaned up), so a plain lookup with no
-  // tiebreaker can silently resolve to a uid nobody is actually signed in
-  // as, and granting admin there has no visible effect for the real user.
-  const digits = phone.replace(/[^0-9]/g, "");
-  try {
-    const authUser = await adminAuth.getUserByEmail(`${digits}@dev.semay.local`);
-    const doc = await adminDb.collection("users").doc(authUser.uid).get();
-    return NextResponse.json({
-      uid: authUser.uid,
-      name: (doc.data()?.name as string) ?? "",
-      phone,
-    });
-  } catch {
-    // Not a dev-bypass account (e.g. seeded directly via the Admin SDK) —
-    // fall back to the Firestore phone field.
-  }
-
-  const snap = await adminDb.collection("users").where("phone", "==", phone).limit(1).get();
+  // Resolve exactly the way verifyOtp.ts does on login (backend/functions/
+  // src/auth/verifyOtp.ts) — a Firestore `where("phone", "==", ...)` query
+  // is the actual identity source of truth for the real OTP flow now.
+  //
+  // This used to prefer a "<digits>@dev.semay.local" Auth-email lookup, a
+  // convention from an earlier client-side dev-bypass that has since been
+  // removed from the app entirely (auth_service.dart now calls the real
+  // verifyOtp Cloud Function). Keeping that path was actively harmful, not
+  // just dead: any stale "@dev.semay.local" Auth account (leftover test
+  // data) would win over the real, currently-signed-in user, silently
+  // mis-targeting promotions — and since nothing stops a client from
+  // updating their own Auth email, an attacker could deliberately set their
+  // account's email to "<victim's digits>@dev.semay.local" to hijack a
+  // lookup meant for that victim and get promoted in their place.
+  const snap = await adminDb.collection("users").where("phone", "==", phone).get();
   if (snap.empty) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+  if (snap.size > 1) {
+    // Ambiguous — silently picking one risks promoting the wrong account.
+    // Surface it instead of guessing; needs manual cleanup in Firestore.
+    return NextResponse.json(
+      { error: "multiple accounts share this phone number — cannot resolve unambiguously" },
+      { status: 409 },
+    );
   }
 
   const doc = snap.docs[0];

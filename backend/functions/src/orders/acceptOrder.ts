@@ -17,8 +17,8 @@ export const acceptOrder = onCall<AcceptOrderRequest>(async (request) => {
   if (!chatId || typeof chatId !== "string") {
     throw new HttpsError("invalid-argument", "chatId is required");
   }
-  if (!Number.isInteger(itemQuantity) || itemQuantity < 1) {
-    throw new HttpsError("invalid-argument", "itemQuantity must be a positive integer");
+  if (!Number.isInteger(itemQuantity) || itemQuantity < 1 || itemQuantity > 10000) {
+    throw new HttpsError("invalid-argument", "itemQuantity must be a positive integer up to 10000");
   }
   if (!userPhone || typeof userPhone !== "string" || !userPhone.trim()) {
     throw new HttpsError("invalid-argument", "userPhone is required");

@@ -22,7 +22,10 @@ Future<XFile?> cropSquare(XFile source) async {
         toolbarWidgetColor: AppColors.textOnPrimary,
         activeControlsWidgetColor: AppColors.brand,
       ),
-      IOSUiSettings(aspectRatioLockEnabled: true, resetAspectRatioEnabled: false),
+      IOSUiSettings(
+        aspectRatioLockEnabled: true,
+        resetAspectRatioEnabled: false,
+      ),
     ],
   );
   return cropped == null ? null : XFile(cropped.path);
@@ -31,7 +34,10 @@ Future<XFile?> cropSquare(XFile source) async {
 /// Instagram's "Fit" mode: whole image visible, letterboxed onto a square
 /// canvas instead of cropped — composited client-side with dart:ui (no
 /// native crop UI involved, so nothing to pan; the full frame is shown).
-Future<XFile> fitSquareWithLetterbox(XFile source, {Color background = Colors.white}) async {
+Future<XFile> fitSquareWithLetterbox(
+  XFile source, {
+  Color background = Colors.white,
+}) async {
   final bytes = await source.readAsBytes();
   final codec = await ui.instantiateImageCodec(bytes);
   final frame = await codec.getNextFrame();
@@ -41,7 +47,10 @@ Future<XFile> fitSquareWithLetterbox(XFile source, {Color background = Colors.wh
 
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, sideD, sideD));
-  canvas.drawRect(Rect.fromLTWH(0, 0, sideD, sideD), Paint()..color = background);
+  canvas.drawRect(
+    Rect.fromLTWH(0, 0, sideD, sideD),
+    Paint()..color = background,
+  );
   canvas.drawImage(
     image,
     Offset((side - image.width) / 2, (side - image.height) / 2),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../core/app_icon.dart';
 import '../../core/image_crop.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
@@ -35,14 +36,17 @@ Future<void> showAddContentSheet(
                 Text(s.addContent, style: AppTypography.titleLarge),
                 const Spacer(),
                 IconButton(
-                  icon: const Icon(Icons.close, color: AppColors.textPrimary),
+                  icon: AppIcon('close', color: AppColors.textPrimary),
                   onPressed: () => Navigator.of(sheetContext).pop(),
                 ),
               ],
             ),
           ),
           ListTile(
-            leading: const Icon(Icons.auto_stories_outlined, color: AppColors.textPrimary),
+            leading: Icon(
+              Icons.auto_stories_outlined,
+              color: AppColors.textPrimary,
+            ),
             title: Text(s.story, style: AppTypography.bodyMedium),
             onTap: () {
               Navigator.of(sheetContext).pop();
@@ -51,13 +55,13 @@ Future<void> showAddContentSheet(
           ),
           const _DashedDivider(),
           ListTile(
-            leading: const Icon(Icons.grid_view_outlined, color: AppColors.textPrimary),
+            leading: AppIcon('grid', color: AppColors.textPrimary),
             title: Text(s.post, style: AppTypography.bodyMedium),
             onTap: () => _pickPost(sheetContext, context, ref, storeId),
           ),
           const _DashedDivider(),
           ListTile(
-            leading: const Icon(Icons.play_circle_outline, color: AppColors.textPrimary),
+            leading: AppIcon('play_square', color: AppColors.textPrimary),
             title: Text(s.reel, style: AppTypography.bodyMedium),
             onTap: () => _pickReel(sheetContext, context, ref, storeId),
           ),
@@ -96,14 +100,16 @@ Future<void> _pickPost(
   if (cropped.isEmpty || !sheetContext.mounted) return;
 
   Navigator.of(sheetContext).pop();
-  await Navigator.of(hostContext).push(MaterialPageRoute<void>(
-    builder: (context) => PostComposerScreen(
-      storeId: storeId,
-      type: cropped.length > 1 ? 'carousel' : 'image',
-      files: cropped,
-      originalFiles: originals,
+  await Navigator.of(hostContext).push(
+    MaterialPageRoute<void>(
+      builder: (context) => PostComposerScreen(
+        storeId: storeId,
+        type: cropped.length > 1 ? 'carousel' : 'image',
+        files: cropped,
+        originalFiles: originals,
+      ),
     ),
-  ));
+  );
 }
 
 Future<void> _pickReel(
@@ -116,9 +122,12 @@ Future<void> _pickReel(
   if (video == null || !sheetContext.mounted) return;
 
   Navigator.of(sheetContext).pop();
-  await Navigator.of(hostContext).push(MaterialPageRoute<void>(
-    builder: (context) => PostComposerScreen(storeId: storeId, type: 'reel', files: [video]),
-  ));
+  await Navigator.of(hostContext).push(
+    MaterialPageRoute<void>(
+      builder: (context) =>
+          PostComposerScreen(storeId: storeId, type: 'reel', files: [video]),
+    ),
+  );
 }
 
 class _DashedDivider extends StatelessWidget {

@@ -33,7 +33,8 @@ class _PostsGridViewState extends ConsumerState<PostsGridView> {
     super.initState();
     _controller.addListener(() {
       if (widget.hasMore &&
-          _controller.position.pixels > _controller.position.maxScrollExtent - 300) {
+          _controller.position.pixels >
+              _controller.position.maxScrollExtent - 300) {
         widget.onLoadMore();
       }
     });
@@ -78,7 +79,8 @@ class _PostsGridViewState extends ConsumerState<PostsGridView> {
               final data = doc.data();
               final type = data['type'] as String? ?? 'image';
               final thumbnailUrl = data['thumbnailUrl'] as String? ?? '';
-              final mediaUrls = (data['mediaUrls'] as List<dynamic>? ?? []).cast<String>();
+              final mediaUrls = (data['mediaUrls'] as List<dynamic>? ?? [])
+                  .cast<String>();
               final imageUrl = type == 'reel' && thumbnailUrl.isNotEmpty
                   ? thumbnailUrl
                   : (mediaUrls.isNotEmpty ? mediaUrls.first : '');
@@ -96,7 +98,11 @@ class _PostsGridViewState extends ConsumerState<PostsGridView> {
                       const Positioned(
                         top: 4,
                         right: 4,
-                        child: Icon(Icons.movie_outlined, color: Colors.white, size: 18),
+                        child: Icon(
+                          Icons.movie_outlined,
+                          color: Colors.white,
+                          size: 18,
+                        ),
                       ),
                   ],
                 ),

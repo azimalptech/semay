@@ -34,7 +34,9 @@ Future<void> showEditCaptionDialog(
         ),
         actions: [
           TextButton(
-            onPressed: submitting ? null : () => Navigator.of(dialogContext).pop(),
+            onPressed: submitting
+                ? null
+                : () => Navigator.of(dialogContext).pop(),
             child: Text(s.cancel),
           ),
           FilledButton(
@@ -43,19 +45,28 @@ Future<void> showEditCaptionDialog(
                 : () async {
                     setState(() => submitting = true);
                     try {
-                      await postsService.updateCaption(postId, controller.text.trim());
-                      if (dialogContext.mounted) Navigator.of(dialogContext).pop();
+                      await postsService.updateCaption(
+                        postId,
+                        controller.text.trim(),
+                      );
+                      if (dialogContext.mounted) {
+                        Navigator.of(dialogContext).pop();
+                      }
                     } catch (e) {
                       setState(() => submitting = false);
                       if (dialogContext.mounted) {
-                        ScaffoldMessenger.of(dialogContext)
-                            .showSnackBar(SnackBar(content: Text('$e')));
+                        ScaffoldMessenger.of(
+                          dialogContext,
+                        ).showSnackBar(SnackBar(content: Text('$e')));
                       }
                     }
                   },
             child: submitting
                 ? const SizedBox(
-                    width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
                 : Text(s.save),
           ),
         ],

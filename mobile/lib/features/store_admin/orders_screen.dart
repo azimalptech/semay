@@ -33,12 +33,14 @@ class OrdersScreen extends ConsumerWidget {
         builder: (context, snapshot) {
           final docs = snapshot.data?.docs ?? [];
           if (docs.isEmpty) {
-            return Center(child: Text(s.noOrdersYet, style: AppTypography.bodyMedium));
+            return Center(
+              child: Text(s.noOrdersYet, style: AppTypography.bodyMedium),
+            );
           }
           return ListView.separated(
             itemCount: docs.length,
             separatorBuilder: (context, index) =>
-                const Divider(height: 1, color: AppColors.borderDivider),
+                Divider(height: 1, color: AppColors.borderDivider),
             itemBuilder: (context, index) {
               final order = docs[index].data();
               final phone = order['userPhone'] as String? ?? '';
@@ -46,11 +48,19 @@ class OrdersScreen extends ConsumerWidget {
               final createdAt = (order['createdAt'] as Timestamp?)?.toDate();
               return ListTile(
                 title: Text(phone, style: AppTypography.bodyMediumSemibold),
-                subtitle: Text(s.orderedItems(quantity),
-                    style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary)),
+                subtitle: Text(
+                  s.orderedItems(quantity),
+                  style: AppTypography.bodySmall.copyWith(
+                    color: AppColors.textSecondary,
+                  ),
+                ),
                 trailing: createdAt != null
-                    ? Text(_formatDate(createdAt),
-                        style: AppTypography.caption.copyWith(color: AppColors.textMuted))
+                    ? Text(
+                        _formatDate(createdAt),
+                        style: AppTypography.caption.copyWith(
+                          color: AppColors.textMuted,
+                        ),
+                      )
                     : null,
               );
             },
