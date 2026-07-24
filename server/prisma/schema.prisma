@@ -196,7 +196,7 @@ model Post {
   id           String   @id @default(uuid())
   storeId      String   @db.VarChar(36)
   type         PostType
-  caption      String   @default("") @db.Text
+  caption      String   @db.Text // MySQL forbids a DEFAULT on TEXT — API must always pass "" explicitly, not omit
   price        Decimal? @db.Decimal(10, 2) // SQL forces the currency-precision decision Firestore let us skip
   thumbnailUrl String   @default("") @db.VarChar(512) // reels
   likesCount   Int      @default(0)
@@ -374,7 +374,7 @@ model Message {
   chatId            String            @db.VarChar(80)
   senderId          String            @db.VarChar(36)
   senderRole        SenderRole
-  text              String            @default("") @db.Text
+  text              String            @db.Text // MySQL forbids a DEFAULT on TEXT — API must always pass "" explicitly, not omit
   mediaUrl          String?           @db.VarChar(512)
   mediaType         MessageMediaType?
   orderId           String?           @db.VarChar(36)
