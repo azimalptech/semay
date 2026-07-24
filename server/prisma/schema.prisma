@@ -1,0 +1,520 @@
+// SeMay self-hosted backend — MySQL schema (Phase 1 of the Firebase → MySQL
+// migration; see docs/07_MIGRATION.md and .claude/plans). Faithful relational
+// translation of docs/02_DATA_MODEL.md. Field-level rationale lives there; this
+// file only notes where the relational shape deliberately DIFFERS from the old
+// Firestore doc shape.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  user
+  admin
+  superadmin
+}
+
+enum Language {
+  tk
+  ru
+}
+
+enum PostType {
+  image
+  carousel
+  reel
+}
+
+enum StoryMediaType {
+  image
+  video
+}
+
+enum SenderRole {
+  user
+  admin
+}
+
+enum MessageMediaType {
+  image
+  video
+}
+
+enum OrderStatus {
+  accepted
+}
+
+enum NotificationRequestStatus {
+  pending
+  approved
+  rejected
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Users & auth
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(uuid()) // random UUID — NOT sha256(phone); the phone UNIQUE index below is the 1-phone-1-account lock (replaces verifyOtp's deterministic-uid trick)
+  phone     String   @unique @db.VarChar(20)
+  name      String   @default("") @db.VarChar(120)
+  avatarUrl String   @default("") @db.VarChar(512)
+  role      Role     @default(user)
+  language  Language @default(tk)
+  darkMode  Boolean  @default(false)
+
+  // Transient "which chat is open on this device" pointer (onMessageCreated
+  // reads it to suppress a redundant push). Plain nullable id, no FK relation —
+  // it's cleared on dispose and a dangling value is harmless.
+  activeChatId String? @db.VarChar(80)
+
+  // Bumped whenever role/storeIds change (setStoreAdmin/deleteStore); embedded
+  // in the access JWT so a stale token triggers a silent refresh. Replaces the
+  // app's hand-built _syncedIdTokenResultProvider claim-drift polling.
+  claimsVersion Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  storeAdminRoles      StoreAdmin[]
+  storesCreated        Store[]               @relation("StoreCreatedBy")
+  posts                PostLike[]
+  saves                PostSave[]
+  views                PostView[]
+  sent                 PostSent[]
+  shares               PostShare[]
+  storyViews           StoryView[]
+  storySeen            UserStorySeen[]
+  chats                Chat[]
+  messagesSent         Message[]
+  ordersPlaced         Order[]               @relation("OrderUser")
+  ordersAccepted       Order[]               @relation("OrderAdmin")
+  leaderboardEntries   StoreLeaderboard[]
+  notifications        UserNotification[]
+  notificationRequests NotificationRequest[]
+  sessions             Session[]
+  fcmTokens            UserFcmToken[]
+
+  @@map("users")
+}
+
+// One row per store↔admin link. Replaces BOTH stores.adminIds and
+// users.storeIds arrays (the old dual-write drift bug is gone). role stays on
+// User; the last row removed for a user demotes them to 'user' in the same tx.
+model StoreAdmin {
+  storeId   String   @db.VarChar(36)
+  userId    String   @db.VarChar(36)
+  grantedAt DateTime @default(now())
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([storeId, userId])
+  @@index([userId])
+  @@map("store_admins")
+}
+
+// Opaque refresh session (hashed). Fast path = short-lived access JWT verified
+// locally; slow path = this table looked up per sensitive route (checkRevoked).
+model Session {
+  id         String    @id @default(uuid())
+  userId     String    @db.VarChar(36)
+  tokenHash  String    @unique @db.VarChar(64) // sha256 hex of the opaque refresh token
+  deviceInfo String?   @db.VarChar(255)
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// FCM stays on Firebase; only the token registry moves here. UNIQUE(token) +
+// upsert-on-conflict fixes the reinstall/relogin ownership ambiguity arrayUnion had.
+model UserFcmToken {
+  id        BigInt   @id @default(autoincrement())
+  userId    String   @db.VarChar(36)
+  token     String   @unique @db.VarChar(255)
+  platform  String?  @db.VarChar(20)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_fcm_tokens")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stores
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Store {
+  id               String    @id @default(uuid())
+  name             String    @db.VarChar(120)
+  tagline          String    @default("") @db.VarChar(255)
+  avatarUrl        String    @default("") @db.VarChar(512)
+  coverUrl         String    @default("") @db.VarChar(512)
+  phone            String    @default("") @db.VarChar(20)
+  address          String    @default("") @db.VarChar(255)
+  geoLat           Decimal?  @db.Decimal(9, 6)
+  geoLng           Decimal?  @db.Decimal(9, 6)
+  postsCount       Int       @default(0)
+  reelsCount       Int       @default(0)
+  createdById      String    @db.VarChar(36)
+  active           Boolean   @default(true)
+  leaderboardOrder Int?
+  campaignImageUrl String?   @db.VarChar(512)
+  campaignStartAt  DateTime?
+  createdAt        DateTime  @default(now())
+
+  createdBy            User                  @relation("StoreCreatedBy", fields: [createdById], references: [id])
+  admins               StoreAdmin[]
+  posts                Post[]
+  stories              Story[]
+  chats                Chat[]
+  orders               Order[]
+  leaderboard          StoreLeaderboard[]
+  quickReplies         StoreQuickReply[]
+  notificationRequests NotificationRequest[]
+
+  @@index([active])
+  @@map("stores")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Posts
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Post {
+  id           String   @id @default(uuid())
+  storeId      String   @db.VarChar(36)
+  type         PostType
+  caption      String   @default("") @db.Text
+  price        Decimal? @db.Decimal(10, 2) // SQL forces the currency-precision decision Firestore let us skip
+  thumbnailUrl String   @default("") @db.VarChar(512) // reels
+  likesCount   Int      @default(0)
+  savesCount   Int      @default(0)
+  viewsCount   Int      @default(0)
+  sentCount    Int      @default(0)
+  sharesCount  Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  store  Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  media  PostMedia[]
+  likes  PostLike[]
+  saves  PostSave[]
+  views  PostView[]
+  sent   PostSent[]
+  shares PostShare[]
+
+  @@index([storeId, createdAt])
+  @@index([type, createdAt]) // reels feed + global feed
+  @@map("posts")
+}
+
+// Replaces mediaUrls[] — real ordering column, real child rows (a failed
+// mid-upload create now leaves deletable orphan rows, unlike an array-in-doc).
+model PostMedia {
+  id           BigInt  @id @default(autoincrement())
+  postId       String  @db.VarChar(36)
+  url          String  @db.VarChar(512)
+  position     Int
+  thumbnailUrl String? @db.VarChar(512)
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId, position])
+  @@map("post_media")
+}
+
+// Each of the five below replaces an existence-checked subcollection AND its
+// denormalized count driver. users/{uid}/liked and /saved are NOT reproduced —
+// INDEX(userId, createdAt) here serves "My Liked/Saved" directly.
+model PostLike {
+  postId    String   @db.VarChar(36)
+  userId    String   @db.VarChar(36)
+  createdAt DateTime @default(now())
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@index([userId, createdAt])
+  @@map("post_likes")
+}
+
+model PostSave {
+  postId    String   @db.VarChar(36)
+  userId    String   @db.VarChar(36)
+  createdAt DateTime @default(now())
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@index([userId, createdAt])
+  @@map("post_saves")
+}
+
+model PostView {
+  postId   String   @db.VarChar(36)
+  userId   String   @db.VarChar(36)
+  viewedAt DateTime @default(now())
+  post     Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@map("post_views")
+}
+
+model PostSent {
+  postId String   @db.VarChar(36)
+  userId String   @db.VarChar(36)
+  sentAt DateTime @default(now())
+  post   Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@map("post_sent")
+}
+
+model PostShare {
+  postId   String   @db.VarChar(36)
+  userId   String   @db.VarChar(36)
+  sharedAt DateTime @default(now())
+  post     Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@map("post_shares")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stories
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Story {
+  id        String         @id @default(uuid())
+  storeId   String         @db.VarChar(36)
+  mediaUrl  String         @db.VarChar(512)
+  mediaType StoryMediaType
+  createdAt DateTime       @default(now())
+  expiresAt DateTime // createdAt + 24h
+
+  store Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  views StoryView[]
+
+  @@index([storeId, createdAt])
+  @@index([expiresAt]) // active-stories query + expireStories sweep
+  @@map("stories")
+}
+
+model StoryView {
+  storyId  String   @db.VarChar(36)
+  userId   String   @db.VarChar(36)
+  viewedAt DateTime @default(now())
+  story    Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([storyId, userId])
+  @@map("story_views")
+}
+
+// Replaces users/{uid}/storySeen/{storeId}.
+model UserStorySeen {
+  userId  String   @db.VarChar(36)
+  storeId String   @db.VarChar(36)
+  seenAt  DateTime @default(now())
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, storeId])
+  @@map("user_story_seen")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Deterministic PK ${userId}_${storeId} kept — createOrGetChat becomes an
+// INSERT IGNORE in a synchronous tx, so the old !hasPendingWrites race
+// workaround is structurally impossible (MySQL has no client write-cache).
+model Chat {
+  id              String    @id @db.VarChar(80)
+  userId          String    @db.VarChar(36)
+  storeId         String    @db.VarChar(36)
+  lastMessageText String?   @db.VarChar(512)
+  lastMessageAt   DateTime?
+  unreadByUser    Int       @default(0)
+  unreadByAdmin   Int       @default(0)
+  typingUserAt    DateTime?
+  typingAdminAt   DateTime?
+  hiddenByUserAt  DateTime?
+  hiddenByAdminAt DateTime?
+  mutedByUser     Boolean   @default(false)
+  mutedByAdmin    Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  store    Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@index([userId, lastMessageAt])
+  @@index([storeId, lastMessageAt])
+  @@index([storeId, unreadByAdmin]) // admin unread-badge query
+  @@map("chats")
+}
+
+model Message {
+  id                BigInt            @id @default(autoincrement()) // monotonic ordering = old limitToLast(200)
+  chatId            String            @db.VarChar(80)
+  senderId          String            @db.VarChar(36)
+  senderRole        SenderRole
+  text              String            @default("") @db.Text
+  mediaUrl          String?           @db.VarChar(512)
+  mediaType         MessageMediaType?
+  orderId           String?           @db.VarChar(36)
+  sharedPostId      String?           @db.VarChar(36)
+  sharedStoryId     String?           @db.VarChar(36)
+  replyToMessageId  BigInt?
+  replyToText       String?           @db.VarChar(512)
+  replyToSenderRole SenderRole?
+  createdAt         DateTime          @default(now()) @db.DateTime(3)
+  deliveredAt       DateTime?         @db.DateTime(3)
+  readAt            DateTime?         @db.DateTime(3)
+
+  chat   Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  sender User @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([chatId, id])
+  @@map("messages")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Orders & leaderboard
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Order {
+  id           String      @id @default(uuid())
+  storeId      String      @db.VarChar(36)
+  adminId      String      @db.VarChar(36)
+  userId       String      @db.VarChar(36)
+  chatId       String      @db.VarChar(80)
+  itemQuantity Int
+  userPhone    String      @db.VarChar(20)
+  status       OrderStatus @default(accepted)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  user  User  @relation("OrderUser", fields: [userId], references: [id])
+  admin User  @relation("OrderAdmin", fields: [adminId], references: [id])
+
+  @@index([storeId, createdAt])
+  @@map("orders")
+}
+
+// Denormalized per-store per-user order-quantity aggregate (public read).
+model StoreLeaderboard {
+  storeId   String   @db.VarChar(36)
+  userId    String   @db.VarChar(36)
+  userName  String   @db.VarChar(120)
+  quantity  Int      @default(0)
+  updatedAt DateTime @updatedAt
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([storeId, userId])
+  @@index([storeId, quantity]) // orderBy quantity desc limit 20
+  @@map("store_leaderboard")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Notifications, quick replies, requests
+// ─────────────────────────────────────────────────────────────────────────────
+
+model UserNotification {
+  id        BigInt    @id @default(autoincrement())
+  userId    String    @db.VarChar(36)
+  title     String    @db.VarChar(255)
+  body      String    @db.Text
+  createdAt DateTime  @default(now())
+  readAt    DateTime? // null = unread (richer than the old boolean `read`)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("user_notifications")
+}
+
+model StoreQuickReply {
+  id        BigInt   @id @default(autoincrement())
+  storeId   String   @db.VarChar(36)
+  text      String   @db.VarChar(512)
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId, position])
+  @@map("store_quick_replies")
+}
+
+model NotificationRequest {
+  id          String                    @id @default(uuid())
+  storeId     String                    @db.VarChar(36)
+  storeName   String                    @db.VarChar(120)
+  requestedBy String                    @db.VarChar(36)
+  message     String                    @db.VarChar(500)
+  status      NotificationRequestStatus @default(pending)
+  createdAt   DateTime                  @default(now())
+  decidedAt   DateTime?
+  decidedBy   String?                   @db.VarChar(36)
+
+  store     Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  requester User  @relation(fields: [requestedBy], references: [id])
+
+  @@index([status, createdAt])
+  @@index([storeId, createdAt])
+  @@map("notification_requests")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OTP & SMS pacing (never exposed via any route)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model OtpCode {
+  phone       String    @id @db.VarChar(20)
+  code        String    @db.VarChar(6)
+  expiresAt   DateTime
+  lastSentAt  DateTime
+  attempts    Int       @default(0)
+  lockedUntil DateTime?
+
+  @@map("otp_codes")
+}
+
+model SmsDispatchQueue {
+  id          BigInt   @id @default(autoincrement())
+  phone       String   @db.VarChar(20)
+  message     String   @db.VarChar(255)
+  simIndex    Int?
+  scheduledAt DateTime
+  status      String   @default("pending") @db.VarChar(20)
+  createdAt   DateTime @default(now())
+
+  @@index([status, scheduledAt])
+  @@map("sms_dispatch_queue")
+}
+
+// Single-row (id=1) global send-pacing cursor, updated with SELECT ... FOR UPDATE.
+model SmsDispatchCursor {
+  id         Int      @id @default(1)
+  nextSlotAt DateTime
+
+  @@map("sms_dispatch_cursor")
+}

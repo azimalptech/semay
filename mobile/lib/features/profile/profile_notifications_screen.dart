@@ -1,9 +1,12 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
+import '../../services/auth_service.dart';
 import 'notifications_providers.dart';
 
 const _months = [
@@ -56,8 +59,29 @@ class _ProfileNotificationsScreenState
       });
     }
 
+    // Store-admin-only entry point into "request Super Admin broadcast a
+    // notification" — lives here (not a separate row back on the Settings
+    // screen) since it's specifically about *this* notifications surface.
+    final role = ref.watch(appRoleProvider).value;
+    final storeIds = ref.watch(storeIdsProvider).value ?? const <String>[];
+    final isAdmin =
+        (role == AppRole.admin || role == AppRole.superadmin) &&
+        storeIds.isNotEmpty;
+
     return Scaffold(
-      appBar: AppBar(title: Text(s.notifications)),
+      appBar: AppBar(
+        title: Text(s.notifications),
+        actions: [
+          if (isAdmin)
+            IconButton(
+              icon: AppIcon('plus', color: AppColors.textPrimary),
+              tooltip: s.requestNotification,
+              onPressed: () => context.push(
+                '/settings/notification-requests/${storeIds.first}',
+              ),
+            ),
+        ],
+      ),
       body: docs.isEmpty
           ? Center(
               child: Text(

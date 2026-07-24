@@ -16,10 +16,10 @@ import '../post_interaction_providers.dart';
 import 'confirm_delete_dialog.dart';
 import 'double_tap_like_overlay.dart';
 import 'edit_caption_dialog.dart';
+import 'expandable_text.dart';
 import 'pinch_zoom_image.dart';
 import 'reel_player_view.dart' show reelsMutedProvider;
 import 'send_to_chat_sheet.dart';
-import 'views_badge.dart';
 
 /// Post card — Figma frame 195:4299, node 195:4325 (post block).
 class PostCard extends ConsumerStatefulWidget {
@@ -148,218 +148,171 @@ class _PostCardState extends ConsumerState<PostCard> {
                 : null,
             child: AspectRatio(
               aspectRatio: 1,
-              // Reel tiles keep the eye+count inline in the action row below
-              // (no carousel dots to collide with, and matches the dedicated
-              // Reels tab's own footer layout) — only image/carousel posts
-              // get the count pulled onto the media as a corner badge.
-              child: type == 'reel'
-                  ? _PostMedia(
-                      postId: postId,
-                      type: type,
-                      mediaUrls: mediaUrls,
-                      thumbnailUrl: thumbnailUrl,
-                      page: _page,
-                      onPageChanged: (i) => setState(() => _page = i),
-                      positionNotifier: _reelPosition,
-                    )
-                  : Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        _PostMedia(
-                          postId: postId,
-                          type: type,
-                          mediaUrls: mediaUrls,
-                          thumbnailUrl: thumbnailUrl,
-                          page: _page,
-                          onPageChanged: (i) => setState(() => _page = i),
-                          positionNotifier: _reelPosition,
-                        ),
-                        Positioned(
-                          right: 12,
-                          bottom: 12,
-                          child: IgnorePointer(
-                            child: ViewsBadge(
-                              viewsCount: post['viewsCount'] as int? ?? 0,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+              child: _PostMedia(
+                postId: postId,
+                type: type,
+                mediaUrls: mediaUrls,
+                thumbnailUrl: thumbnailUrl,
+                page: _page,
+                onPageChanged: (i) => setState(() => _page = i),
+                positionNotifier: _reelPosition,
+              ),
             ),
           ),
+          // Carousel page dots get their own line above the action icons —
+          // previously both sat in one Stack (Figma 195:4335 has the dots
+          // centered "between" the icons), which visually crowded/collided
+          // once the icon row grew send/share/view counts too. Separate
+          // lines can never collide, at any screen width or icon-row length.
+          if (mediaUrls.length > 1)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: _buildCarouselDots(mediaUrls.length, _page),
+              ),
+            ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-            child: Stack(
-              alignment: Alignment.center,
+            padding: EdgeInsets.fromLTRB(
+              16,
+              mediaUrls.length > 1 ? 8 : 12,
+              16,
+              0,
+            ),
+            child: Row(
               children: [
-                // Figma 195:4335: carousel page dots sit centered between the
-                // action icons, not on the image itself.
-                if (mediaUrls.length > 1)
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                InkWell(
+                  onTap: () =>
+                      ref.read(likeStateProvider(postId).notifier).toggle(),
+                  child: Row(
                     children: [
-                      for (var i = 0; i < mediaUrls.length; i++)
-                        Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 2),
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: i == _page
-                                ? AppColors.brand
-                                : AppColors.buttonMuted,
-                          ),
-                        ),
+                      isLiked
+                          ? const AppIcon(
+                              'heart_filled',
+                              size: 24,
+                              color: AppColors.error,
+                            )
+                          : AppIcon(
+                              'heart',
+                              size: 24,
+                              color: AppColors.textPrimary,
+                            ),
+                      const SizedBox(width: 4),
+                      Text('$likesCount', style: AppTypography.bodySmall),
                     ],
                   ),
-                Row(
-                  children: [
-                    InkWell(
-                      onTap: () =>
-                          ref.read(likeStateProvider(postId).notifier).toggle(),
-                      child: Row(
-                        children: [
-                          isLiked
-                              ? const AppIcon(
-                                  'heart_filled',
-                                  size: 24,
-                                  color: AppColors.error,
-                                )
-                              : AppIcon(
-                                  'heart',
-                                  size: 24,
-                                  color: AppColors.textPrimary,
-                                ),
-                          const SizedBox(width: 4),
-                          Text('$likesCount', style: AppTypography.bodySmall),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    InkWell(
-                      onTap: () => showSendToChatSheet(
-                        context,
-                        ref,
-                        postId: postId,
-                        postStoreId: storeId,
-                        postCaption: caption,
-                        postMediaUrl: previewImageUrl,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          AppIcon(
-                            'send_to_chat',
-                            size: 24,
-                            color: AppColors.textPrimary,
-                          ),
-                          if ((post['sentCount'] as int? ?? 0) > 0) ...[
-                            const SizedBox(width: 4),
-                            Text(
-                              '${post['sentCount']}',
-                              style: AppTypography.bodySmall,
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    InkWell(
-                      onTap: () => shareAndNotify(context, ref, postId),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          AppIcon(
-                            'arrow_share',
-                            size: 24,
-                            color: AppColors.textPrimary,
-                          ),
-                          if ((post['sharesCount'] as int? ?? 0) > 0) ...[
-                            const SizedBox(width: 4),
-                            Text(
-                              '${post['sharesCount']}',
-                              style: AppTypography.bodySmall,
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    if (type == 'reel') ...[
-                      const SizedBox(width: 16),
-                      Icon(
-                        Icons.visibility_outlined,
+                ),
+                const SizedBox(width: 16),
+                InkWell(
+                  onTap: () => showSendToChatSheet(
+                    context,
+                    ref,
+                    postId: postId,
+                    postStoreId: storeId,
+                    postCaption: caption,
+                    postMediaUrl: previewImageUrl,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AppIcon(
+                        'send_to_chat',
                         size: 24,
-                        color: AppColors.textMuted,
+                        color: AppColors.textPrimary,
                       ),
-                      if ((post['viewsCount'] as int? ?? 0) > 0) ...[
+                      if ((post['sentCount'] as int? ?? 0) > 0) ...[
                         const SizedBox(width: 4),
                         Text(
-                          '${post['viewsCount']}',
-                          style: AppTypography.bodySmall.copyWith(
-                            color: AppColors.textMuted,
-                          ),
+                          '${post['sentCount']}',
+                          style: AppTypography.bodySmall,
                         ),
                       ],
                     ],
-                    const Spacer(),
-                    if (widget.showOwnerActions) ...[
-                      const SizedBox(width: 16),
-                      InkWell(
-                        onTap: () => showEditCaptionDialog(
-                          context,
-                          ref,
-                          postId: postId,
-                          currentCaption: caption,
-                        ),
-                        child: Icon(
-                          Icons.edit_outlined,
-                          size: 24,
-                          color: AppColors.textPrimary,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      InkWell(
-                        onTap: () async {
-                          final s = ref.read(l10nProvider);
-                          final confirmed = await confirmDelete(
-                            context,
-                            ref,
-                            title: s.deletePostTitle,
-                            body: s.deletePostBody,
-                          );
-                          if (!confirmed) return;
-                          await ref
-                              .read(postsServiceProvider)
-                              .deletePost(postId);
-                        },
-                        child: const AppIcon(
-                          'trash',
-                          size: 24,
-                          color: AppColors.error,
-                        ),
-                      ),
-                    ],
-                  ],
+                  ),
                 ),
+                const SizedBox(width: 16),
+                InkWell(
+                  onTap: () => shareAndNotify(context, ref, postId),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AppIcon(
+                        'arrow_share',
+                        size: 24,
+                        color: AppColors.textPrimary,
+                      ),
+                      if ((post['sharesCount'] as int? ?? 0) > 0) ...[
+                        const SizedBox(width: 4),
+                        Text(
+                          '${post['sharesCount']}',
+                          style: AppTypography.bodySmall,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Icon(
+                  Icons.visibility_outlined,
+                  size: 24,
+                  color: AppColors.textMuted,
+                ),
+                if ((post['viewsCount'] as int? ?? 0) > 0) ...[
+                  const SizedBox(width: 4),
+                  Text(
+                    '${post['viewsCount']}',
+                    style: AppTypography.bodySmall.copyWith(
+                      color: AppColors.textMuted,
+                    ),
+                  ),
+                ],
+                const Spacer(),
+                if (widget.showOwnerActions) ...[
+                  const SizedBox(width: 16),
+                  InkWell(
+                    onTap: () => showEditCaptionDialog(
+                      context,
+                      ref,
+                      postId: postId,
+                      currentCaption: caption,
+                    ),
+                    child: Icon(
+                      Icons.edit_outlined,
+                      size: 24,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  InkWell(
+                    onTap: () async {
+                      final s = ref.read(l10nProvider);
+                      final confirmed = await confirmDelete(
+                        context,
+                        ref,
+                        title: s.deletePostTitle,
+                        body: s.deletePostBody,
+                      );
+                      if (!confirmed) return;
+                      await ref.read(postsServiceProvider).deletePost(postId);
+                    },
+                    child: const AppIcon(
+                      'trash',
+                      size: 24,
+                      color: AppColors.error,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
           if (caption.isNotEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Text.rich(
-                TextSpan(
-                  style: AppTypography.bodyMedium,
-                  children: [
-                    TextSpan(
-                      text: '$storeName ',
-                      style: AppTypography.bodyMediumSemibold,
-                    ),
-                    TextSpan(text: caption),
-                  ],
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+              child: ExpandableText(
+                prefix: storeName,
+                prefixStyle: AppTypography.bodyMediumSemibold,
+                text: caption,
+                style: AppTypography.bodyMedium,
               ),
             ),
           if (post['price'] != null)
@@ -407,6 +360,54 @@ String _formatDate(dynamic timestamp) {
   final hour = date.hour.toString().padLeft(2, '0');
   final minute = date.minute.toString().padLeft(2, '0');
   return '${date.day} ${months[date.month - 1]}, $hour:$minute';
+}
+
+/// Instagram's carousel dot indicator: at most 5 dots, in a window that
+/// slides to keep the active page roughly centered. Whichever edge of the
+/// window doesn't reach the actual first/last item shrinks to a tiny dot,
+/// signaling "more that way" without needing a dot per item (which would
+/// overflow the row for a 10-photo carousel). At <=5 items, every dot is
+/// shown at full size — there's nothing to hide.
+List<Widget> _buildCarouselDots(int count, int page) {
+  const windowSize = 5;
+  final windowStart = count <= windowSize
+      ? 0
+      : (page - 2).clamp(0, count - windowSize);
+  final windowEnd = count <= windowSize ? count : windowStart + windowSize;
+
+  return [
+    for (var i = windowStart; i < windowEnd; i++)
+      _CarouselDot(
+        // Tiny only at a window edge that isn't *also* the real first/last
+        // item — once the window has slid all the way to one end, that
+        // end's dot is a genuine (possibly active) item, not a "more" hint.
+        tiny:
+            (i == windowStart && windowStart > 0) ||
+            (i == windowEnd - 1 && windowEnd < count),
+        active: i == page,
+      ),
+  ];
+}
+
+class _CarouselDot extends StatelessWidget {
+  const _CarouselDot({required this.tiny, required this.active});
+
+  final bool tiny;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = tiny ? 4.0 : 6.0;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2),
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: active ? AppColors.brand : AppColors.buttonMuted,
+      ),
+    );
+  }
 }
 
 class _PostMedia extends StatelessWidget {

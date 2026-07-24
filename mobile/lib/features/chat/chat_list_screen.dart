@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
@@ -24,6 +25,41 @@ bool _isHiddenForSide(Map<String, dynamic> data, {required bool asAdmin}) {
   return lastAt == null || lastAt.compareTo(hiddenAt) <= 0;
 }
 
+/// Coordinates every _SwipeToDelete row on the chat list (one instance per
+/// screen, owned by ChatListScreen) so:
+/// - opening one closes whichever other row is currently open (each row used
+///   to track its own open/closed state independently, so swiping several
+///   left in a row left them all open at once);
+/// - a tap anywhere on the list closes an open row instead of also
+///   performing that tap's own action;
+/// - a tap on the AppBar/anywhere else on this screen, or navigating away
+///   from the Chat tab entirely (see ChatListScreen's VisibilityDetector —
+///   this screen is kept alive across bottom-nav tab switches, so nothing
+///   else would ever reset this), also closes it. Swiping open a row and
+///   leaving it open forever otherwise was the actual bug report.
+class _SwipeCoordinator extends ChangeNotifier {
+  String? _openId;
+  String? get openId => _openId;
+
+  void open(String id) {
+    if (_openId == id) return;
+    _openId = id;
+    notifyListeners();
+  }
+
+  void closeIfOpen(String id) {
+    if (_openId != id) return;
+    _openId = null;
+    notifyListeners();
+  }
+
+  void closeAll() {
+    if (_openId == null) return;
+    _openId = null;
+    notifyListeners();
+  }
+}
+
 Future<void> _confirmAndHideChat(
   BuildContext context,
   WidgetRef ref,
@@ -41,17 +77,52 @@ Future<void> _confirmAndHideChat(
   await ref.read(chatServiceProvider).hideChat(chatId, asAdmin: asAdmin);
 }
 
-class ChatListScreen extends ConsumerWidget {
+class ChatListScreen extends ConsumerStatefulWidget {
   const ChatListScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ChatListScreen> createState() => _ChatListScreenState();
+}
+
+class _ChatListScreenState extends ConsumerState<ChatListScreen> {
+  final _swipeCoordinator = _SwipeCoordinator();
+
+  @override
+  void dispose() {
+    _swipeCoordinator.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final role = ref.watch(appRoleProvider).value;
     final isAdmin = role == AppRole.admin || role == AppRole.superadmin;
 
-    return Scaffold(
-      appBar: AppBar(title: Text(ref.watch(l10nProvider).chat)),
-      body: isAdmin ? const _AdminChatList() : const _UserChatList(),
+    // Kept alive across bottom-nav tab switches (see router.dart's
+    // _KeepAlivePage) — nothing else would ever tell an open swipe to close
+    // when the user navigates to another tab, so this screen needs to notice
+    // for itself. Any drop below fully visible (not just fully gone) counts:
+    // by the time a tab switch away is even *noticeable* mid-swipe, the open
+    // row should already be closing, not wait until it's completely offscreen.
+    return VisibilityDetector(
+      key: const Key('chat-list-screen'),
+      onVisibilityChanged: (info) {
+        if (info.visibleFraction < 1.0) _swipeCoordinator.closeAll();
+      },
+      child: GestureDetector(
+        // translucent — lets this coexist with every descendant's own taps
+        // (row navigation, the AppBar) rather than stealing them; it only
+        // adds "also close whatever's open" on top, which is a no-op via
+        // closeAll() when nothing is.
+        behavior: HitTestBehavior.translucent,
+        onTap: _swipeCoordinator.closeAll,
+        child: Scaffold(
+          appBar: AppBar(title: Text(ref.watch(l10nProvider).chat)),
+          body: isAdmin
+              ? _AdminChatList(coordinator: _swipeCoordinator)
+              : _UserChatList(coordinator: _swipeCoordinator),
+        ),
+      ),
     );
   }
 }
@@ -61,11 +132,18 @@ class ChatListScreen extends ConsumerWidget {
 /// as before; stores with no messages yet follow, alphabetically. Tapping
 /// one of those lazily creates the chat doc (ChatService.createOrGetChat)
 /// instead of requiring a first message to exist before the thread shows up.
-class _UserChatList extends ConsumerWidget {
-  const _UserChatList();
+class _UserChatList extends ConsumerStatefulWidget {
+  const _UserChatList({required this.coordinator});
+
+  final _SwipeCoordinator coordinator;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_UserChatList> createState() => _UserChatListState();
+}
+
+class _UserChatListState extends ConsumerState<_UserChatList> {
+  @override
+  Widget build(BuildContext context) {
     final chatsAsync = ref.watch(userChatsProvider);
     final storesAsync = ref.watch(activeStoresProvider);
     if (!chatsAsync.hasValue || !storesAsync.hasValue) {
@@ -112,6 +190,8 @@ class _UserChatList extends ConsumerWidget {
               .value;
           return _SwipeToDelete(
             key: ValueKey('chat-${chat.id}'),
+            id: chat.id,
+            coordinator: widget.coordinator,
             onDelete: () =>
                 _confirmAndHideChat(context, ref, chat.id, asAdmin: false),
             child: _ChatRow(
@@ -145,7 +225,9 @@ class _UserChatList extends ConsumerWidget {
 }
 
 class _AdminChatList extends ConsumerStatefulWidget {
-  const _AdminChatList();
+  const _AdminChatList({required this.coordinator});
+
+  final _SwipeCoordinator coordinator;
 
   @override
   ConsumerState<_AdminChatList> createState() => _AdminChatListState();
@@ -208,6 +290,8 @@ class _AdminChatListState extends ConsumerState<_AdminChatList> {
                 .value;
             return _SwipeToDelete(
               key: ValueKey('chat-${chat.id}'),
+              id: chat.id,
+              coordinator: widget.coordinator,
               onDelete: () =>
                   _confirmAndHideChat(context, ref, chat.id, asAdmin: true),
               child: _ChatRow(
@@ -394,10 +478,16 @@ class _ChatAvatar extends StatelessWidget {
 class _SwipeToDelete extends StatefulWidget {
   const _SwipeToDelete({
     super.key,
+    required this.id,
+    required this.coordinator,
     required this.child,
     required this.onDelete,
   });
 
+  /// This row's chat id — how it claims/checks ownership of "the open row"
+  /// on [coordinator].
+  final String id;
+  final _SwipeCoordinator coordinator;
   final Widget child;
   final Future<void> Function() onDelete;
 
@@ -419,6 +509,29 @@ class _SwipeToDeleteState extends State<_SwipeToDelete>
 
   bool get _isOpen => _controller.value < 0;
 
+  @override
+  void initState() {
+    super.initState();
+    widget.coordinator.addListener(_onCoordinatorChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.coordinator.removeListener(_onCoordinatorChanged);
+    _controller.dispose();
+    super.dispose();
+  }
+
+  // Some other row just claimed "open" — close this one without touching
+  // the coordinator (it's already pointing at that other row).
+  void _onCoordinatorChanged() {
+    if (widget.coordinator.openId != widget.id && _controller.value != 0) {
+      _controller.animateTo(0, curve: Curves.easeOut);
+    }
+  }
+
+  void _onDragStart(DragStartDetails d) => widget.coordinator.open(widget.id);
+
   void _onDragUpdate(DragUpdateDetails d) {
     _controller.value = (_controller.value + d.delta.dx).clamp(
       -_revealWidth,
@@ -429,26 +542,37 @@ class _SwipeToDeleteState extends State<_SwipeToDelete>
   void _onDragEnd(DragEndDetails d) {
     final open = _controller.value < -_revealWidth / 2;
     _controller.animateTo(open ? -_revealWidth : 0.0, curve: Curves.easeOut);
+    if (open) {
+      widget.coordinator.open(widget.id);
+    } else {
+      widget.coordinator.closeIfOpen(widget.id);
+    }
   }
 
   void _close() {
     if (mounted) _controller.animateTo(0, curve: Curves.easeOut);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
+    widget.coordinator.closeIfOpen(widget.id);
   }
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
+      onHorizontalDragStart: _onDragStart,
       onHorizontalDragUpdate: _onDragUpdate,
       onHorizontalDragEnd: _onDragEnd,
       child: AnimatedBuilder(
-        animation: _controller,
+        // Merged, not just _controller — a row that ISN'T open needs to
+        // rebuild too when some OTHER row opens/closes, since that's what
+        // decides whether this row's tap-catcher (below) is showing.
+        animation: Listenable.merge([_controller, widget.coordinator]),
         builder: (context, child) {
+          // A tap anywhere else while a row is open should just close it,
+          // not also fire the tapped row's own action (e.g. navigating into
+          // that chat) — same as swiping an open row shut, this row gets an
+          // opaque catcher over its content whenever it's NOT the open one
+          // but something else is.
+          final someOtherRowOpen =
+              !_isOpen && widget.coordinator.openId != null;
           return Stack(
             children: [
               Positioned.fill(
@@ -488,6 +612,18 @@ class _SwipeToDeleteState extends State<_SwipeToDelete>
                           child: GestureDetector(
                             behavior: HitTestBehavior.opaque,
                             onTap: _close,
+                          ),
+                        ),
+                      // Some other row is open — tapping this one closes
+                      // that row instead of performing this row's own tap
+                      // action (e.g. navigating into this chat).
+                      if (someOtherRowOpen)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => widget.coordinator.closeIfOpen(
+                              widget.coordinator.openId!,
+                            ),
                           ),
                         ),
                     ],

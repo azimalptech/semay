@@ -17,6 +17,7 @@ import '../post_interaction_providers.dart';
 import 'confirm_delete_dialog.dart';
 import 'double_tap_like_overlay.dart';
 import 'edit_caption_dialog.dart';
+import 'expandable_text.dart';
 import 'pinch_zoom_image.dart';
 import 'send_to_chat_sheet.dart';
 
@@ -475,135 +476,127 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
                     ),
                   ),
                 ),
-                // Figma MyReel footer: store row with the heart/bookmark/share
-                // actions inline on its right, caption below spanning full width.
+                // Instagram-style right-edge icon rail — like/send/bookmark/
+                // share/views stacked vertically along the right side,
+                // instead of inline with the store row (which used to
+                // squeeze them into one crowded horizontal line).
+                Positioned(
+                  right: 12,
+                  bottom: 108,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _RailAction(
+                        iconName: isLiked ? 'heart_filled' : 'heart',
+                        color: isLiked ? AppColors.error : Colors.white,
+                        label: likesCount > 0 ? '$likesCount' : null,
+                        onTap: () => ref
+                            .read(likeStateProvider(widget.postId).notifier)
+                            .toggle(),
+                      ),
+                      const SizedBox(height: 20),
+                      _RailAction(
+                        iconName: 'send',
+                        color: Colors.white,
+                        label: (widget.post['sentCount'] as int? ?? 0) > 0
+                            ? '${widget.post['sentCount']}'
+                            : null,
+                        onTap: () => showSendToChatSheet(
+                          context,
+                          ref,
+                          postId: widget.postId,
+                          postStoreId: storeId,
+                          postCaption: caption,
+                          postMediaUrl:
+                              widget.post['thumbnailUrl'] as String? ?? '',
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      _RailAction(
+                        iconName: isSaved ? 'bookmark_filled' : 'bookmark',
+                        color: Colors.white,
+                        onTap: () =>
+                            toggleSaveAndNotify(context, ref, widget.postId),
+                      ),
+                      const SizedBox(height: 20),
+                      _RailAction(
+                        iconName: 'arrow_share',
+                        color: Colors.white,
+                        label: (widget.post['sharesCount'] as int? ?? 0) > 0
+                            ? '${widget.post['sharesCount']}'
+                            : null,
+                        onTap: () =>
+                            shareAndNotify(context, ref, widget.postId),
+                      ),
+                      const SizedBox(height: 20),
+                      _RailAction(
+                        icon: Icons.visibility_outlined,
+                        color: Colors.white,
+                        label: (widget.post['viewsCount'] as int? ?? 0) > 0
+                            ? '${widget.post['viewsCount']}'
+                            : null,
+                      ),
+                    ],
+                  ),
+                ),
+                // Store row + caption — left-anchored, capped short of the
+                // icon rail so long captions wrap/ellipsize instead of
+                // running underneath it.
                 Positioned(
                   left: 16,
-                  right: 16,
+                  right: 88,
                   bottom: 24,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Row(
-                        children: [
-                          GestureDetector(
-                            onTap: () => context.push('/store/$storeId'),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                CircleAvatar(
-                                  radius: 16,
-                                  backgroundColor: Colors.white,
-                                  backgroundImage:
-                                      (store?['avatarUrl'] as String? ?? '')
-                                          .isNotEmpty
-                                      ? CachedNetworkImageProvider(
-                                          store!['avatarUrl'] as String,
-                                        )
-                                      : null,
-                                  child:
-                                      (store?['avatarUrl'] as String? ?? '')
-                                          .isEmpty
-                                      ? Icon(
-                                          Icons.storefront,
-                                          size: 16,
-                                          color: AppColors.textMuted,
-                                        )
-                                      : null,
-                                ),
-                                const SizedBox(width: 8),
-                                ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxWidth: 140,
-                                  ),
-                                  child: Text(
-                                    store?['name'] as String? ?? '',
-                                    style: AppTypography.bodyMediumSemibold
-                                        .copyWith(color: Colors.white),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
+                      GestureDetector(
+                        onTap: () => context.push('/store/$storeId'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircleAvatar(
+                              radius: 16,
+                              backgroundColor: Colors.white,
+                              backgroundImage:
+                                  (store?['avatarUrl'] as String? ?? '')
+                                      .isNotEmpty
+                                  ? CachedNetworkImageProvider(
+                                      store!['avatarUrl'] as String,
+                                    )
+                                  : null,
+                              child:
+                                  (store?['avatarUrl'] as String? ?? '').isEmpty
+                                  ? Icon(
+                                      Icons.storefront,
+                                      size: 16,
+                                      color: AppColors.textMuted,
+                                    )
+                                  : null,
                             ),
-                          ),
-                          const Spacer(),
-                          _FooterAction(
-                            iconName: isLiked ? 'heart_filled' : 'heart',
-                            color: isLiked ? AppColors.error : Colors.white,
-                            label: likesCount > 0 ? '$likesCount' : null,
-                            onTap: () => ref
-                                .read(likeStateProvider(widget.postId).notifier)
-                                .toggle(),
-                          ),
-                          const SizedBox(width: 16),
-                          _FooterAction(
-                            iconName: 'send',
-                            color: Colors.white,
-                            label: (widget.post['sentCount'] as int? ?? 0) > 0
-                                ? '${widget.post['sentCount']}'
-                                : null,
-                            onTap: () => showSendToChatSheet(
-                              context,
-                              ref,
-                              postId: widget.postId,
-                              postStoreId: storeId,
-                              postCaption: caption,
-                              postMediaUrl:
-                                  widget.post['thumbnailUrl'] as String? ?? '',
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          _FooterAction(
-                            iconName: isSaved ? 'bookmark_filled' : 'bookmark',
-                            color: Colors.white,
-                            onTap: () => toggleSaveAndNotify(
-                              context,
-                              ref,
-                              widget.postId,
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          _FooterAction(
-                            iconName: 'arrow_share',
-                            color: Colors.white,
-                            label: (widget.post['sharesCount'] as int? ?? 0) > 0
-                                ? '${widget.post['sharesCount']}'
-                                : null,
-                            onTap: () =>
-                                shareAndNotify(context, ref, widget.postId),
-                          ),
-                          const SizedBox(width: 16),
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.visibility_outlined,
-                                color: Colors.white,
-                                size: 24,
+                            const SizedBox(width: 8),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 140),
+                              child: Text(
+                                store?['name'] as String? ?? '',
+                                style: AppTypography.bodyMediumSemibold
+                                    .copyWith(color: Colors.white),
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              if ((widget.post['viewsCount'] as int? ?? 0) >
-                                  0) ...[
-                                const SizedBox(width: 4),
-                                Text(
-                                  '${widget.post['viewsCount']}',
-                                  style: AppTypography.bodySmall.copyWith(
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
-                        ],
+                            ),
+                          ],
+                        ),
                       ),
                       if (caption.isNotEmpty) ...[
                         const SizedBox(height: 8),
-                        Text(
-                          caption,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+                        ExpandableText(
+                          text: caption,
                           style: AppTypography.bodySmall.copyWith(
                             color: Colors.white,
+                          ),
+                          moreStyle: AppTypography.bodySmall.copyWith(
+                            color: Colors.white70,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ],
@@ -822,15 +815,25 @@ class _ScrubBarState extends State<_ScrubBar> {
   }
 }
 
-class _FooterAction extends StatelessWidget {
-  const _FooterAction({
-    required this.iconName,
+/// One entry in the right-edge icon rail (Instagram Reels layout) — icon
+/// centered above its count, not beside it, so a stack of these reads as a
+/// single vertical column hugging the screen edge instead of a wide row.
+/// Takes either [iconName] (this app's own SVG set) or [icon] (a Material
+/// fallback, for the eye/"views" glyph, which has no SVG asset).
+class _RailAction extends StatelessWidget {
+  const _RailAction({
+    this.iconName,
+    this.icon,
     required this.color,
     this.label,
     this.onTap,
-  });
+  }) : assert(
+         (iconName == null) != (icon == null),
+         'exactly one of iconName/icon',
+       );
 
-  final String iconName;
+  final String? iconName;
+  final IconData? icon;
   final Color color;
   final String? label;
   final VoidCallback? onTap;
@@ -839,12 +842,14 @@ class _FooterAction extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Row(
+      child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          AppIcon(iconName, color: color, size: 24),
+          iconName != null
+              ? AppIcon(iconName!, color: color, size: 28)
+              : Icon(icon, color: color, size: 28),
           if (label != null) ...[
-            const SizedBox(width: 4),
+            const SizedBox(height: 4),
             Text(
               label!,
               style: AppTypography.bodySmall.copyWith(color: Colors.white),

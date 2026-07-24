@@ -53,17 +53,44 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
   Map<String, String?>? _replyingTo;
 
   void _scrollToBottom({required bool animate}) {
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _settleScrollToBottom(animate: animate, attemptsLeft: 6),
+    );
+  }
+
+  // ListView.builder only lays out/measures items actually near the current
+  // viewport on a given frame — right after opening a thread, the viewport
+  // is still sitting at its default (top/oldest) position, so
+  // maxScrollExtent is an *estimate* extrapolated from whichever few oldest
+  // items happened to get built, not the true end. If bubble heights vary
+  // (an image, a reply quote, a longer message near the end), jumping to
+  // that estimate lands short of the real bottom — which is what "opens
+  // somewhere in the middle, have to scroll down" was: a one-shot jump to a
+  // guess. Landing the jump actually builds/measures the now-visible items,
+  // which can move the true end further — so re-check next frame and jump
+  // again if it moved, until two consecutive frames agree (or attempts run
+  // out). Only the first hop honors [animate]; every retry is an instant
+  // jump so they don't stack visible animations.
+  void _settleScrollToBottom({
+    required bool animate,
+    required int attemptsLeft,
+  }) {
+    if (!mounted || !_scrollController.hasClients) return;
+    final max = _scrollController.position.maxScrollExtent;
+    if (animate) {
+      _scrollController.animateTo(
+        max,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+      );
+    } else {
+      _scrollController.jumpTo(max);
+    }
+    if (attemptsLeft <= 0) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
-      final max = _scrollController.position.maxScrollExtent;
-      if (animate) {
-        _scrollController.animateTo(
-          max,
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-        );
-      } else {
-        _scrollController.jumpTo(max);
+      if (!mounted || !_scrollController.hasClients) return;
+      if ((_scrollController.position.maxScrollExtent - max).abs() > 1) {
+        _settleScrollToBottom(animate: false, attemptsLeft: attemptsLeft - 1);
       }
     });
   }

@@ -20,7 +20,6 @@ import 'widgets/edit_caption_dialog.dart';
 import 'widgets/pinch_zoom_image.dart';
 import 'widgets/reel_player_view.dart';
 import 'widgets/send_to_chat_sheet.dart';
-import 'widgets/views_badge.dart';
 
 /// Full media + interactions for a single post. Reels delegate entirely to
 /// ReelPlayerView — the same full-screen layout as the Reels tab — instead of
@@ -304,33 +303,13 @@ class _ImagePostDetailContentState
           onLike: () => ref.read(likeStateProvider(postId).notifier).like(),
           child: AspectRatio(
             aspectRatio: 1,
-            child: Stack(
-              fit: StackFit.expand,
+            child: PageView(
               children: [
-                PageView(
-                  children: [
-                    for (final url in mediaUrls)
-                      PinchZoomImage(
-                        onZoomStart: _recordView,
-                        child: CachedNetworkImage(
-                          imageUrl: url,
-                          fit: BoxFit.cover,
-                        ),
-                      ),
-                  ],
-                ),
-                // Moved off the icon row below — it was crowding the row's
-                // right end together with the owner-only edit/delete icons,
-                // same corner-badge treatment as PostCard's feed tile.
-                Positioned(
-                  right: 12,
-                  bottom: 12,
-                  child: IgnorePointer(
-                    child: ViewsBadge(
-                      viewsCount: post['viewsCount'] as int? ?? 0,
-                    ),
+                for (final url in mediaUrls)
+                  PinchZoomImage(
+                    onZoomStart: _recordView,
+                    child: CachedNetworkImage(imageUrl: url, fit: BoxFit.cover),
                   ),
-                ),
               ],
             ),
           ),
@@ -363,6 +342,19 @@ class _ImagePostDetailContentState
               onPressed: () => shareAndNotify(context, ref, postId),
             ),
             Text('${post['sharesCount'] as int? ?? 0}'),
+            const SizedBox(width: 8),
+            Icon(
+              Icons.visibility_outlined,
+              size: 18,
+              color: AppColors.textMuted,
+            ),
+            const SizedBox(width: 2),
+            Text(
+              '${post['viewsCount'] as int? ?? 0}',
+              style: AppTypography.bodySmall.copyWith(
+                color: AppColors.textMuted,
+              ),
+            ),
             const Spacer(),
             IconButton(
               icon: AppIcon(

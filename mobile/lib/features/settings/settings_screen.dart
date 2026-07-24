@@ -78,15 +78,6 @@ class SettingsScreen extends ConsumerWidget {
                 iconColor: const Color(0xFF34A853),
                 title: s.notifications,
                 onTap: () => context.push('/settings/notifications'),
-                trailingExtra: isAdmin
-                    ? IconButton(
-                        icon: AppIcon('plus', color: AppColors.textMuted),
-                        tooltip: s.requestNotification,
-                        onPressed: () => context.push(
-                          '/settings/notification-requests/$storeId',
-                        ),
-                      )
-                    : null,
               ),
               _SettingsTile(
                 icon: const AppIcon('heart'),
@@ -309,7 +300,6 @@ class _SettingsTile extends StatelessWidget {
     required this.title,
     this.trailingText,
     this.onTap,
-    this.trailingExtra,
   });
 
   /// An `Icon(Icons.xxx)` or `AppIcon('xxx')` — this row mixes both
@@ -321,11 +311,6 @@ class _SettingsTile extends StatelessWidget {
   final String title;
   final String? trailingText;
   final VoidCallback? onTap;
-
-  /// An extra tappable slot before the chevron — only the Notifications
-  /// row's admin-only "+" (request a broadcast notification) uses this so
-  /// far, not worth a whole separate row just for one small icon button.
-  final Widget? trailingExtra;
 
   @override
   Widget build(BuildContext context) {
@@ -358,7 +343,6 @@ class _SettingsTile extends StatelessWidget {
                 ),
               ),
             ),
-          ?trailingExtra,
           AppIcon('chevron_right', color: AppColors.textMuted),
         ],
       ),
