@@ -17,6 +17,7 @@ import '../features/profile/liked_screen.dart';
 import '../features/settings/edit_profile_screen.dart';
 import '../features/profile/profile_notifications_screen.dart';
 import '../features/reels/reels_screen.dart';
+import '../features/search/search_pager_screen.dart';
 import '../features/search/search_screen.dart';
 import '../features/settings/notification_request_screen.dart';
 import '../features/settings/quick_replies_screen.dart';
@@ -167,6 +168,19 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/search',
         builder: (context, state) => const SearchScreen(),
+      ),
+      // Tapping a search result opens a shuffled scroll of that media type
+      // (posts and reels separately), seeded to the tapped item — see
+      // search_pager_screen.dart. Both reuse the search grid's shuffled order.
+      GoRoute(
+        path: '/search/posts/:postId',
+        builder: (context, state) =>
+            SearchPostsPagerScreen(initialPostId: state.pathParameters['postId']!),
+      ),
+      GoRoute(
+        path: '/search/reels/:postId',
+        builder: (context, state) =>
+            SearchReelsPagerScreen(initialPostId: state.pathParameters['postId']!),
       ),
       GoRoute(
         path: '/post/:postId',

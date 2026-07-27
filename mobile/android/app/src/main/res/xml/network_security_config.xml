@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Applies to ALL build types (debug + release). Secure by default: every real
+  host must use TLS. The one exception is loopback — a release test build reaches
+  the local dev server over the `adb reverse tcp:8080 tcp:8080` tunnel as
+  http://localhost:8080 (REST) and ws://localhost:8080 (WebSocket), both
+  cleartext, which release builds otherwise block. Production traffic (the
+  Turkmenistan HTTPS API) is unaffected: it never matches these loopback
+  domains, so it still requires TLS.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

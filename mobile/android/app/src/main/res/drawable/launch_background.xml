@@ -1,17 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Modify this file to customize your launch splash screen -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Matches SplashScreen (lib/features/auth/splash_screen.dart)'s
-         AppColors.backgroundPrimary light value + centered logo.png exactly,
-         so the handoff from this native pre-Flutter-engine screen to the
-         Dart-rendered one is seamless instead of visibly swapping from plain
-         white to beige-with-logo (the default, un-customized template this
-         used to be — that swap is what read as "two splash screens
-         blinking"). -->
+    <!-- Deliberately background color ONLY, no logo bitmap — matching the
+         color exactly still made the native pre-Flutter-engine window and
+         Dart's own SplashScreen (lib/features/auth/splash_screen.dart) read
+         as two distinct logo pops in sequence (this native one is removed
+         the instant the Flutter engine draws its first frame, which is
+         *before* SplashScreen's own build reliably lands, so the logo still
+         visibly re-appeared). Showing only a plain color here and letting
+         SplashScreen be the only place the logo ever renders makes the
+         native window an imperceptible blank flash instead of a second
+         splash. -->
     <item android:drawable="@color/launch_background_color" />
-    <item>
-        <bitmap
-            android:gravity="center"
-            android:src="@drawable/launch_logo" />
-    </item>
 </layer-list>

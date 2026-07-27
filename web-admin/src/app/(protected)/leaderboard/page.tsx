@@ -1,5 +1,4 @@
-import { Timestamp } from "firebase-admin/firestore";
-import { adminDb } from "@/lib/firebaseAdmin";
+import { prisma } from "@/lib/db";
 import { getTranslations, toClientDict } from "@/lib/l10n";
 import { requireSuperAdmin } from "@/lib/session";
 import { CampaignForm } from "./_components/CampaignForm";
@@ -11,23 +10,26 @@ export default async function LeaderboardPage() {
   await requireSuperAdmin();
   const t = await getTranslations();
 
-  const storesSnap = await adminDb
-    .collection("stores")
-    .where("active", "==", true)
-    .select("name", "leaderboardOrder", "campaignStartAt", "campaignImageUrl")
-    .get();
-  const stores = storesSnap.docs
-    .map((doc) => {
-      const data = doc.data();
-      const campaignStartAt = data.campaignStartAt as Timestamp | undefined;
-      return {
-        id: doc.id,
-        name: (data.name as string) ?? "",
-        order: (data.leaderboardOrder as number | undefined) ?? Number.MAX_SAFE_INTEGER,
-        campaignStartAtMillis: campaignStartAt ? campaignStartAt.toMillis() : null,
-        campaignImageUrl: (data.campaignImageUrl as string | null | undefined) ?? null,
-      };
-    })
+  const activeStores = await prisma.store.findMany({
+    where: { active: true },
+    select: {
+      id: true,
+      name: true,
+      leaderboardOrder: true,
+      campaignStartAt: true,
+      campaignEndAt: true,
+      campaignImageUrl: true,
+    },
+  });
+  const stores = activeStores
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      order: s.leaderboardOrder ?? Number.MAX_SAFE_INTEGER,
+      campaignStartAtMillis: s.campaignStartAt ? s.campaignStartAt.getTime() : null,
+      campaignEndAtMillis: s.campaignEndAt ? s.campaignEndAt.getTime() : null,
+      campaignImageUrl: s.campaignImageUrl,
+    }))
     .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
 
   return (
@@ -37,12 +39,15 @@ export default async function LeaderboardPage() {
       </div>
 
       <CampaignForm
-        initialStores={stores.map(({ id, name, campaignStartAtMillis, campaignImageUrl }) => ({
-          id,
-          name,
-          campaignStartAtMillis,
-          campaignImageUrl,
-        }))}
+        initialStores={stores.map(
+          ({ id, name, campaignStartAtMillis, campaignEndAtMillis, campaignImageUrl }) => ({
+            id,
+            name,
+            campaignStartAtMillis,
+            campaignEndAtMillis,
+            campaignImageUrl,
+          }),
+        )}
         t={toClientDict(t)}
       />
       <StoreOrderForm initialStores={stores.map(({ id, name }) => ({ id, name }))} t={toClientDict(t)} />

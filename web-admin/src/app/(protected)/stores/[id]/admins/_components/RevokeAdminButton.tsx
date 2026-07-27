@@ -2,8 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { httpsCallable } from "firebase/functions";
-import { clientFunctions } from "@/lib/firebaseClient";
 import type { ClientDict } from "@/lib/l10n";
 
 export function RevokeAdminButton({
@@ -21,8 +19,11 @@ export function RevokeAdminButton({
   async function handleRevoke() {
     setRevoking(true);
     try {
-      const setStoreAdmin = httpsCallable(clientFunctions, "setStoreAdmin");
-      await setStoreAdmin({ storeId, userId, grant: false });
+      await fetch(`/api/stores/${storeId}/admins`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, grant: false }),
+      });
       router.refresh();
     } finally {
       setRevoking(false);

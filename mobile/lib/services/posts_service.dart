@@ -1,25 +1,56 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+// XFile comes from share_plus's re-export of cross_file (image_picker, which
+// callers use to pick the files, re-exports the same type).
 import 'package:share_plus/share_plus.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
-import 'auth_service.dart';
-import 'firestore_service.dart';
-import 'storage_service.dart';
+import '../core/api_client.dart';
+import '../core/interaction_buffer.dart';
+import '../core/outbox.dart';
 
 class PostsService {
-  PostsService(this._firestore, this._storage, this._auth);
+  PostsService(this._api, this._outbox, this._interactions);
 
-  final FirebaseFirestore _firestore;
-  final FirebaseStorage _storage;
-  final FirebaseAuth _auth;
+  final ApiClient _api;
+  final OutboxService _outbox;
+  final InteractionBuffer _interactions;
 
   static const _maxVideoBytes = 100 * 1024 * 1024;
 
-  /// XFile + putData (not dart:io File) so publishing works on web too.
+  /// Requests a presigned upload URL from the API, PUTs the bytes straight to
+  /// MinIO, and returns the eventual public URL to store on the post/story
+  /// (see docs/07_MIGRATION.md Phase 3's media pipeline). Replaces Firebase
+  /// Storage's putData + getDownloadURL. Public so StoriesService/ChatService
+  /// reuse the exact same upload path.
+  Future<String> uploadMedia({
+    required String folder, // "posts" | "stores" | "stories" | "chats"
+    required Uint8List bytes,
+    required String fileExt, // "jpg" | "mp4"
+    required String contentType,
+  }) async {
+    final slot = await _api.post(
+      '/media/upload-url',
+      body: {'folder': folder, 'fileExt': fileExt},
+    );
+    final uploadUrl = slot['uploadUrl'] as String;
+    final publicUrl = slot['publicUrl'] as String;
+    // Bare Dio (no auth header) — the presigned URL carries its own signature,
+    // and MinIO doesn't want our bearer token.
+    await Dio().put<void>(
+      uploadUrl,
+      data: Stream.fromIterable([bytes]),
+      options: Options(
+        headers: {
+          Headers.contentTypeHeader: contentType,
+          Headers.contentLengthHeader: bytes.length,
+        },
+      ),
+    );
+    return publicUrl;
+  }
+
   Future<void> createPost({
     required String storeId,
     required String type, // "image" | "carousel" | "reel"
@@ -27,20 +58,20 @@ class PostsService {
     required String caption,
     num? price,
   }) async {
-    final postRef = _firestore.collection('posts').doc();
-    final basePath = 'stores/$storeId/posts/${postRef.id}';
-
-    final mediaUrls = <String>[];
+    final media = <Map<String, dynamic>>[];
     for (var i = 0; i < files.length; i++) {
       final bytes = await files[i].readAsBytes();
       if (type == 'reel' && bytes.length > _maxVideoBytes) {
         throw Exception('Video must be under 100MB');
       }
-      final ext = type == 'reel' ? 'mp4' : 'jpg';
-      final contentType = type == 'reel' ? 'video/mp4' : 'image/jpeg';
-      final ref = _storage.ref('$basePath/media_$i.$ext');
-      await ref.putData(bytes, SettableMetadata(contentType: contentType));
-      mediaUrls.add(await ref.getDownloadURL());
+      final isReel = type == 'reel';
+      final url = await uploadMedia(
+        folder: 'posts',
+        bytes: bytes,
+        fileExt: isReel ? 'mp4' : 'jpg',
+        contentType: isReel ? 'video/mp4' : 'image/jpeg',
+      );
+      media.add({'url': url, 'position': i});
     }
 
     // video_thumbnail has no web implementation — reels published from a
@@ -52,88 +83,51 @@ class PostsService {
         imageFormat: ImageFormat.JPEG,
       );
       if (thumbBytes != null) {
-        final thumbRef = _storage.ref('$basePath/thumbnail.jpg');
-        await thumbRef.putData(
-          thumbBytes,
-          SettableMetadata(contentType: 'image/jpeg'),
+        thumbnailUrl = await uploadMedia(
+          folder: 'posts',
+          bytes: thumbBytes,
+          fileExt: 'jpg',
+          contentType: 'image/jpeg',
         );
-        thumbnailUrl = await thumbRef.getDownloadURL();
       }
     }
 
-    await postRef.set({
-      'storeId': storeId,
+    final body = <String, dynamic>{
       'type': type,
-      'mediaUrls': mediaUrls,
-      'thumbnailUrl': thumbnailUrl,
       'caption': caption,
-      'price': price,
-      'likesCount': 0,
-      'savesCount': 0,
-      'viewsCount': 0,
-      'sentCount': 0,
-      'sharesCount': 0,
-      'createdAt': FieldValue.serverTimestamp(),
-    });
+      'media': media,
+    };
+    if (price != null) body['price'] = price;
+    if (thumbnailUrl.isNotEmpty) body['thumbnailUrl'] = thumbnailUrl;
+    await _api.post('/stores/$storeId/posts', body: body);
   }
 
   Future<void> deletePost(String postId) async {
-    await _firestore.collection('posts').doc(postId).delete();
+    await _api.delete('/posts/$postId');
   }
 
   /// Instagram scopes post editing to the caption only — the media stays as
   /// uploaded, no re-crop/replace after publish.
   Future<void> updateCaption(String postId, String caption) async {
-    await _firestore.collection('posts').doc(postId).update({
-      'caption': caption,
-    });
+    await _api.patch('/posts/$postId', body: {'caption': caption});
   }
 
-  /// Unique-viewer record (doc id = viewer uid, so re-triggering the same
-  /// engagement signal — e.g. liking, then later zooming — never inflates
-  /// the count past one per viewer), same shape as StoriesService's own
-  /// recordStoryView. onViewCreated (backend) increments posts/{postId}.
-  /// viewsCount off the doc actually being *created* — Cloud Functions'
-  /// onDocumentCreated only fires on genuine creation, so calling this
-  /// repeatedly for the same viewer is already safe without an existence
-  /// check of its own.
+  /// View/send/share no longer hit the server per tap. They accumulate in the
+  /// local InteractionBuffer, which dedups the same user re-counting the same
+  /// post within a 30-minute window and flushes batched increments every
+  /// ~30 minutes / on app background (see interaction_buffer.dart). Calling
+  /// these repeatedly is cheap and safe — a repeat within the window is a
+  /// no-op, a tap after it counts again.
   Future<void> recordView(String postId) async {
-    final uid = _auth.currentUser?.uid;
-    if (uid == null) return;
-    await _firestore
-        .collection('posts')
-        .doc(postId)
-        .collection('views')
-        .doc(uid)
-        .set({'viewedAt': FieldValue.serverTimestamp()});
+    await _interactions.record(postId, InteractionKind.view);
   }
 
-  /// Unique-per-sender record, same shape/rationale as [recordView] — the
-  /// same person sending this post to chat twice (or sharing it twice)
-  /// counts once, not twice. Callers are responsible for only calling this
-  /// once the underlying action has actually succeeded (a confirmed chat
-  /// send, or a share sheet result of `ShareResultStatus.success`), not on
-  /// the icon tap itself — see send_to_chat_sheet.dart / shareAndRecord.
   Future<void> recordSent(String postId) async {
-    final uid = _auth.currentUser?.uid;
-    if (uid == null) return;
-    await _firestore
-        .collection('posts')
-        .doc(postId)
-        .collection('sent')
-        .doc(uid)
-        .set({'sentAt': FieldValue.serverTimestamp()});
+    await _interactions.record(postId, InteractionKind.sent);
   }
 
   Future<void> recordShare(String postId) async {
-    final uid = _auth.currentUser?.uid;
-    if (uid == null) return;
-    await _firestore
-        .collection('posts')
-        .doc(postId)
-        .collection('shares')
-        .doc(uid)
-        .set({'sharedAt': FieldValue.serverTimestamp()});
+    await _interactions.record(postId, InteractionKind.share);
   }
 
   /// Shared by every "share" icon (post_card.dart, post_detail_screen.dart,
@@ -150,65 +144,29 @@ class PostsService {
     return true;
   }
 
-  // Takes the caller's already-decided target state instead of reading
-  // current existence itself and deciding create-vs-delete here. That
-  // read-then-decide shape was the actual bug behind the like count
-  // glitching on a quick like/unlike/like: two overlapping toggleLike()
-  // calls each read likeRef.get() independently, and whichever read landed
-  // before the OTHER call's write had committed could both decide the SAME
-  // action (e.g. both "create") — silently contradicting the second tap's
-  // real intent once both writes settled, which the UI only found out about
-  // when isLikedProvider's listener delivered the true state a moment
-  // later, flipping the heart back unexpectedly. LikeNotifier.toggle()
-  // already computes the definitive intended state synchronously before
-  // calling this, so handing it straight through and doing a plain
-  // set/delete (no read) makes the outcome deterministic: Firestore
-  // serializes writes to the same document in commit order, so the last tap
-  // to actually commit always wins — which is exactly the right semantics
-  // for rapid toggling, and removes the race entirely.
+  /// Routed through the offline outbox (Phase 9b) so a like/save toggled with
+  /// no signal replays on reconnect. like/save are naturally idempotent on the
+  /// server (composite PK per (post,user)), so a replayed toggle is safe; the
+  /// UI already shows the new state optimistically (see LikeNotifier).
   Future<void> toggleLike(String postId, bool isLiked) async {
-    final uid = _auth.currentUser!.uid;
-    final likeRef = _firestore
-        .collection('posts')
-        .doc(postId)
-        .collection('likes')
-        .doc(uid);
-    final likedRef = _firestore
-        .collection('users')
-        .doc(uid)
-        .collection('liked')
-        .doc(postId);
-    final batch = _firestore.batch();
-    if (isLiked) {
-      batch.set(likeRef, {'createdAt': FieldValue.serverTimestamp()});
-      batch.set(likedRef, {'createdAt': FieldValue.serverTimestamp()});
-    } else {
-      batch.delete(likeRef);
-      batch.delete(likedRef);
-    }
-    await batch.commit();
+    await _outbox.enqueue(
+      isLiked ? OutboxKind.like : OutboxKind.unlike,
+      {'postId': postId},
+    );
   }
 
-  Future<void> toggleSave(String postId) async {
-    final uid = _auth.currentUser!.uid;
-    final savedRef = _firestore
-        .collection('users')
-        .doc(uid)
-        .collection('saved')
-        .doc(postId);
-    final snap = await savedRef.get();
-    if (snap.exists) {
-      await savedRef.delete();
-    } else {
-      await savedRef.set({'createdAt': FieldValue.serverTimestamp()});
-    }
+  Future<void> toggleSave(String postId, bool isSaved) async {
+    await _outbox.enqueue(
+      isSaved ? OutboxKind.save : OutboxKind.unsave,
+      {'postId': postId},
+    );
   }
 }
 
 final postsServiceProvider = Provider<PostsService>((ref) {
   return PostsService(
-    ref.watch(firestoreProvider),
-    ref.watch(storageProvider),
-    ref.watch(firebaseAuthProvider),
+    ref.watch(apiClientProvider),
+    ref.watch(outboxServiceProvider),
+    ref.watch(interactionBufferProvider),
   );
 });

@@ -36,11 +36,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_riverpod: ^3.3.2
   go_router: ^17.3.0
+  # Firebase is kept for FCM push ONLY — all data/auth/storage/functions moved
+  # to the self-hosted API (see docs/07_MIGRATION.md Phase 9).
   firebase_core: ^4.12.0
-  firebase_auth: ^6.5.5
-  cloud_firestore: ^6.7.0
-  firebase_storage: ^13.4.4
-  cloud_functions: ^6.3.4
   firebase_messaging: ^16.4.2
   image_picker: ^1.2.3
   video_player: ^2.11.1
@@ -53,6 +51,13 @@ dependencies:
   share_plus: ^11.0.0
   visibility_detector: ^0.4.0+2
   scrollable_positioned_list: ^0.3.8
+  dio: ^5.10.0
+  web_socket_channel: ^3.0.3
+  flutter_secure_storage: ^10.3.1
+  sqflite: ^2.4.3
+  path: ^1.9.1
+  uuid: ^4.6.0
+  connectivity_plus: ^7.3.1
 
 # firebase_auth 6.5.5 / cloud_firestore 6.7.0 / cloud_functions 6.3.4 declare
 # firebase_core_platform_interface ^7.1.0 but their compiled code actually

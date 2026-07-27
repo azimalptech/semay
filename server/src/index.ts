@@ -1,26 +1,9 @@
-import Fastify from "fastify";
-
+import { buildApp } from "./app.js";
 import { config } from "./config.js";
-import { disconnectDb, prisma } from "./db.js";
+import { disconnectDb } from "./db.js";
 
-// Phase 1 bootstrap. Feature routes (auth, users, stores, posts, chat, …) get
-// registered here as each subsequent phase lands — see docs/07_MIGRATION.md.
-const app = Fastify({
-  logger: {
-    level: "info",
-    transport:
-      process.env.NODE_ENV === "production"
-        ? undefined
-        : { target: "pino-pretty" },
-  },
-});
-
-// Liveness/readiness — also the first thing to hit once the DB is provisioned,
-// to confirm the API can actually reach MySQL.
-app.get("/health", async () => {
-  await prisma.$queryRaw`SELECT 1`;
-  return { ok: true, ts: new Date().toISOString() };
-});
+// buildApp() creates the media dir before mounting the static server.
+const app = await buildApp();
 
 async function start(): Promise<void> {
   try {

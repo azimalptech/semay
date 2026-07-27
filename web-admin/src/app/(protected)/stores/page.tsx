@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { adminDb } from "@/lib/firebaseAdmin";
+import { prisma } from "@/lib/db";
 import { getTranslations, toClientDict } from "@/lib/l10n";
 import { requireSuperAdmin } from "@/lib/session";
 import { CreateStoreForm } from "./_components/CreateStoreForm";
@@ -13,17 +13,23 @@ interface StoreRow {
 }
 
 async function getStores(): Promise<StoreRow[]> {
-  const snap = await adminDb.collection("stores").orderBy("createdAt", "desc").get();
-  return snap.docs.map((doc) => {
-    const data = doc.data();
-    return {
-      id: doc.id,
-      name: data.name as string,
-      phone: (data.phone as string) ?? "",
-      active: (data.active as boolean) ?? true,
-      adminCount: ((data.adminIds as string[]) ?? []).length,
-    };
+  const stores = await prisma.store.findMany({
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      active: true,
+      _count: { select: { admins: true } },
+    },
   });
+  return stores.map((s) => ({
+    id: s.id,
+    name: s.name,
+    phone: s.phone,
+    active: s.active,
+    adminCount: s._count.admins,
+  }));
 }
 
 export default async function StoresPage() {

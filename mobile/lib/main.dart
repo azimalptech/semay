@@ -1,15 +1,14 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cloud_functions/cloud_functions.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'dart:async';
+
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:firebase_storage/firebase_storage.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/firebase_options.dart';
+import 'core/interaction_buffer.dart';
+import 'core/outbox.dart';
 import 'core/router.dart';
 import 'core/theme.dart';
 import 'core/theme_provider.dart';
@@ -25,54 +24,45 @@ Future<void> main() async {
   // no flash of landscape before Flutter loads); this is the Dart-side
   // backstop, mainly for web, which ignores both native manifests.
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  // Firebase is now used for FCM push ONLY (all data moved to the self-hosted
+  // API — see docs/07_MIGRATION.md). initializeApp is still required for
+  // firebase_messaging; the REST/WS backend is reached via API_BASE_URL (a
+  // --dart-define, default http://localhost:8080/api/v1) over one
+  // `adb reverse tcp:8080 tcp:8080` on a physical device.
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  // Must be registered here, before runApp — this is what lets a chat
-  // message's deliveredAt (see notification_service.dart's
-  // firebaseMessagingBackgroundHandler) get marked even while the app is
-  // fully backgrounded or killed, not just while it's open.
+  // Registered before runApp so a chat message's deliveredAt (see
+  // notification_service.dart's firebaseMessagingBackgroundHandler) gets
+  // marked even while the app is fully backgrounded or killed.
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
-  // Local dev only — points the SDKs at `firebase emulators:start` instead of
-  // a real Firebase project. .firebaserc/firebase_options.dart are still
-  // placeholders, so this is required for anything to work before ship.
-  if (kDebugMode) {
-    // On a physical Android phone, 'localhost'/'127.0.0.1' are silently
-    // rewritten to 10.0.2.2 by the FlutterFire plugins — an alias that only
-    // exists inside the Android *emulator* — so every backend call would go
-    // nowhere. 'Localhost' (capital L) dodges that case-sensitive rewrite
-    // while still resolving to device loopback (hostname resolution is
-    // case-insensitive), and loopback reaches this machine through adb port
-    // forwarding — run once per device connection (physical or emulator):
-    //   adb reverse tcp:9099 tcp:9099   # auth
-    //   adb reverse tcp:8080 tcp:8080   # firestore
-    //   adb reverse tcp:5001 tcp:5001   # functions
-    //   adb reverse tcp:9199 tcp:9199   # storage
-    // No same-Wi-Fi, LAN-IP, or firewall configuration is needed. To point at
-    // a LAN IP anyway: flutter run --dart-define=EMULATOR_HOST=<pc-ip>
-    const overrideHost = String.fromEnvironment('EMULATOR_HOST');
-    final host = kIsWeb
-        ? 'localhost'
-        : (overrideHost.isNotEmpty ? overrideHost : 'Localhost');
-    await FirebaseAuth.instance.useAuthEmulator(host, 9099);
-    FirebaseFunctions.instance.useFunctionsEmulator(host, 5001);
-    FirebaseFirestore.instance.useFirestoreEmulator(host, 8080);
-    await FirebaseStorage.instance.useStorageEmulator(host, 9199);
-  }
+  // Registered exactly once here, not inside SeMayApp.build() — a raw
+  // Stream.listen (unlike Riverpod's ref.listen) creates a fresh subscription
+  // per rebuild, so calling this from build() would leak listeners. Top-level
+  // function now (see notification_service.dart), no service instance needed.
+  listenForegroundMessages(showForegroundMessageBanner);
 
-  // Registered exactly once here, not inside SeMayApp.build() — that method
-  // re-runs on every rebuild, and .listen() on a raw Stream (unlike
-  // Riverpod's ref.listen, which dedupes across rebuilds) creates a brand
-  // new subscription each time, so calling this from build() would leak
-  // an ever-growing pile of listeners and eventually fire
-  // _markMessageDelivered many times over for one message.
-  NotificationService(
-    FirebaseMessaging.instance,
-    FirebaseFirestore.instance,
-    FirebaseAuth.instance,
-  ).listenForegroundMessages(showForegroundMessageBanner);
+  // The offline outbox + interaction buffer each need one container living for
+  // the app's lifetime so their SQLite queues start now (outbox reconnect drain,
+  // buffer 30-min flush) and the SAME instances are shared with the widget tree.
+  final container = ProviderContainer();
+  unawaited(container.read(outboxServiceProvider).start());
+  unawaited(container.read(interactionBufferProvider).start());
 
-  runApp(const ProviderScope(child: SeMayApp()));
+  // Flush buffered view/send/share counts the moment the app is backgrounded or
+  // closed, not only on the 30-min tick — otherwise a session shorter than the
+  // interval would lose its counts. Held in a top-level ref so it isn't GC'd.
+  _lifecycleListener = AppLifecycleListener(
+    onPause: () => unawaited(container.read(interactionBufferProvider).flush()),
+    onDetach: () => unawaited(container.read(interactionBufferProvider).flush()),
+  );
+
+  runApp(
+    UncontrolledProviderScope(container: container, child: const SeMayApp()),
+  );
 }
+
+// ignore: unused_element -- retained for its lifecycle side effects (see above).
+AppLifecycleListener? _lifecycleListener;
 
 class SeMayApp extends ConsumerWidget {
   const SeMayApp({super.key});

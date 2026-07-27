@@ -1,44 +1,44 @@
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/api_client.dart';
+import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
-import '../../services/firestore_service.dart';
+import '../feed/feed_providers.dart';
 import '../shared/widgets/error_state_view.dart';
 
 /// A single batch of recent posts/reels, filtered client-side by caption as
-/// the user types — Firestore has no substring/full-text query, and this
-/// project's scale doesn't warrant standing up Algolia or similar for it.
-final searchablePostsProvider =
-    FutureProvider<List<QueryDocumentSnapshot<Map<String, dynamic>>>>((
-      ref,
-    ) async {
-      final snap = await ref
-          .watch(firestoreProvider)
-          .collection('posts')
-          .orderBy('createdAt', descending: true)
-          .limit(200)
-          .get();
-      return snap.docs;
-    });
+/// the user types — no substring/full-text query on the server, and this
+/// project's scale doesn't warrant standing up a search engine for it. The
+/// feed endpoint only returns image/carousel; /reels returns reels — merge
+/// both so captions across every post type are searchable.
+///
+/// The merged list is **shuffled once** here (not newest-first): the search
+/// grid is a discovery surface, so it shows a random mix before you type, and
+/// the shuffled order is what the post/reel pagers reuse when you tap in (see
+/// SearchPostsPagerScreen / SearchReelsPagerScreen). It's a plain (non-
+/// autoDispose) FutureProvider, so the shuffle is stable for the whole session
+/// until pull-to-refresh invalidates it — it never reshuffles on rebuild.
+final searchablePostsProvider = FutureProvider<List<PostDoc>>((ref) async {
+  final api = ref.watch(apiClientProvider);
+  final results = await Future.wait([
+    api.get('/feed', query: {'limit': 100}),
+    api.get('/reels', query: {'limit': 100}),
+  ]);
+  return [...postsFromResponse(results[0]), ...postsFromResponse(results[1])]
+    ..shuffle();
+});
 
 /// Every active store, filtered client-side by name as the user types — same
-/// reasoning as searchablePostsProvider. Stores are a small, bounded
-/// collection (unlike posts), so no limit/pagination is needed here.
-final searchableStoresProvider =
-    FutureProvider<List<QueryDocumentSnapshot<Map<String, dynamic>>>>((
-      ref,
-    ) async {
-      final snap = await ref
-          .watch(firestoreProvider)
-          .collection('stores')
-          .where('active', isEqualTo: true)
-          .get();
-      return snap.docs;
-    });
+/// reasoning as searchablePostsProvider. Stores are a small, bounded set.
+final searchableStoresProvider = FutureProvider<List<JsonDoc>>((ref) async {
+  final json = await ref.watch(apiClientProvider).get('/stores');
+  final list = (json['stores'] as List<dynamic>? ?? const []);
+  return list.map((e) => JsonDoc(e as Map<String, dynamic>)).toList();
+});
 
 /// Search entry point from the home top bar — Instagram-style: matches
 /// store *names* first (the primary "find this shop" intent) as a tappable
@@ -56,6 +56,18 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   String _query = '';
 
   @override
+  void initState() {
+    super.initState();
+    // Reshuffle on every open — searchablePostsProvider shuffles its result, so
+    // invalidating it here means each visit to the search page presents a fresh
+    // random order (and fresh content). Runs after the first frame so it never
+    // fights the initial build's own watch of the provider.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.invalidate(searchablePostsProvider);
+    });
+  }
+
+  @override
   void dispose() {
     _controller.dispose();
     super.dispose();
@@ -68,7 +80,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
     final storesAsync = ref.watch(searchableStoresProvider);
 
     final matchingStores = _query.isEmpty
-        ? const <QueryDocumentSnapshot<Map<String, dynamic>>>[]
+        ? const <JsonDoc>[]
         : (storesAsync.value ?? [])
               .where(
                 (doc) => (doc.data()['name'] as String? ?? '')
@@ -150,7 +162,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
 class _StoreResultTile extends StatelessWidget {
   const _StoreResultTile({required this.store});
 
-  final QueryDocumentSnapshot<Map<String, dynamic>> store;
+  final JsonDoc store;
 
   @override
   Widget build(BuildContext context) {
@@ -189,7 +201,7 @@ class _StoreResultTile extends StatelessWidget {
 class _PostResultTile extends StatelessWidget {
   const _PostResultTile({required this.post});
 
-  final QueryDocumentSnapshot<Map<String, dynamic>> post;
+  final PostDoc post;
 
   @override
   Widget build(BuildContext context) {
@@ -203,7 +215,11 @@ class _PostResultTile extends StatelessWidget {
         : (mediaUrls.isNotEmpty ? mediaUrls.first : '');
 
     return GestureDetector(
-      onTap: () => context.push('/post/${post.id}'),
+      // Open the shuffled pager for this media type (posts vs reels
+      // separately), seeded to this tile — not the single-post detail screen.
+      onTap: () => context.push(
+        type == 'reel' ? '/search/reels/${post.id}' : '/search/posts/${post.id}',
+      ),
       child: Stack(
         fit: StackFit.expand,
         children: [

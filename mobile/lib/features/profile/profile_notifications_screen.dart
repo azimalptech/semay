@@ -1,9 +1,9 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_icon.dart';
+import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
@@ -98,7 +98,7 @@ class _ProfileNotificationsScreenState
     String? lastHeader;
     for (final doc in docs) {
       final data = doc.data();
-      final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
+      final createdAt = parseTimestamp(data['createdAt']);
       final header = createdAt != null ? _dateHeader(createdAt) : '';
       if (header != lastHeader) {
         lastHeader = header;
@@ -109,7 +109,7 @@ class _ProfileNotificationsScreenState
           title: data['title'] as String? ?? '',
           body: data['body'] as String? ?? '',
           time: createdAt != null ? _timeLabel(createdAt) : '',
-          unread: data['read'] != true,
+          unread: data['readAt'] == null,
         ),
       );
     }

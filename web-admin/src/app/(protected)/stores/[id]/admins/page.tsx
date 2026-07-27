@@ -1,16 +1,10 @@
 import { notFound } from "next/navigation";
-import { adminDb } from "@/lib/firebaseAdmin";
+import { prisma } from "@/lib/db";
 import { getTranslations, toClientDict } from "@/lib/l10n";
 import { requireSuperAdmin } from "@/lib/session";
 import { PromoteAdminForm } from "./_components/PromoteAdminForm";
 import { RevokeAdminButton } from "./_components/RevokeAdminButton";
 import { DeleteStoreButton } from "./_components/DeleteStoreButton";
-
-interface AdminRow {
-  uid: string;
-  name: string;
-  phone: string;
-}
 
 export default async function StoreAdminsPage({
   params,
@@ -18,28 +12,23 @@ export default async function StoreAdminsPage({
   params: Promise<{ id: string }>;
 }) {
   // Defense in depth — see dashboard/page.tsx's comment; this page reads
-  // admin phone numbers and can grant/revoke store-admin claims, so it
+  // admin phone numbers and can grant/revoke store-admin rights, so it
   // needs its own check regardless of the layout's.
   await requireSuperAdmin();
   const { id: storeId } = await params;
   const t = await getTranslations();
   const clientT = toClientDict(t);
 
-  const storeSnap = await adminDb.collection("stores").doc(storeId).get();
-  if (!storeSnap.exists) notFound();
-  const store = storeSnap.data()!;
+  const store = await prisma.store.findUnique({
+    where: { id: storeId },
+    select: {
+      name: true,
+      admins: { select: { user: { select: { id: true, name: true, phone: true } } } },
+    },
+  });
+  if (!store) notFound();
 
-  const adminIds: string[] = store.adminIds ?? [];
-  const adminDocs = adminIds.length
-    ? await adminDb.getAll(...adminIds.map((uid) => adminDb.collection("users").doc(uid)))
-    : [];
-  const admins: AdminRow[] = adminDocs
-    .filter((doc) => doc.exists)
-    .map((doc) => ({
-      uid: doc.id,
-      name: (doc.data()?.name as string) ?? "...",
-      phone: (doc.data()?.phone as string) ?? "",
-    }));
+  const admins = store.admins.map((a) => a.user);
 
   return (
     <div className="mx-auto max-w-2xl space-y-8">
@@ -68,11 +57,11 @@ export default async function StoreAdminsPage({
               </tr>
             )}
             {admins.map((admin) => (
-              <tr key={admin.uid} className="border-b border-gray-100 last:border-0">
-                <td className="px-4 py-2 text-gray-900">{admin.name}</td>
+              <tr key={admin.id} className="border-b border-gray-100 last:border-0">
+                <td className="px-4 py-2 text-gray-900">{admin.name || "..."}</td>
                 <td className="px-4 py-2 text-gray-500">{admin.phone}</td>
                 <td className="px-4 py-2 text-right">
-                  <RevokeAdminButton storeId={storeId} userId={admin.uid} t={clientT} />
+                  <RevokeAdminButton storeId={storeId} userId={admin.id} t={clientT} />
                 </td>
               </tr>
             ))}
@@ -84,8 +73,8 @@ export default async function StoreAdminsPage({
         <h2 className="mb-2 text-sm font-semibold text-gray-500">{t.dangerZone}</h2>
         <DeleteStoreButton
           storeId={storeId}
-          storeName={store.name as string}
-          confirmLabel={t.deleteStoreConfirmLabel(store.name as string)}
+          storeName={store.name}
+          confirmLabel={t.deleteStoreConfirmLabel(store.name)}
           t={clientT}
         />
       </div>

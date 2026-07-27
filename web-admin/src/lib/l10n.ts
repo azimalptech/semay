@@ -7,13 +7,17 @@ export interface Dict {
   dashboard: string;
   stores: string;
   logOut: string;
-  email: string;
-  password: string;
-  signIn: string;
-  signingIn: string;
+  sendCode: string;
+  sendingCode: string;
+  otpSendFailed: string;
+  codeLabel: string;
+  codeSentPrefix: string;
+  devCodeHint: string;
+  changeNumber: string;
+  verifyCode: string;
+  verifying: string;
+  invalidCode: string;
   notAuthorized: string;
-  signInFailed: string;
-  invalidCredentials: string;
   ordersReport: string;
   ordersReportDesc: (days: number) => string;
   day: string;
@@ -58,6 +62,14 @@ export interface Dict {
   store: string;
   quantity: string;
   noMatchingOrders: string;
+  totalOrders: string;
+  dateFrom: string;
+  dateTo: string;
+  last7Days: string;
+  last30Days: string;
+  last90Days: string;
+  lastYear: string;
+  manualRange: string;
   broadcast: string;
   broadcastTitle: string;
   broadcastDesc: string;
@@ -72,6 +84,9 @@ export interface Dict {
   selectStoreForCampaign: string;
   campaignStartLabel: string;
   campaignStartDesc: string;
+  campaignEndLabel: string;
+  campaignEndDesc: string;
+  campaignNoEnd: string;
   saveDate: string;
   savingDate: string;
   saveDateFailed: string;
@@ -106,7 +121,6 @@ export interface Dict {
   rejecting: string;
   decideRequestFailed: string;
   requestApprovedSentPrefix: string;
-  maintenance: string;
 }
 
 // React Server Components can't serialize functions across the server/client
@@ -141,13 +155,17 @@ const dict: Record<Lang, Dict> = {
     dashboard: "Hasabat",
     stores: "Dükanlar",
     logOut: "Çykmak",
-    email: "E-poçta",
-    password: "Açar söz",
-    signIn: "Gir",
-    signingIn: "Girilýär...",
+    sendCode: "Kod iber",
+    sendingCode: "Iberilýär...",
+    otpSendFailed: "Kod iberip bolmady.",
+    codeLabel: "SMS kody",
+    codeSentPrefix: "Koda iberildi:",
+    devCodeHint: "Dev kody (diňe synag):",
+    changeNumber: "Belgini üýtget",
+    verifyCode: "Tassykla",
+    verifying: "Barlanýar...",
+    invalidCode: "Kod nädogry.",
     notAuthorized: "Rugsat berilmedi — bu hasap Super Admin däl.",
-    signInFailed: "Girip bolmady.",
-    invalidCredentials: "E-poçta ýa-da açar söz nädogry.",
     ordersReport: "Sargytlar hasabaty",
     ordersReportDesc: (days: number) =>
       `Diňe okamak üçin. Soňky ${days} günüň sargyt edilen haryt sany. Her sargyt hasaba alynýar — status ýa-da tassyklama ýok.`,
@@ -204,7 +222,6 @@ const dict: Record<Lang, Dict> = {
     rejecting: "Ret edilýär...",
     decideRequestFailed: "Amal ýerine ýetip bolmady",
     requestApprovedSentPrefix: "Iberildi:",
-    maintenance: "Hyzmat",
     language: "Dil",
     filterAll: "Ählisi",
     filterShop: "Dükan",
@@ -215,6 +232,14 @@ const dict: Record<Lang, Dict> = {
     store: "Dükan",
     quantity: "Sany",
     noMatchingOrders: "Gabat gelýän sargyt ýok.",
+    totalOrders: "Jemi sargytlar",
+    dateFrom: "Başlangyç sene",
+    dateTo: "Ahyrky sene",
+    last7Days: "7 gün",
+    last30Days: "30 gün",
+    last90Days: "90 gün",
+    lastYear: "1 ýyl",
+    manualRange: "Elde saýla",
     broadcast: "Bildiriş",
     broadcastTitle: "Bildiriş iber",
     broadcastDesc: "Ähli ulanyjylara push bildirişi iberiň.",
@@ -230,6 +255,10 @@ const dict: Record<Lang, Dict> = {
     campaignStartLabel: "Kampaniýanyň başlangyç senesi",
     campaignStartDesc:
       "Diňe şu senäden soň kabul edilen sargytlar saýlanan dükanyň sanawyna girer. Senäni üýtgetmek şol dükanyň sanawyny täzeden hasaplar.",
+    campaignEndLabel: "Kampaniýanyň gutarýan senesi",
+    campaignEndDesc:
+      "Şu senede kampaniýa tamamlanýar — şondan soň kabul edilen sargytlar sanawa goşulmaýar, netijeler doňdurylýar. Boş galdyrsaňyz, kampaniýa açyk galýar.",
+    campaignNoEnd: "Gutarýan sene ýok (kampaniýa açyk).",
     saveDate: "Ýatda sakla",
     savingDate: "Ýatda saklanýar...",
     saveDateFailed: "Senäni ýatda saklap bolmady",
@@ -252,13 +281,17 @@ const dict: Record<Lang, Dict> = {
     dashboard: "Отчёт",
     stores: "Магазины",
     logOut: "Выйти",
-    email: "Эл. почта",
-    password: "Пароль",
-    signIn: "Войти",
-    signingIn: "Вход...",
+    sendCode: "Отправить код",
+    sendingCode: "Отправка...",
+    otpSendFailed: "Не удалось отправить код.",
+    codeLabel: "SMS-код",
+    codeSentPrefix: "Код отправлен на:",
+    devCodeHint: "Dev-код (только тест):",
+    changeNumber: "Изменить номер",
+    verifyCode: "Подтвердить",
+    verifying: "Проверка...",
+    invalidCode: "Неверный код.",
     notAuthorized: "Доступ запрещён — этот аккаунт не Супер Админ.",
-    signInFailed: "Не удалось войти.",
-    invalidCredentials: "Неверная почта или пароль.",
     ordersReport: "Отчёт по заказам",
     ordersReportDesc: (days: number) =>
       `Только для чтения. Общее количество заказанных товаров за последние ${days} дней. Учитывается каждый заказ — статуса или подтверждения нет.`,
@@ -315,7 +348,6 @@ const dict: Record<Lang, Dict> = {
     rejecting: "Отклонение...",
     decideRequestFailed: "Не удалось выполнить действие",
     requestApprovedSentPrefix: "Отправлено:",
-    maintenance: "Обслуживание",
     language: "Язык",
     filterAll: "Все",
     filterShop: "Магазин",
@@ -326,6 +358,14 @@ const dict: Record<Lang, Dict> = {
     store: "Магазин",
     quantity: "Количество",
     noMatchingOrders: "Подходящих заказов нет.",
+    totalOrders: "Всего заказов",
+    dateFrom: "Дата с",
+    dateTo: "Дата по",
+    last7Days: "7 дней",
+    last30Days: "30 дней",
+    last90Days: "90 дней",
+    lastYear: "1 год",
+    manualRange: "Вручную",
     broadcast: "Уведомление",
     broadcastTitle: "Отправить уведомление",
     broadcastDesc: "Отправьте push-уведомление всем пользователям.",
@@ -341,6 +381,10 @@ const dict: Record<Lang, Dict> = {
     campaignStartLabel: "Дата начала кампании",
     campaignStartDesc:
       "В рейтинг выбранного магазина попадут только заказы, принятые после этой даты. Изменение даты пересчитает рейтинг этого магазина заново.",
+    campaignEndLabel: "Дата окончания кампании",
+    campaignEndDesc:
+      "В этот день кампания завершается — заказы, принятые после него, в рейтинг не попадают, итоги замораживаются. Оставьте пустым, чтобы кампания оставалась открытой.",
+    campaignNoEnd: "Дата окончания не задана (кампания открыта).",
     saveDate: "Сохранить",
     savingDate: "Сохранение...",
     saveDateFailed: "Не удалось сохранить дату",

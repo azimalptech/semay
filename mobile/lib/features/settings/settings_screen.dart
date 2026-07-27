@@ -3,12 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/api_client.dart';
 import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../core/theme_provider.dart';
 import '../../services/auth_service.dart';
-import '../../services/firestore_service.dart';
 
 /// Figma "Settings" frame — reached from the bottom-nav "user" tab for both
 /// User and Store Admin (same frame, admin sees two extra rows: Quick
@@ -251,14 +251,10 @@ Future<void> _showLanguageSheet(BuildContext context, WidgetRef ref) async {
                   ? const AppIcon('check', color: AppColors.brand)
                   : null,
               onTap: () async {
-                final uid = ref.read(firebaseAuthProvider).currentUser?.uid;
-                if (uid != null) {
-                  await ref
-                      .read(firestoreProvider)
-                      .collection('users')
-                      .doc(uid)
-                      .update({'language': entry.key});
-                }
+                await ref
+                    .read(apiClientProvider)
+                    .patch('/users/me', body: {'language': entry.key});
+                ref.invalidate(userProfileProvider);
                 if (sheetContext.mounted) Navigator.of(sheetContext).pop();
               },
             ),

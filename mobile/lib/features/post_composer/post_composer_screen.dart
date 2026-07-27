@@ -8,6 +8,7 @@ import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/posts_service.dart';
 import '../feed/feed_providers.dart';
+import '../reels/reels_screen.dart';
 import '../store_profile/store_profile_providers.dart';
 
 enum _FrameMode { fill, fit }
@@ -120,10 +121,13 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
             caption: _captionController.text.trim(),
             price: priceText.isEmpty ? null : num.tryParse(priceText),
           );
-      // The feed/store-profile grids fetch once with .get() rather than a
-      // live listener, so without this a freshly published post is
-      // invisible until the next manual pull-to-refresh.
+      // The feed/reels/store-profile grids fetch once with .get() rather than
+      // a live listener, so without this a freshly published post is invisible
+      // until the next manual pull-to-refresh. globalReelsProvider backs the
+      // Reels *tab* (distinct from the store's storeReelsProvider grid), so a
+      // published reel needs it too or it never shows on the Reels tab.
       ref.invalidate(feedNotifierProvider);
+      ref.invalidate(globalReelsProvider);
       ref.invalidate(storePostsProvider(widget.storeId));
       ref.invalidate(storeReelsProvider(widget.storeId));
       if (mounted) Navigator.of(context).pop();

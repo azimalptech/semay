@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -33,13 +32,10 @@ class QuickRepliesScreen extends ConsumerWidget {
             child: Text(s.quickRepliesHelp, style: AppTypography.bodySmall),
           ),
           Expanded(
-            child:
-                StreamBuilder<
-                  List<QueryDocumentSnapshot<Map<String, dynamic>>>
-                >(
-                  stream: ref.watch(quickRepliesServiceProvider).watch(storeId),
-                  builder: (context, snapshot) {
-                    final docs = snapshot.data ?? [];
+            child: ref
+                .watch(quickRepliesProvider(storeId))
+                .when(
+                  data: (docs) {
                     if (docs.isEmpty) {
                       return Center(
                         child: Text(
@@ -72,6 +68,10 @@ class QuickRepliesScreen extends ConsumerWidget {
                       },
                     );
                   },
+                  loading: () =>
+                      const Center(child: CircularProgressIndicator()),
+                  error: (e, _) =>
+                      Center(child: Text(s.failedToLoad)),
                 ),
           ),
         ],
@@ -138,6 +138,7 @@ Future<void> _showEditSheet(
                       await ref
                           .read(quickRepliesServiceProvider)
                           .delete(storeId, replyId);
+                      ref.invalidate(quickRepliesProvider(storeId));
                       if (sheetContext.mounted) {
                         Navigator.of(sheetContext).pop();
                       }
@@ -157,6 +158,7 @@ Future<void> _showEditSheet(
                       await ref
                           .read(quickRepliesServiceProvider)
                           .update(storeId, replyId, text);
+                      ref.invalidate(quickRepliesProvider(storeId));
                       if (sheetContext.mounted) {
                         Navigator.of(sheetContext).pop();
                       }
@@ -181,6 +183,7 @@ Future<void> _showEditSheet(
                         text,
                         DateTime.now().millisecondsSinceEpoch,
                       );
+                  ref.invalidate(quickRepliesProvider(storeId));
                   if (sheetContext.mounted) Navigator.of(sheetContext).pop();
                 },
                 child: Text(s.add),

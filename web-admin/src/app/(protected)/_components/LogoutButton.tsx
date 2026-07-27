@@ -1,15 +1,12 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { signOut } from "firebase/auth";
-import { clientAuth } from "@/lib/firebaseClient";
 
 export function LogoutButton({ label }: { label: string }) {
   const router = useRouter();
 
   async function handleLogout() {
     await fetch("/api/logout", { method: "POST" });
-    await signOut(clientAuth);
     router.push("/login");
     router.refresh();
   }

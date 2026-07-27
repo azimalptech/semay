@@ -1,25 +1,20 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
+import '../../core/api_client.dart';
 import '../../core/l10n.dart';
-import '../../services/firestore_service.dart';
+import '../feed/feed_providers.dart';
 import '../shared/widgets/reel_player_view.dart';
 
 /// Reels nav tab (Figma MyReel layout, global scope): every store's reels,
 /// newest first, as a full-screen vertical pager — same feed for every role.
-final globalReelsProvider =
-    StreamProvider<List<QueryDocumentSnapshot<Map<String, dynamic>>>>((ref) {
-      return ref
-          .watch(firestoreProvider)
-          .collection('posts')
-          .where('type', isEqualTo: 'reel')
-          .orderBy('createdAt', descending: true)
-          .limit(50)
-          .snapshots()
-          .map((snap) => snap.docs);
-    });
+/// REST fetch + pull-to-refresh (the RefreshIndicator below invalidates this);
+/// no realtime list-channel for the global reels feed, matching the home feed.
+final globalReelsProvider = FutureProvider<List<PostDoc>>((ref) async {
+  final json = await ref.read(apiClientProvider).get('/reels', query: {'limit': 50});
+  return postsFromResponse(json);
+});
 
 class ReelsScreen extends ConsumerStatefulWidget {
   const ReelsScreen({super.key, required this.onExitToHome});

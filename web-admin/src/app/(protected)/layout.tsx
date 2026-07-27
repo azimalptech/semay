@@ -16,7 +16,7 @@ export default async function ProtectedLayout({
 
   return (
     <div className="flex min-h-screen flex-col">
-      <NavBar email={claims.email} lang={lang} t={toClientDict(t)} />
+      <NavBar phone={claims.phone} lang={lang} t={toClientDict(t)} />
       <main className="flex-1 bg-gray-50 p-8">{children}</main>
     </div>
   );

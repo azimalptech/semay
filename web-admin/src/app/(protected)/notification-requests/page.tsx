@@ -1,4 +1,4 @@
-import { adminDb } from "@/lib/firebaseAdmin";
+import { prisma } from "@/lib/db";
 import { getTranslations, toClientDict } from "@/lib/l10n";
 import { requireSuperAdmin } from "@/lib/session";
 import { RequestActions } from "./_components/RequestActions";
@@ -11,20 +11,16 @@ interface RequestRow {
 }
 
 async function getPendingRequests(): Promise<RequestRow[]> {
-  const snap = await adminDb
-    .collection("notificationRequests")
-    .where("status", "==", "pending")
-    .orderBy("createdAt", "asc")
-    .get();
-  return snap.docs.map((doc) => {
-    const data = doc.data();
-    return {
-      id: doc.id,
-      storeName: (data.storeName as string) ?? "",
-      message: (data.message as string) ?? "",
-      createdAtMillis: data.createdAt?.toMillis?.() ?? null,
-    };
+  const requests = await prisma.notificationRequest.findMany({
+    where: { status: "pending" },
+    orderBy: { createdAt: "asc" },
   });
+  return requests.map((r) => ({
+    id: r.id,
+    storeName: r.storeName,
+    message: r.message,
+    createdAtMillis: r.createdAt.getTime(),
+  }));
 }
 
 export default async function NotificationRequestsPage() {

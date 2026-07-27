@@ -2,8 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { httpsCallable } from "firebase/functions";
-import { clientFunctions } from "@/lib/firebaseClient";
 import type { ClientDict } from "@/lib/l10n";
 
 export function DeleteStoreButton({
@@ -32,12 +30,16 @@ export function DeleteStoreButton({
     setDeleting(true);
     setError(null);
     try {
-      const deleteStore = httpsCallable(clientFunctions, "deleteStore");
-      await deleteStore({ storeId });
+      const res = await fetch(`/api/stores/${storeId}`, { method: "DELETE" });
+      if (!res.ok) {
+        setError(t.deleteStoreFailed);
+        setDeleting(false);
+        return;
+      }
       router.push("/stores");
       router.refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.deleteStoreFailed);
+    } catch {
+      setError(t.deleteStoreFailed);
       setDeleting(false);
     }
   }

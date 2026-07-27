@@ -7,6 +7,8 @@ import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/stories_service.dart';
+import '../shared/story_bar_provider.dart';
+import '../story_viewer/story_providers.dart';
 
 /// Add-story entry point behind the "+" badge on the own-store ring
 /// (Figma 223:7107). Options sheet -> capture/pick -> full-screen preview ->
@@ -181,6 +183,11 @@ class _StoryPreviewScreenState extends ConsumerState<StoryPreviewScreen> {
           mediaType: widget.mediaTypes[i],
         );
       }
+      // The story bar (home ring row) and the store's own story viewer fetch
+      // once with .get(), not a live listener — without invalidating them a
+      // freshly published story is invisible until the next manual refresh.
+      ref.invalidate(storyBarProvider);
+      ref.invalidate(storeStoriesProvider(widget.storeId));
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
       if (mounted) {

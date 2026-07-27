@@ -1,10 +1,10 @@
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../core/app_icon.dart';
+import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
 import '../../core/media_cache.dart';
 import '../../core/theme.dart';
@@ -15,9 +15,9 @@ import '../shared/widgets/confirm_delete_dialog.dart';
 import '../store_profile/store_profile_providers.dart';
 import 'story_providers.dart';
 
-String _relativeTime(Timestamp? timestamp) {
+String _relativeTime(DateTime? timestamp) {
   if (timestamp == null) return '';
-  final diff = DateTime.now().difference(timestamp.toDate());
+  final diff = DateTime.now().difference(timestamp);
   if (diff.inMinutes < 1) return 'now';
   if (diff.inHours < 1) return '${diff.inMinutes}m';
   if (diff.inDays < 1) return '${diff.inHours}h';
@@ -273,7 +273,7 @@ class _StoreStoryPageState extends ConsumerState<_StoreStoryPage>
     if (status == AnimationStatus.completed) _next();
   }
 
-  List<QueryDocumentSnapshot<Map<String, dynamic>>> get _stories =>
+  List<JsonDoc> get _stories =>
       ref.read(storeStoriesProvider(widget.storeId)).value ?? [];
 
   void _next() {
@@ -575,7 +575,7 @@ class _StoreStoryPageState extends ConsumerState<_StoreStoryPage>
                                 ),
                                 Text(
                                   _relativeTime(
-                                    story['createdAt'] as Timestamp?,
+                                    parseTimestamp(story['createdAt']),
                                   ),
                                   style: AppTypography.caption.copyWith(
                                     color: Colors.white70,

@@ -8,6 +8,9 @@ import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
 import '../../../core/app_icon.dart';
+import '../../../core/format.dart';
+import '../../../core/interaction_buffer.dart';
+import '../../../core/json_ext.dart';
 import '../../../core/l10n.dart';
 import '../../../core/media_cache.dart';
 import '../../../core/theme.dart';
@@ -77,8 +80,16 @@ class _PostCardState extends ConsumerState<PostCard> {
 
     final likeState = ref.watch(likeStateProvider(postId));
     final isLiked = likeState.isLiked;
-    final isSaved = ref.watch(isSavedProvider(postId)).value ?? false;
+    final isSaved = ref.watch(isSavedProvider(postId));
     final likesCount = likeState.likesCount;
+    // Optimistic view/send/share: add this session's not-yet-flushed taps to the
+    // server counters so a tap shows immediately (see interaction_buffer.dart).
+    final pending =
+        ref.watch(pendingInteractionsProvider(postId)).value ??
+        (views: 0, sent: 0, shares: 0);
+    final sentCount = (post['sentCount'] as int? ?? 0) + pending.sent;
+    final sharesCount = (post['sharesCount'] as int? ?? 0) + pending.shares;
+    final viewsCount = (post['viewsCount'] as int? ?? 0) + pending.views;
     // A reel's mediaUrls[0] is a video file — sharing that as an "image"
     // preview breaks the chat bubble, so prefer the thumbnail whenever one
     // exists (matches posts_grid_view.dart / liked_screen.dart).
@@ -198,7 +209,7 @@ class _PostCardState extends ConsumerState<PostCard> {
                               color: AppColors.textPrimary,
                             ),
                       const SizedBox(width: 4),
-                      Text('$likesCount', style: AppTypography.bodySmall),
+                      Text(formatCount(likesCount), style: AppTypography.bodySmall),
                     ],
                   ),
                 ),
@@ -220,10 +231,10 @@ class _PostCardState extends ConsumerState<PostCard> {
                         size: 24,
                         color: AppColors.textPrimary,
                       ),
-                      if ((post['sentCount'] as int? ?? 0) > 0) ...[
+                      if (sentCount > 0) ...[
                         const SizedBox(width: 4),
                         Text(
-                          '${post['sentCount']}',
+                          formatCount(sentCount),
                           style: AppTypography.bodySmall,
                         ),
                       ],
@@ -241,10 +252,10 @@ class _PostCardState extends ConsumerState<PostCard> {
                         size: 24,
                         color: AppColors.textPrimary,
                       ),
-                      if ((post['sharesCount'] as int? ?? 0) > 0) ...[
+                      if (sharesCount > 0) ...[
                         const SizedBox(width: 4),
                         Text(
-                          '${post['sharesCount']}',
+                          formatCount(sharesCount),
                           style: AppTypography.bodySmall,
                         ),
                       ],
@@ -257,10 +268,10 @@ class _PostCardState extends ConsumerState<PostCard> {
                   size: 24,
                   color: AppColors.textMuted,
                 ),
-                if ((post['viewsCount'] as int? ?? 0) > 0) ...[
+                if (viewsCount > 0) ...[
                   const SizedBox(width: 4),
                   Text(
-                    '${post['viewsCount']}',
+                    formatCount(viewsCount),
                     style: AppTypography.bodySmall.copyWith(
                       color: AppColors.textMuted,
                     ),
@@ -341,7 +352,9 @@ class _PostCardState extends ConsumerState<PostCard> {
 }
 
 String _formatDate(dynamic timestamp) {
-  final date = timestamp?.toDate();
+  // createdAt is now an ISO-8601 string from the REST API (was a Firestore
+  // Timestamp with .toDate()) — parseTimestamp handles the string safely.
+  final date = parseTimestamp(timestamp);
   if (date == null) return '';
   const months = [
     'January',

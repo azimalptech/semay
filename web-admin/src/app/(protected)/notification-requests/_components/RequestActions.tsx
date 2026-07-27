@@ -2,8 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { httpsCallable } from "firebase/functions";
-import { clientFunctions } from "@/lib/firebaseClient";
 import type { ClientDict } from "@/lib/l10n";
 
 interface DecideResult {
@@ -21,17 +19,23 @@ export function RequestActions({ requestId, t }: { requestId: string; t: ClientD
     setBusy(approve ? "approve" : "reject");
     setError(null);
     try {
-      const decideNotificationRequest = httpsCallable<
-        { requestId: string; approve: boolean },
-        DecideResult
-      >(clientFunctions, "decideNotificationRequest");
-      const res = await decideNotificationRequest({ requestId, approve });
-      if (approve && typeof res.data.sent === "number") {
-        setSentCount(res.data.sent);
+      const res = await fetch(`/api/notification-requests/${requestId}/decide`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approve }),
+      });
+      if (!res.ok) {
+        setError(t.decideRequestFailed);
+        setBusy(null);
+        return;
+      }
+      const data = (await res.json()) as DecideResult;
+      if (approve && typeof data.sent === "number") {
+        setSentCount(data.sent);
       }
       router.refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.decideRequestFailed);
+    } catch {
+      setError(t.decideRequestFailed);
       setBusy(null);
     }
   }

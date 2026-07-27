@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -11,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../core/app_icon.dart';
+import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
@@ -156,19 +156,24 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
   // backs out and back in. markMessagesRead/markThreadRead both no-op
   // cheaply once already applied (see chat_service.dart), so calling this
   // on every rebuild is fine, not just wasteful-looking.
-  void _syncReadStatus(
-    List<QueryDocumentSnapshot<Map<String, dynamic>>> messages,
-    bool isAdmin,
-  ) {
+  void _syncReadStatus(List<ChatDoc> messages, bool isAdmin, int myUnread) {
     final counterpartRole = isAdmin ? 'user' : 'admin';
-    final theirMessages = messages
-        .where((m) => m.data()['senderRole'] == counterpartRole)
-        .toList();
-    final service = ref.read(chatServiceProvider);
-    if (theirMessages.isNotEmpty) {
-      service.markMessagesRead(widget.chatId, theirMessages);
-    }
-    service.markThreadRead(widget.chatId, asAdmin: isAdmin);
+    // Only their still-unread messages (readAt == null) actually need a receipt.
+    final hasUnreadFromThem = messages.any(
+      (m) =>
+          m.data()['senderRole'] == counterpartRole &&
+          m.data()['readAt'] == null,
+    );
+    // Nothing to mark → do NOT POST. A receipts call re-publishes the thread,
+    // which re-enters build(); POSTing unconditionally here (as it did before)
+    // turned that into a rebuild storm — one receipts round-trip per frame.
+    // Gating on real unread makes it self-terminate: after the single call
+    // below lands, their messages carry readAt and myUnread is 0, so the next
+    // build returns here early.
+    if (!hasUnreadFromThem && myUnread == 0) return;
+    // One /receipts call marks their messages read AND clears my unread badge
+    // (server markReceipts does both), so a single POST replaces the old two.
+    ref.read(chatServiceProvider).markThreadRead(widget.chatId, asAdmin: isAdmin);
   }
 
   void _send() {
@@ -190,7 +195,7 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     if (replyingTo != null) setState(() => _replyingTo = null);
   }
 
-  void _startReply(QueryDocumentSnapshot<Map<String, dynamic>> message) {
+  void _startReply(ChatDoc message) {
     final data = message.data();
     final text = data['text'] as String? ?? '';
     final preview = text.isNotEmpty
@@ -248,14 +253,14 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     }
   }
 
-  static bool _isFresh(Timestamp? at) =>
-      at != null && DateTime.now().difference(at.toDate()) < _typingFreshness;
+  static bool _isFresh(DateTime? at) =>
+      at != null && DateTime.now().difference(at) < _typingFreshness;
 
   @override
   Widget build(BuildContext context) {
     final s = ref.watch(l10nProvider);
     final chat = ref.watch(chatDocProvider(widget.chatId)).value;
-    final myUid = ref.watch(firebaseAuthProvider).currentUser?.uid;
+    final myUid = ref.watch(authStateChangesProvider).value?.uid;
     final role = ref.watch(appRoleProvider).value;
     final storeIds = ref.watch(storeIdsProvider).value ?? [];
     final isAdminHere =
@@ -263,6 +268,10 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
         chat != null &&
         storeIds.contains(chat['storeId']);
     _isAdminHere = isAdminHere;
+    // This side's unread badge count — gates the read-receipt sync below so it
+    // fires only when there's something to clear (see _syncReadStatus).
+    final myUnread =
+        (chat?[isAdminHere ? 'unreadByAdmin' : 'unreadByUser'] as int?) ?? 0;
 
     final store = chat != null
         ? ref.watch(storeDocProvider(chat['storeId'] as String)).value
@@ -276,12 +285,12 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
 
     // Counterpart's typing heartbeat, from the chat doc.
     final counterpartTyping = _isFresh(
-      chat?[isAdminHere ? 'typingUserAt' : 'typingAdminAt'] as Timestamp?,
+      parseTimestamp(chat?[isAdminHere ? 'typingUserAt' : 'typingAdminAt']),
     );
     final isMuted =
         (chat?[isAdminHere ? 'mutedByAdmin' : 'mutedByUser'] as bool?) ?? false;
 
-    final messagesAsync = ref.watch(chatMessagesProvider(widget.chatId));
+    final messagesAsync = ref.watch(mergedChatMessagesProvider(widget.chatId));
 
     final storeId = chat?['storeId'] as String?;
     // Only the customer side taps through to the store's profile — the
@@ -289,10 +298,6 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     // customer for a store admin), and there's no equivalent profile screen
     // to open for a customer name.
     final canOpenStoreProfile = !isAdminHere && storeId != null;
-    debugPrint(
-      'chat_thread_screen: role=$role isAdminHere=$isAdminHere '
-      'storeId=$storeId canOpenStoreProfile=$canOpenStoreProfile',
-    );
 
     return Scaffold(
       appBar: AppBar(
@@ -422,8 +427,7 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                   final isFirstLoad = _lastMessageCount == -1;
                   if (!isFirstLoad && messages.isNotEmpty) {
                     final newest = messages.last.data();
-                    final createdAt = (newest['createdAt'] as Timestamp?)
-                        ?.toDate();
+                    final createdAt = parseTimestamp(newest['createdAt']);
                     debugPrint(
                       'chat_thread_screen: message stream emitted, count '
                       '$_lastMessageCount->${messages.length}, newest '
@@ -434,7 +438,7 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                   _lastMessageCount = messages.length;
                   _scrollToBottom(animate: !isFirstLoad);
                 }
-                _syncReadStatus(messages, isAdminHere);
+                _syncReadStatus(messages, isAdminHere, myUnread);
                 if (messages.isEmpty && !counterpartTyping) {
                   return _EmptyThreadView(
                     title: s.noMessagesYetTitle,
@@ -454,9 +458,9 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                     }
 
                     final data = messages[index].data();
-                    final createdAt = data['createdAt'] as Timestamp?;
+                    final createdAt = parseTimestamp(data['createdAt']);
                     final previousCreatedAt = index > 0
-                        ? messages[index - 1].data()['createdAt'] as Timestamp?
+                        ? parseTimestamp(messages[index - 1].data()['createdAt'])
                         : null;
                     final showDateDivider = _isNewDay(
                       createdAt,
@@ -491,8 +495,8 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                                       : title),
                             isMine: isMine,
                             timestamp: createdAt,
-                            deliveredAt: data['deliveredAt'] as Timestamp?,
-                            readAt: data['readAt'] as Timestamp?,
+                            deliveredAt: parseTimestamp(data['deliveredAt']),
+                            readAt: parseTimestamp(data['readAt']),
                             // Instagram shows "Seen HH:MM" once, under the
                             // newest message, not repeated on every bubble.
                             showSeenCaption: index == messages.length - 1,
@@ -573,12 +577,12 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     );
   }
 
-  static bool _isNewDay(Timestamp? current, Timestamp? previous) {
+  static bool _isNewDay(DateTime? current, DateTime? previous) {
     if (current == null) return false;
     if (previous == null) return true;
-    final a = current.toDate();
-    final b = previous.toDate();
-    return a.year != b.year || a.month != b.month || a.day != b.day;
+    return current.year != previous.year ||
+        current.month != previous.month ||
+        current.day != previous.day;
   }
 }
 
@@ -639,7 +643,7 @@ class _QuickRepliesRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return StreamBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+    return StreamBuilder<List<JsonDoc>>(
       stream: ref.watch(quickRepliesServiceProvider).watch(storeId),
       builder: (context, snapshot) {
         final docs = snapshot.data ?? [];
@@ -808,7 +812,7 @@ class _TypingBubbleState extends State<_TypingBubble>
 class _DateDivider extends ConsumerWidget {
   const _DateDivider({required this.timestamp});
 
-  final Timestamp? timestamp;
+  final DateTime? timestamp;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -838,9 +842,9 @@ class _DateDivider extends ConsumerWidget {
     'Dec',
   ];
 
-  static String _label(S s, Timestamp? timestamp) {
+  static String _label(S s, DateTime? timestamp) {
     if (timestamp == null) return '';
-    final date = timestamp.toDate();
+    final date = timestamp;
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final yesterday = today.subtract(const Duration(days: 1));
@@ -994,15 +998,15 @@ class _MessageBubble extends StatelessWidget {
   final String? attachmentType;
   final String repliedToStoryLabel;
   final bool isMine;
-  final Timestamp? timestamp;
+  final DateTime? timestamp;
 
   /// Set by the *recipient's* client (see chat_service.dart's
   /// markMessagesDelivered/markMessagesRead) — null/null means only sent,
   /// deliveredAt-only means delivered-not-read, both set means read. Only
   /// meaningful (rendered) on my own messages — there's no status icon on
   /// an incoming bubble.
-  final Timestamp? deliveredAt;
-  final Timestamp? readAt;
+  final DateTime? deliveredAt;
+  final DateTime? readAt;
 
   /// True only for the newest message in the thread — Instagram shows
   /// "Seen HH:MM" once under the last message, not repeated on every bubble.
@@ -1191,11 +1195,10 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  static String _formatTime(Timestamp? timestamp) {
+  static String _formatTime(DateTime? timestamp) {
     if (timestamp == null) return '';
-    final date = timestamp.toDate();
-    final hour = date.hour.toString().padLeft(2, '0');
-    final minute = date.minute.toString().padLeft(2, '0');
+    final hour = timestamp.hour.toString().padLeft(2, '0');
+    final minute = timestamp.minute.toString().padLeft(2, '0');
     return '$hour:$minute';
   }
 }

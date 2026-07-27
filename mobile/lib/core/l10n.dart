@@ -69,6 +69,7 @@ class S {
   // Store profile
   String get posts => isRu ? 'Посты' : 'Postlar';
   String get reels => 'Reels';
+  String get videos => isRu ? 'Видео' : 'Post';
   String get editProfile => isRu ? 'Редактировать' : 'Profili üýtget';
   String get share => isRu ? 'Поделиться' : 'Paýlaş';
   String get message => isRu ? 'Написать' : 'Habar ýaz';

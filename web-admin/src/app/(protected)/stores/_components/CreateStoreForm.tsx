@@ -2,8 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { httpsCallable } from "firebase/functions";
-import { clientFunctions } from "@/lib/firebaseClient";
 import type { ClientDict } from "@/lib/l10n";
 
 export function CreateStoreForm({ t }: { t: ClientDict }) {
@@ -21,15 +19,22 @@ export function CreateStoreForm({ t }: { t: ClientDict }) {
     setError(null);
 
     try {
-      const createStore = httpsCallable(clientFunctions, "createStore");
-      await createStore({ name, phone, tagline, address });
+      const res = await fetch("/api/stores", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, phone, tagline, address }),
+      });
+      if (!res.ok) {
+        setError(t.failedCreateStore);
+        return;
+      }
       setName("");
       setPhone("");
       setTagline("");
       setAddress("");
       router.refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.failedCreateStore);
+    } catch {
+      setError(t.failedCreateStore);
     } finally {
       setSubmitting(false);
     }

@@ -1,18 +1,26 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../services/firestore_service.dart';
+import '../../core/api_client.dart';
+import '../../core/json_ext.dart';
+import '../../core/read_cache.dart';
 
-typedef PostDoc = QueryDocumentSnapshot<Map<String, dynamic>>;
+/// A post as the new REST API returns it — a flat JSON map with `id` inside,
+/// wrapped so screens keep calling `doc.id` / `doc.data()` unchanged (see
+/// JsonDoc). Replaces the old `QueryDocumentSnapshot<Map<String,dynamic>>`.
+typedef PostDoc = JsonDoc;
 
 const feedPageSize = 10;
 
+List<PostDoc> postsFromResponse(Map<String, dynamic> json) {
+  final list = (json['posts'] as List<dynamic>? ?? const []);
+  return list
+      .map((e) => PostDoc(normalizePost(e as Map<String, dynamic>)))
+      .toList();
+}
+
 // Whether a loadMore() page fetch is currently in flight — feed_view.dart
 // watches this to show a small spinner at the bottom of the list while the
-// next 10 posts load, same as Instagram's own feed. A separate Notifier
-// (not a field read off FeedNotifier itself) because reading a field
-// directly off an AsyncNotifier's instance doesn't trigger a rebuild when
-// that field changes — only reassigning `state` does.
+// next page loads.
 class FeedLoadingMoreNotifier extends Notifier<bool> {
   @override
   bool build() => false;
@@ -25,62 +33,51 @@ final feedLoadingMoreProvider = NotifierProvider<FeedLoadingMoreNotifier, bool>(
 );
 
 class FeedNotifier extends AsyncNotifier<List<PostDoc>> {
-  DocumentSnapshot<Map<String, dynamic>>? _lastDoc;
+  int _offset = 0;
   bool hasMore = true;
   bool _isLoadingMore = false;
 
-  Query<Map<String, dynamic>> get _baseQuery => ref
-      .read(firestoreProvider)
-      .collection('posts')
-      .withConverter<Map<String, dynamic>>(
-        fromFirestore: (snap, _) => snap.data()!,
-        toFirestore: (data, _) => data,
-      )
-      .orderBy('createdAt', descending: true);
+  static const _cacheKey = 'feed:page0';
 
   @override
   Future<List<PostDoc>> build() async {
-    _lastDoc = null;
+    _offset = 0;
     hasMore = true;
 
-    // Firestore keeps a local disk cache automatically (on by default on
-    // mobile) — read it first so the feed paints instantly from whatever
-    // was already loaded on a previous visit instead of sitting on a blank
-    // spinner every single time while waiting on a network round trip. The
-    // real network fetch below still runs and supersedes this once it lands.
-    try {
-      final cached = await _baseQuery
-          .limit(feedPageSize)
-          .get(const GetOptions(source: Source.cache));
-      if (cached.docs.isNotEmpty) state = AsyncData(cached.docs);
-    } catch (_) {
-      // No cache yet (e.g. first-ever launch) — the network fetch covers it.
+    // Read-side cache instant-paint (Phase 9b) — emit the last-seen first page
+    // immediately so the feed isn't a blank spinner on a fresh launch, then let
+    // the network fetch below supersede it. Replaces Firestore's Source.cache.
+    final cache = ref.read(readCacheProvider);
+    final cached = await cache.readList(_cacheKey);
+    if (cached != null && cached.isNotEmpty) {
+      state = AsyncData(cached.map((e) => PostDoc(normalizePost(e))).toList());
     }
 
-    final snap = await _baseQuery.limit(feedPageSize).get();
-    if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
-    hasMore = snap.docs.length == feedPageSize;
-    return snap.docs;
+    final json = await ref
+        .read(apiClientProvider)
+        .get('/feed', query: {'limit': feedPageSize, 'offset': 0});
+    final rawPosts = (json['posts'] as List<dynamic>? ?? const [])
+        .cast<Map<String, dynamic>>();
+    await cache.writeList(_cacheKey, rawPosts);
+    final posts = postsFromResponse(json);
+    _offset = posts.length;
+    hasMore = posts.length == feedPageSize;
+    return posts;
   }
 
   Future<void> loadMore() async {
-    // The scroll listener fires on every pixel within range of the bottom,
-    // so without this guard fast scrolling fires loadMore() many times
-    // before the first request even returns — each one reads the same
-    // _lastDoc and appends the same page, duplicating posts (and their
-    // video controllers, for reels) in the feed.
-    if (!hasMore || _lastDoc == null || _isLoadingMore) return;
+    if (!hasMore || _isLoadingMore) return;
     _isLoadingMore = true;
     ref.read(feedLoadingMoreProvider.notifier).loading = true;
     try {
       final current = state.value ?? [];
-      final snap = await _baseQuery
-          .startAfterDocument(_lastDoc!)
-          .limit(feedPageSize)
-          .get();
-      if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
-      hasMore = snap.docs.length == feedPageSize;
-      state = AsyncData([...current, ...snap.docs]);
+      final json = await ref
+          .read(apiClientProvider)
+          .get('/feed', query: {'limit': feedPageSize, 'offset': _offset});
+      final page = postsFromResponse(json);
+      _offset += page.length;
+      hasMore = page.length == feedPageSize;
+      state = AsyncData([...current, ...page]);
     } finally {
       _isLoadingMore = false;
       ref.read(feedLoadingMoreProvider.notifier).loading = false;
@@ -88,10 +85,8 @@ class FeedNotifier extends AsyncNotifier<List<PostDoc>> {
   }
 
   Future<void> refresh() async {
-    // invalidateSelf() (unlike manually assigning AsyncLoading()) preserves
-    // the previous list in state.value while this resolves, via Riverpod's
-    // own invalidation machinery — so screens checking hasValue first (not
-    // a bare .when()) can keep showing existing posts instead of blanking.
+    // invalidateSelf() preserves the previous list in state.value while this
+    // resolves, so screens checking hasValue keep showing existing posts.
     ref.invalidateSelf();
     await future;
   }

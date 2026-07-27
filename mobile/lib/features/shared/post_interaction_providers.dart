@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/api_client.dart';
+import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
-import '../../services/auth_service.dart';
-import '../../services/firestore_service.dart';
+import '../../core/realtime_client.dart';
 import '../../services/posts_service.dart';
 
 /// Shared by every bookmark icon (post_card.dart, post_detail_screen.dart,
@@ -14,8 +15,9 @@ Future<void> toggleSaveAndNotify(
   WidgetRef ref,
   String postId,
 ) async {
-  final wasSaved = ref.read(isSavedProvider(postId)).value ?? false;
-  await ref.read(postsServiceProvider).toggleSave(postId);
+  final wasSaved = ref.read(saveStateProvider(postId));
+  ref.read(saveStateProvider(postId).notifier).toggle();
+  await ref.read(postsServiceProvider).toggleSave(postId, !wasSaved);
   if (!context.mounted) return;
   final s = ref.read(l10nProvider);
   ScaffoldMessenger.of(context).showSnackBar(
@@ -37,59 +39,107 @@ Future<void> shareAndNotify(
   ).showSnackBar(SnackBar(content: Text(ref.read(l10nProvider).postShared)));
 }
 
-/// Store name/avatar for a post's header row — live, not a one-time fetch,
-/// so renaming a store (or changing its avatar) shows up on already-open
-/// feed cards immediately instead of needing an app restart.
+/// Store name/avatar for a post's header row — live via the `store:{id}`
+/// realtime channel, so renaming a store shows on already-open feed cards
+/// immediately (same as the old Firestore snapshot).
 final storeSummaryProvider =
-    StreamProvider.family<Map<String, dynamic>?, String>((ref, storeId) {
-      if (storeId.isEmpty) return Stream.value(null);
-      return ref
-          .watch(firestoreProvider)
-          .collection('stores')
-          .doc(storeId)
-          .snapshots()
-          .map((snap) => snap.data());
+    StreamProvider.family<Map<String, dynamic>?, String>((ref, storeId) async* {
+      if (storeId.isEmpty) {
+        yield null;
+        return;
+      }
+      final api = ref.watch(apiClientProvider);
+      try {
+        final json = await api.get('/stores/$storeId');
+        yield json['store'] as Map<String, dynamic>?;
+      } catch (_) {
+        yield null;
+      }
+      await for (final event
+          in ref.watch(realtimeClientProvider).subscribe('store:$storeId')) {
+        if (event.type == RealtimeEventType.snapshot ||
+            event.type == RealtimeEventType.upsert) {
+          yield event.data as Map<String, dynamic>?;
+        }
+      }
     }, isAutoDispose: true);
 
+/// Live post doc — subscribes to `post:{id}`, whose events carry the
+/// aggregate counters (likes/saves/views/sent/shares). The initial REST fetch
+/// also carries the full post incl. `likedByMe`/`savedByMe` (which the WS
+/// counter events deliberately omit — a private flag has no cross-device
+/// live value; see docs/07_MIGRATION.md Phase 9). LikeNotifier/SaveNotifier
+/// seed their optimistic state from that first fetch's flags.
 final postDocProvider = StreamProvider.family<Map<String, dynamic>?, String>((
   ref,
   postId,
-) {
-  return ref
-      .watch(firestoreProvider)
-      .collection('posts')
-      .doc(postId)
-      .snapshots()
-      .map((snap) => snap.data());
+) async* {
+  final api = ref.watch(apiClientProvider);
+  Map<String, dynamic>? current;
+  try {
+    final json = await api.get('/posts/$postId');
+    final post = json['post'] as Map<String, dynamic>?;
+    current = post != null ? normalizePost(post) : null;
+    yield current;
+  } catch (_) {
+    yield null;
+  }
+  await for (final event
+      in ref.watch(realtimeClientProvider).subscribe('post:$postId')) {
+    if (event.type == RealtimeEventType.snapshot ||
+        event.type == RealtimeEventType.upsert) {
+      // The channel event carries only counts + id — merge onto the last full
+      // doc so caption/media/likedByMe survive across counter updates.
+      final counts = event.data as Map<String, dynamic>?;
+      if (counts != null) {
+        current = {...?current, ...counts};
+        yield current;
+      }
+    }
+  }
 }, isAutoDispose: true);
 
-final isLikedProvider = StreamProvider.family<bool, String>((ref, postId) {
-  final user = ref.watch(authStateChangesProvider).value;
-  if (user == null) return Stream.value(false);
+/// "Did I like this post" — seeded from the post doc's `likedByMe` flag and
+/// then tracked optimistically (the like/unlike write is fire-and-forget; the
+/// server is authoritative but there's no per-user live channel for it). Null
+/// until the post doc first loads.
+class _MyFlagNotifier extends Notifier<bool> {
+  _MyFlagNotifier(this.flagKey, this.postId);
 
-  return ref
-      .watch(firestoreProvider)
-      .collection('posts')
-      .doc(postId)
-      .collection('likes')
-      .doc(user.uid)
-      .snapshots()
-      .map((snap) => snap.exists);
-}, isAutoDispose: true);
+  final String flagKey; // "likedByMe" | "savedByMe"
+  final String postId;
+  bool? _optimistic;
 
-final isSavedProvider = StreamProvider.family<bool, String>((ref, postId) {
-  final user = ref.watch(authStateChangesProvider).value;
-  if (user == null) return Stream.value(false);
+  @override
+  bool build() {
+    final server = ref.watch(postDocProvider(postId)).value?[flagKey] as bool?;
+    // Once the server value catches up to what we predicted, drop the
+    // override so future server truth (e.g. another device) wins.
+    if (_optimistic != null && server != null && _optimistic == server) {
+      _optimistic = null;
+    }
+    return _optimistic ?? server ?? false;
+  }
 
-  return ref
-      .watch(firestoreProvider)
-      .collection('users')
-      .doc(user.uid)
-      .collection('saved')
-      .doc(postId)
-      .snapshots()
-      .map((snap) => snap.exists);
-}, isAutoDispose: true);
+  void toggle() {
+    _optimistic = !state;
+    state = _optimistic!;
+  }
+}
+
+final isLikedProvider = NotifierProvider.family<_MyFlagNotifier, bool, String>(
+  (postId) => _MyFlagNotifier('likedByMe', postId),
+  isAutoDispose: true,
+);
+
+/// Save state as a simple toggle notifier (parallels isLikedProvider).
+final saveStateProvider = NotifierProvider.family<_MyFlagNotifier, bool, String>(
+  (postId) => _MyFlagNotifier('savedByMe', postId),
+  isAutoDispose: true,
+);
+
+/// Back-compat alias — screens still read `isSavedProvider(postId)`.
+final isSavedProvider = saveStateProvider;
 
 class LikeState {
   const LikeState({required this.isLiked, required this.likesCount});
@@ -97,88 +147,48 @@ class LikeState {
   final int likesCount;
 }
 
-/// Combines [isLikedProvider] with the post doc's own `likesCount`. Both the
-/// heart *icon* and the *count* update the instant you tap — the count is a
-/// prediction (server ground truth, from posts/{postId}.likesCount, is
-/// server-authoritative via onLikeWrite's FieldValue.increment — see
-/// backend/functions/src/posts/onLikeWrite.ts — and always wins once it
-/// actually arrives), not a wait-for-the-trigger value. Explicit product
-/// call: instant feedback matters more here than the small chance of a
-/// brief self-correcting flicker under rapid repeated tapping before the
-/// trigger round-trip lands (a single deliberate tap never glitches — the
-/// predicted and server-confirmed values always agree in that case).
+/// Combines the optimistic like flag with the post doc's own `likesCount`.
+/// Both the heart icon and the count update the instant you tap — the count
+/// is a prediction; server ground truth (from the `post:{id}` channel's
+/// likesCount) always wins once it arrives. Same instant-feedback product
+/// call the Firestore version made.
 class LikeNotifier extends Notifier<LikeState> {
   LikeNotifier(this.postId);
 
   final String postId;
 
-  bool? _optimisticIsLiked;
-
-  // The server's likesCount as of the most recent toggle(), and the net
-  // predicted change since then — kept separate from _optimisticIsLiked's
-  // own clearing (which fires near-instantly, off the *like doc's* fast
-  // local-write echo) because the *count* only actually updates once
-  // onLikeWrite's server round trip lands, which is slower; clearing the
-  // count prediction on the same fast signal would flash back to the
-  // stale server count for a moment before jumping to the real new one.
   int? _countBeforeToggle;
   int _pendingDelta = 0;
 
   @override
   LikeState build() {
-    final serverIsLiked = ref.watch(isLikedProvider(postId)).value ?? false;
+    final isLiked = ref.watch(isLikedProvider(postId));
     final serverLikesCount =
         (ref.watch(postDocProvider(postId)).value?['likesCount'] as int?) ?? 0;
-
-    // Dropped as soon as the like doc's own existence (not the count)
-    // catches up to what was predicted — that's the write this client
-    // itself made, and it echoes back near-instantly from Firestore's local
-    // cache, well before the count's server round trip completes.
-    if (_optimisticIsLiked != null && _optimisticIsLiked == serverIsLiked) {
-      _optimisticIsLiked = null;
-    }
 
     int likesCount = serverLikesCount;
     if (_countBeforeToggle != null) {
       if (serverLikesCount == _countBeforeToggle) {
-        // The trigger this prediction was waiting on hasn't landed yet —
-        // keep showing the predicted value.
         likesCount = serverLikesCount + _pendingDelta;
       } else {
-        // Server count actually moved — trust it and drop the prediction,
-        // whether or not it landed on exactly what was predicted (a rapid
-        // toggle burst can have more than one trigger still in flight; this
-        // is the "brief self-correcting flicker" edge case noted above).
+        // Server count moved — trust it, drop the prediction.
         _countBeforeToggle = null;
         _pendingDelta = 0;
       }
     }
-
-    final isLiked = _optimisticIsLiked ?? serverIsLiked;
     return LikeState(isLiked: isLiked, likesCount: likesCount);
   }
 
   void toggle() {
     final newIsLiked = !state.isLiked;
-    _optimisticIsLiked = newIsLiked;
+    ref.read(isLikedProvider(postId).notifier).toggle();
 
-    // Anchor the prediction to the server's own last-known count — not the
-    // currently-*displayed* one — since that's the base onLikeWrite's
-    // trigger will actually increment/decrement from. Only captured once
-    // per pending burst (??=): a second toggle before the first trigger
-    // lands adjusts the same prediction instead of re-anchoring to what is
-    // still a stale server read, which would double-count instead of
-    // correctly cancelling out (like then unlike should net back to zero).
     final serverLikesCount =
         ref.read(postDocProvider(postId)).value?['likesCount'] as int? ??
         state.likesCount;
     _countBeforeToggle ??= serverLikesCount;
     _pendingDelta += newIsLiked ? 1 : -1;
 
-    state = LikeState(
-      isLiked: newIsLiked,
-      likesCount: _countBeforeToggle! + _pendingDelta,
-    );
     ref.read(postsServiceProvider).toggleLike(postId, newIsLiked);
   }
 

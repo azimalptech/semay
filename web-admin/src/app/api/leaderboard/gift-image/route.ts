@@ -1,19 +1,16 @@
-import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionClaims } from "@/lib/session";
-import { adminDb, adminStorage, bucketName } from "@/lib/firebaseAdmin";
+import { prisma } from "@/lib/db";
+import { MEDIA_PUBLIC_BASE_URL, writeMediaObject } from "@/lib/media";
 
 const MAX_SIZE = 10 * 1024 * 1024;
 // file.type is entirely client-asserted. An allowlist (not just
 // startsWith("image/")) matters here specifically because image/svg+xml
 // would otherwise pass — SVGs can embed <script>, and this file is served
-// back out from a public, tokened URL to every mobile client.
+// back out from a public URL to every mobile client.
 const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-// Matches the storeId shape enforced in store-order/route.ts — Firestore
-// auto-IDs, never attacker-controlled path traversal.
-const STORE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
-function storagePathFor(storeId: string): string {
+function objectKeyFor(storeId: string): string {
   return `stores/${storeId}/leaderboard-gift.jpg`;
 }
 
@@ -27,11 +24,11 @@ export async function POST(request: NextRequest) {
 
   const formData = await request.formData();
   const storeId = formData.get("storeId");
-  if (typeof storeId !== "string" || !STORE_ID_PATTERN.test(storeId)) {
+  if (typeof storeId !== "string" || !storeId) {
     return NextResponse.json({ error: "storeId is required" }, { status: 400 });
   }
-  const storeSnap = await adminDb.collection("stores").doc(storeId).get();
-  if (!storeSnap.exists) {
+  const store = await prisma.store.findUnique({ where: { id: storeId } });
+  if (!store) {
     return NextResponse.json({ error: "store not found" }, { status: 404 });
   }
 
@@ -47,19 +44,11 @@ export async function POST(request: NextRequest) {
   }
 
   const bytes = Buffer.from(await file.arrayBuffer());
-  const bucket = adminStorage.bucket(bucketName);
-  const storageFile = bucket.file(storagePathFor(storeId));
-  const downloadToken = randomUUID();
-  await storageFile.save(bytes, {
-    contentType: file.type,
-    metadata: { metadata: { firebaseStorageDownloadTokens: downloadToken } },
-  });
+  const key = objectKeyFor(storeId);
+  await writeMediaObject(key, bytes);
 
-  const campaignImageUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(
-    storagePathFor(storeId),
-  )}?alt=media&token=${downloadToken}`;
-
-  await adminDb.collection("stores").doc(storeId).update({ campaignImageUrl });
+  const campaignImageUrl = `${MEDIA_PUBLIC_BASE_URL}/${key}`;
+  await prisma.store.update({ where: { id: storeId }, data: { campaignImageUrl } });
 
   return NextResponse.json({ campaignImageUrl });
 }
@@ -71,13 +60,14 @@ export async function DELETE(request: NextRequest) {
   }
 
   const storeId = request.nextUrl.searchParams.get("storeId");
-  if (!storeId || !STORE_ID_PATTERN.test(storeId)) {
+  if (!storeId) {
     return NextResponse.json({ error: "storeId is required" }, { status: 400 });
   }
 
-  const bucket = adminStorage.bucket(bucketName);
-  await bucket.file(storagePathFor(storeId)).delete({ ignoreNotFound: true });
-  await adminDb.collection("stores").doc(storeId).update({ campaignImageUrl: null });
+  // Not deleting the file on disk is a known, accepted gap here (same as the
+  // store cascade-delete not cleaning up media — see docs/07_MIGRATION.md) —
+  // only the DB field is cleared; a stale file under stores/{id}/ is harmless.
+  await prisma.store.update({ where: { id: storeId }, data: { campaignImageUrl: null } });
 
   return NextResponse.json({ success: true });
 }

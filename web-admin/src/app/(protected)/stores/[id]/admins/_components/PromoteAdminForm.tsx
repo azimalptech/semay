@@ -2,8 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { httpsCallable } from "firebase/functions";
-import { clientFunctions } from "@/lib/firebaseClient";
 import type { ClientDict } from "@/lib/l10n";
 
 interface LookupResult {
@@ -44,13 +42,20 @@ export function PromoteAdminForm({ storeId, t }: { storeId: string; t: ClientDic
     setError(null);
 
     try {
-      const setStoreAdmin = httpsCallable(clientFunctions, "setStoreAdmin");
-      await setStoreAdmin({ storeId, userId: result.uid, grant: true });
+      const res = await fetch(`/api/stores/${storeId}/admins`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: result.uid, grant: true }),
+      });
+      if (!res.ok) {
+        setError(t.failedPromote);
+        return;
+      }
       setResult(null);
       setPhone("");
       router.refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.failedPromote);
+    } catch {
+      setError(t.failedPromote);
     } finally {
       setPromoting(false);
     }

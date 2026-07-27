@@ -1,50 +1,43 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/api_client.dart';
+import '../../core/json_ext.dart';
 import '../../services/auth_service.dart';
-import '../../services/firestore_service.dart';
 
-typedef NotificationDoc = QueryDocumentSnapshot<Map<String, dynamic>>;
+typedef NotificationDoc = JsonDoc;
 
 /// The signed-in user's notifications, newest first. Empty (not an error)
-/// when signed out, matching the rest of the app's provider conventions.
-final notificationsProvider = StreamProvider<List<NotificationDoc>>((ref) {
-  final user = ref.watch(authStateChangesProvider).value;
-  if (user == null) return Stream.value(const []);
-
-  return ref
-      .watch(firestoreProvider)
-      .collection('users')
-      .doc(user.uid)
-      .collection('notifications')
-      .orderBy('createdAt', descending: true)
-      .limit(100)
-      .snapshots()
-      .map((snap) => snap.docs);
+/// when signed out. REST + pull-to-refresh (no realtime channel — a new
+/// notification also arrives as an FCM push, and the list refreshes on open).
+final notificationsProvider = FutureProvider<List<NotificationDoc>>((ref) async {
+  final session = await ref.watch(authStateChangesProvider.future);
+  if (session == null) return const [];
+  final json = await ref.watch(apiClientProvider).get('/notifications', query: {'limit': 100});
+  final list = (json['notifications'] as List<dynamic>? ?? const []);
+  return list.map((e) => NotificationDoc(e as Map<String, dynamic>)).toList();
 });
 
-/// Unread count for the bell icon's badge.
+/// Unread count for the bell icon's badge — `readAt == null` means unread
+/// (the old boolean `read` became a nullable timestamp; see docs/02_DATA_MODEL).
 final unreadNotificationCountProvider = Provider<int>((ref) {
   final docs = ref.watch(notificationsProvider).value ?? const [];
-  return docs.where((doc) => doc.data()['read'] != true).length;
+  return docs.where((doc) => doc.data()['readAt'] == null).length;
 });
 
 class NotificationsService {
-  NotificationsService(this._firestore);
+  NotificationsService(this._api, this._ref);
 
-  final FirebaseFirestore _firestore;
+  final ApiClient _api;
+  final Ref _ref;
 
   Future<void> markAllRead(List<NotificationDoc> docs) async {
-    final unread = docs.where((doc) => doc.data()['read'] != true).toList();
-    if (unread.isEmpty) return;
-    final batch = _firestore.batch();
-    for (final doc in unread) {
-      batch.update(doc.reference, {'read': true});
-    }
-    await batch.commit();
+    final hasUnread = docs.any((doc) => doc.data()['readAt'] == null);
+    if (!hasUnread) return;
+    await _api.post('/notifications/read-all');
+    _ref.invalidate(notificationsProvider);
   }
 }
 
 final notificationsServiceProvider = Provider<NotificationsService>((ref) {
-  return NotificationsService(ref.watch(firestoreProvider));
+  return NotificationsService(ref.watch(apiClientProvider), ref);
 });

@@ -172,6 +172,7 @@ model Store {
   leaderboardOrder Int?
   campaignImageUrl String?   @db.VarChar(512)
   campaignStartAt  DateTime?
+  campaignEndAt    DateTime?
   createdAt        DateTime  @default(now())
 
   createdBy            User                  @relation("StoreCreatedBy", fields: [createdById], references: [id])
@@ -383,6 +384,10 @@ model Message {
   replyToMessageId  BigInt?
   replyToText       String?           @db.VarChar(512)
   replyToSenderRole SenderRole?
+  // Client-generated idempotency key (offline outbox, Phase 9b) — a retried
+  // send under flaky signal reuses the same key, so UNIQUE makes the second
+  // insert a no-op that returns the already-created row instead of a dupe.
+  clientKey         String?           @unique @db.VarChar(64)
   createdAt         DateTime          @default(now()) @db.DateTime(3)
   deliveredAt       DateTime?         @db.DateTime(3)
   readAt            DateTime?         @db.DateTime(3)

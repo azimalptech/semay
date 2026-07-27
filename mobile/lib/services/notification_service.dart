@@ -1,17 +1,16 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:dio/dio.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:go_router/go_router.dart';
 
+import '../core/api_client.dart';
 import '../core/firebase_options.dart';
 import '../core/theme.dart';
-import 'auth_service.dart';
-import 'firestore_service.dart';
 
 // firebase_options.dart is still a demo/placeholder project (see its
 // REPLACE_ME values) — there is no real VAPID key to fetch a working web
@@ -254,20 +253,22 @@ class _ForegroundBannerState extends State<_ForegroundBanner>
 // message this was.
 Future<void> _markMessageDelivered(RemoteMessage message) async {
   final chatId = message.data['chatId'] as String?;
-  final messageId = message.data['messageId'] as String?;
-  if (chatId == null || messageId == null) return;
+  if (chatId == null) return;
   try {
-    await FirebaseFirestore.instance
-        .collection('chats')
-        .doc(chatId)
-        .collection('messages')
-        .doc(messageId)
-        .update({'deliveredAt': FieldValue.serverTimestamp()});
+    // Standalone (no Riverpod/ApiClient) so it works from the background
+    // isolate too — reads the stored access token directly and posts a
+    // delivered receipt. The server marks every counterpart message in the
+    // chat delivered (they all reached this device); best-effort, so an
+    // expired token just means the thread re-marks on next open, never a
+    // crash in a background isolate.
+    final token = await const FlutterSecureStorage().read(key: 'access_token');
+    if (token == null) return;
+    await Dio().post<void>(
+      '$apiBaseUrl/chats/$chatId/receipts',
+      data: {'status': 'delivered'},
+      options: Options(headers: {'Authorization': 'Bearer $token'}),
+    );
   } catch (e) {
-    // Firestore rules reject this if, e.g., the signed-in account somehow
-    // isn't this message's recipient (shouldn't happen — FCM only delivers
-    // to this device's own registered token) — never worth crashing a
-    // background isolate over a read-receipt write.
     debugPrint('_markMessageDelivered failed: $e');
   }
 }
@@ -282,13 +283,31 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await _markMessageDelivered(message);
 }
 
+/// Foreground counterpart to firebaseMessagingBackgroundHandler — the
+/// background handler only ever fires while the app isn't already running in
+/// the foreground, so this covers the rest: app open, on some other screen
+/// than the message's own thread. Top-level (not an instance method) so
+/// main() can register it before runApp without constructing anything that
+/// needs a ProviderScope — same leak-avoidance the old code documented.
+void listenForegroundMessages(void Function(RemoteMessage message) onMessage) {
+  FirebaseMessaging.onMessage.listen((message) {
+    debugPrint(
+      'listenForegroundMessages: onMessage fired, messageId=${message.messageId}',
+    );
+    _markMessageDelivered(message);
+    onMessage(message);
+  });
+}
+
 class NotificationService {
-  NotificationService(this._messaging, this._firestore, this._auth);
+  NotificationService(this._messaging, this._api);
 
   final FirebaseMessaging _messaging;
-  final FirebaseFirestore _firestore;
-  final FirebaseAuth _auth;
+  final ApiClient _api;
 
+  /// Requests permission, fetches the FCM token, and registers it with the
+  /// API (POST /users/me/fcm-tokens — UNIQUE(token) upsert; see
+  /// docs/07_MIGRATION.md Phase 7). Called from SeMayApp once auth resolves.
   Future<void> initAndSyncToken() async {
     try {
       await _messaging.requestPermission();
@@ -297,44 +316,21 @@ class NotificationService {
           : await _messaging.getToken();
       if (token == null) return;
 
-      final uid = _auth.currentUser?.uid;
-      if (uid == null) return;
-
-      await _firestore.collection('users').doc(uid).update({
-        'fcmTokens': FieldValue.arrayUnion([token]),
-      });
+      final platform = kIsWeb
+          ? null
+          : (defaultTargetPlatform == TargetPlatform.iOS ? 'ios' : 'android');
+      final body = <String, dynamic>{'token': token};
+      if (platform != null) body['platform'] = platform;
+      await _api.post('/users/me/fcm-tokens', body: body);
     } catch (e) {
-      // Expected to fail until a real Firebase project/VAPID key exists —
-      // never let it block app usage.
-      debugPrint(
-        'NotificationService: token sync failed (expected for now): $e',
-      );
+      debugPrint('NotificationService: token sync failed: $e');
     }
-  }
-
-  /// Foreground counterpart to firebaseMessagingBackgroundHandler — the
-  /// background handler only ever fires while the app isn't already running
-  /// in the foreground, so this covers the rest: app open, on some other
-  /// screen than the message's own thread (activeChatId already suppresses
-  /// the push outright when it *is* that thread, so this only sees messages
-  /// for chats not currently open).
-  void listenForegroundMessages(
-    void Function(RemoteMessage message) onMessage,
-  ) {
-    FirebaseMessaging.onMessage.listen((message) {
-      debugPrint(
-        'listenForegroundMessages: onMessage fired, messageId=${message.messageId}',
-      );
-      _markMessageDelivered(message);
-      onMessage(message);
-    });
   }
 }
 
 final notificationServiceProvider = Provider<NotificationService>((ref) {
   return NotificationService(
     ref.watch(messagingProvider),
-    ref.watch(firestoreProvider),
-    ref.watch(firebaseAuthProvider),
+    ref.watch(apiClientProvider),
   );
 });

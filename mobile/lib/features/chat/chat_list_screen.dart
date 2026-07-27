@@ -1,10 +1,10 @@
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
+import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
@@ -19,9 +19,9 @@ import 'chat_providers.dart';
 /// they hid it. No last message at all keeps it hidden.
 bool _isHiddenForSide(Map<String, dynamic> data, {required bool asAdmin}) {
   final hiddenAt =
-      data[asAdmin ? 'hiddenByAdminAt' : 'hiddenByUserAt'] as Timestamp?;
+      parseTimestamp(data[asAdmin ? 'hiddenByAdminAt' : 'hiddenByUserAt']);
   if (hiddenAt == null) return false;
-  final lastAt = data['lastMessageAt'] as Timestamp?;
+  final lastAt = parseTimestamp(data['lastMessageAt']);
   return lastAt == null || lastAt.compareTo(hiddenAt) <= 0;
 }
 
@@ -198,7 +198,7 @@ class _UserChatListState extends ConsumerState<_UserChatList> {
               avatarUrl: store?['avatarUrl'] as String? ?? '',
               name: store?['name'] as String? ?? '...',
               lastMessage: data['lastMessageText'] as String? ?? '',
-              lastMessageAt: data['lastMessageAt'] as Timestamp?,
+              lastMessageAt: parseTimestamp(data['lastMessageAt']),
               unreadCount: data['unreadByUser'] as int? ?? 0,
               onTap: () => context.push('/chat/${chat.id}'),
             ),
@@ -249,21 +249,11 @@ class _AdminChatListState extends ConsumerState<_AdminChatList> {
     super.dispose();
   }
 
-  // Grow the window a page at a time as the admin nears the bottom. Only when
-  // the current page came back full (loaded >= limit) — a short page means
-  // we've already reached the oldest conversation, so there's nothing more to
-  // fetch and the limit shouldn't keep climbing past what exists.
-  void _maybeLoadMore() {
-    if (_controller.position.pixels <
-        _controller.position.maxScrollExtent - 400) {
-      return;
-    }
-    final limit = ref.read(adminChatLimitProvider);
-    final loaded = ref.read(adminChatsProvider).value?.length ?? 0;
-    if (loaded >= limit) {
-      ref.read(adminChatLimitProvider.notifier).loadMore();
-    }
-  }
+  // The admin chat list is now delivered live over the store:{id}:chats
+  // realtime channel (server snapshot caps at the most recent 100 per store),
+  // so there's no incremental pagination to drive — the scroll listener is
+  // kept only so the field wiring stays intact; it's a no-op.
+  void _maybeLoadMore() {}
 
   @override
   Widget build(BuildContext context) {
@@ -298,7 +288,7 @@ class _AdminChatListState extends ConsumerState<_AdminChatList> {
                 avatarUrl: customer?['avatarUrl'] as String? ?? '',
                 name: customer?['name'] as String? ?? '...',
                 lastMessage: data['lastMessageText'] as String? ?? '',
-                lastMessageAt: data['lastMessageAt'] as Timestamp?,
+                lastMessageAt: parseTimestamp(data['lastMessageAt']),
                 unreadCount: data['unreadByAdmin'] as int? ?? 0,
                 onTap: () => context.push('/admin/chat/${chat.id}'),
               ),
@@ -326,7 +316,7 @@ class _ChatRow extends StatelessWidget {
   final String avatarUrl;
   final String name;
   final String lastMessage;
-  final Timestamp? lastMessageAt;
+  final DateTime? lastMessageAt;
   final int unreadCount;
   final VoidCallback onTap;
 
@@ -415,9 +405,9 @@ class _ChatRow extends StatelessWidget {
     'Dec',
   ];
 
-  static String _formatDate(Timestamp? timestamp) {
+  static String _formatDate(DateTime? timestamp) {
     if (timestamp == null) return '';
-    final date = timestamp.toDate();
+    final date = timestamp;
     final now = DateTime.now();
     final isToday =
         date.year == now.year && date.month == now.month && date.day == now.day;

@@ -1,15 +1,15 @@
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../core/api_client.dart';
 import '../../core/app_icon.dart';
 import '../../core/image_crop.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
-import '../../services/firestore_service.dart';
-import '../../services/storage_service.dart';
+import '../../services/posts_service.dart';
+import '../store_profile/store_profile_providers.dart';
 
 class EditStoreScreen extends ConsumerStatefulWidget {
   const EditStoreScreen({super.key, required this.storeId});
@@ -60,11 +60,12 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
     setState(() => _uploadingAvatar = true);
     try {
       final bytes = await image.readAsBytes();
-      final ref0 = ref
-          .read(storageProvider)
-          .ref('stores/${widget.storeId}/avatar.jpg');
-      await ref0.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
-      final url = await ref0.getDownloadURL();
+      final url = await ref.read(postsServiceProvider).uploadMedia(
+        folder: 'stores',
+        bytes: bytes,
+        fileExt: 'jpg',
+        contentType: 'image/jpeg',
+      );
       setState(() => _avatarUrl = url);
     } finally {
       if (mounted) setState(() => _uploadingAvatar = false);
@@ -73,18 +74,23 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
 
   Future<void> _save() async {
     setState(() => _saving = true);
-    await ref
-        .read(firestoreProvider)
-        .collection('stores')
-        .doc(widget.storeId)
-        .update({
+    try {
+      await ref.read(apiClientProvider).patch(
+        '/stores/${widget.storeId}',
+        body: {
           'name': _nameController.text.trim(),
           'tagline': _taglineController.text.trim(),
           'address': _addressController.text.trim(),
           'phone': _phoneController.text.trim(),
           if (_avatarUrl != null) 'avatarUrl': _avatarUrl,
-        });
-    if (mounted) Navigator.of(context).pop();
+        },
+      );
+      // Refresh the store profile the screen came from so the edit shows.
+      ref.invalidate(storeDocProvider(widget.storeId));
+      if (mounted) Navigator.of(context).pop();
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   InputDecoration _pillDecoration([String? hint]) => InputDecoration(
@@ -101,25 +107,19 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
   @override
   Widget build(BuildContext context) {
     final s = ref.watch(l10nProvider);
+    final store = ref.watch(storeDocProvider(widget.storeId)).value;
     return Scaffold(
       backgroundColor: AppColors.backgroundPrimary,
       appBar: AppBar(
         backgroundColor: AppColors.backgroundPrimary,
         title: Text(s.editProfile),
       ),
-      body: StreamBuilder<Map<String, dynamic>?>(
-        stream: ref
-            .watch(firestoreProvider)
-            .collection('stores')
-            .doc(widget.storeId)
-            .snapshots()
-            .map((s) => s.data()),
-        builder: (context, snapshot) {
-          final data = snapshot.data;
-          if (data == null) {
+      body: Builder(
+        builder: (context) {
+          if (store == null) {
             return const Center(child: CircularProgressIndicator());
           }
-          _loadFrom(data);
+          _loadFrom(store);
 
           return ListView(
             padding: const EdgeInsets.all(16),

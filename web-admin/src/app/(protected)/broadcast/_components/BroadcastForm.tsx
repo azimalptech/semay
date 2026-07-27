@@ -1,13 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { httpsCallable } from "firebase/functions";
-import { clientFunctions } from "@/lib/firebaseClient";
 import type { ClientDict } from "@/lib/l10n";
 
 interface BroadcastResult {
   sent: number;
-  failed: number;
+  failed?: number;
 }
 
 export function BroadcastForm({ t }: { t: ClientDict }) {
@@ -24,16 +22,20 @@ export function BroadcastForm({ t }: { t: ClientDict }) {
     setResult(null);
 
     try {
-      const broadcastNotification = httpsCallable<
-        { title: string; body: string },
-        BroadcastResult
-      >(clientFunctions, "broadcastNotification");
-      const res = await broadcastNotification({ title: title.trim(), body: body.trim() });
-      setResult(res.data);
+      const res = await fetch("/api/notifications/broadcast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: title.trim(), body: body.trim() }),
+      });
+      if (!res.ok) {
+        setError(t.broadcastFailed);
+        return;
+      }
+      setResult((await res.json()) as BroadcastResult);
       setTitle("");
       setBody("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.broadcastFailed);
+    } catch {
+      setError(t.broadcastFailed);
     } finally {
       setSending(false);
     }
@@ -48,7 +50,7 @@ export function BroadcastForm({ t }: { t: ClientDict }) {
       {result && (
         <p className="text-sm text-green-700">
           {t.broadcastSentPrefix} {result.sent}
-          {result.failed > 0 ? ` (${result.failed} failed)` : ""}
+          {result.failed && result.failed > 0 ? ` (${result.failed} failed)` : ""}
         </p>
       )}
 

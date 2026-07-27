@@ -37,6 +37,11 @@ yarn-error.log*
 # vercel
 .vercel
 
+# prisma — schema.prisma here is synced from server/ at dev/build time
+# (scripts/sync-schema.mjs), never hand-edited; not a second source of truth.
+/prisma/schema.prisma
+/prisma/migrations
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

@@ -4,11 +4,11 @@ import { LanguageSwitcher } from "./LanguageSwitcher";
 import { LogoutButton } from "./LogoutButton";
 
 export function NavBar({
-  email,
+  phone,
   lang,
   t,
 }: {
-  email: string | null;
+  phone: string;
   lang: Lang;
   t: ClientDict;
 }) {
@@ -31,13 +31,10 @@ export function NavBar({
         <Link href="/leaderboard" className="hover:text-gray-900">
           {t.leaderboard}
         </Link>
-        <Link href="/maintenance" className="hover:text-gray-900">
-          {t.maintenance}
-        </Link>
       </nav>
       <div className="flex items-center gap-4 text-sm text-gray-500">
         <LanguageSwitcher lang={lang} />
-        {email && <span>{email}</span>}
+        <span>{phone}</span>
         <LogoutButton label={t.logOut} />
       </div>
     </header>

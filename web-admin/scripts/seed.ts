@@ -1,154 +1,102 @@
-// Seeds the local Firebase emulator suite with:
-// - one Super Admin (email/password) to log into web-admin with
-// - one plain user (phone-identified) to promote to store-admin in the click-through
+// Seeds the local dev MySQL database with:
+// - one Super Admin (phone-identified, same auth as everyone else now — see
+//   docs/07_MIGRATION.md Phase 8) to log into web-admin with
+// - one store-admin test account, already granted admin on the seed store
 // - one baseline store with sample orders across 2 days, so /dashboard has data
-// Run with `npm run seed` while the emulator suite (auth+firestore+functions) is up.
-process.env.FIRESTORE_EMULATOR_HOST = "127.0.0.1:8080";
-process.env.FIREBASE_AUTH_EMULATOR_HOST = "127.0.0.1:9099";
+//
+// Run with `npm run seed` while server/'s MySQL is up and reachable via
+// this project's DATABASE_URL (see .env.local.example — same DB server/ uses).
+import { PrismaClient } from "@prisma/client";
 
-import { initializeApp } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-import { getFirestore, Timestamp, FieldValue } from "firebase-admin/firestore";
+const prisma = new PrismaClient();
 
-initializeApp({ projectId: "demo-semay" });
-const auth = getAuth();
-const db = getFirestore();
-
-const SUPERADMIN_UID = "seed-superadmin-uid";
-const SUPERADMIN_EMAIL = "superadmin@semay.local";
-const SUPERADMIN_PASSWORD = "superadmin123";
-
-// No fixed-uid "plain user" account is seeded anymore — it used to be
-// created via a phoneNumber-style Auth account, but the mobile app's dev
-// OTP bypass (auth_service.dart) now signs in with a deterministic
-// "<digits>@dev.semay.local" email/password account instead. Seeding a
-// second, differently-authed account for the same phone number produced two
-// Firestore users/{uid} docs sharing one `phone` — /api/users/lookup had no
-// tiebreaker between them, so a promote-to-admin could silently land on the
-// uid nobody was actually signed in as. Just use the phone in the mobile
-// app; its first real login creates the Firestore doc.
-const PLAIN_USER_PHONE = "+99361112233";
-
-const STORE_ID = "seed-store-lady-shop";
-
-// Store-admin test account, pre-provisioned with custom claims already set
-// (mobile/lib/services/auth_service.dart's dev OTP-bypass signs in with
-// email/password, which — unlike the real verifyOtp Cloud Function — never
-// calls the Admin SDK, so it can never mint role/storeIds custom claims on
-// its own. Logging in with this phone number in the app hits this
-// already-provisioned account instead of creating a fresh claim-less one.)
-const STORE_ADMIN_UID = "seed-store-admin-uid";
+const SUPERADMIN_PHONE = "+99361000001";
 const STORE_ADMIN_PHONE = "+99365555555";
 const STORE_ADMIN_NAME = "Store Admin";
-// Must match the digits + "@dev.semay.local" convention and fixed password
-// in auth_service.dart's _devEmailFor()/verifyOtp().
-const STORE_ADMIN_EMAIL = "99365555555@dev.semay.local";
-const DEV_BYPASS_PASSWORD = "dev-testing-password-123";
+const STORE_NAME = "Lady's shop";
 
-function dayTimestamp(daysAgo: number, hour: number): Timestamp {
+function daysAgo(days: number, hour: number): Date {
   const d = new Date();
-  d.setDate(d.getDate() - daysAgo);
+  d.setDate(d.getDate() - days);
   d.setHours(hour, 0, 0, 0);
-  return Timestamp.fromDate(d);
-}
-
-async function ensureAuthUser(
-  uid: string,
-  props: { email?: string; password?: string; phoneNumber?: string },
-  claims: Record<string, unknown>
-) {
-  try {
-    await auth.getUser(uid);
-  } catch {
-    await auth.createUser({ uid, ...props });
-  }
-  await auth.setCustomUserClaims(uid, claims);
+  return d;
 }
 
 async function main() {
-  await ensureAuthUser(
-    SUPERADMIN_UID,
-    { email: SUPERADMIN_EMAIL, password: SUPERADMIN_PASSWORD },
-    { role: "superadmin" }
-  );
-  await ensureAuthUser(
-    STORE_ADMIN_UID,
-    { email: STORE_ADMIN_EMAIL, password: DEV_BYPASS_PASSWORD },
-    { role: "admin", storeIds: [STORE_ID] }
-  );
-
-  await db.collection("users").doc(SUPERADMIN_UID).set({
-    name: "Super Admin",
-    avatarUrl: "",
-    phone: "",
-    role: "superadmin",
-    storeIds: [],
-    fcmTokens: [],
-    createdAt: FieldValue.serverTimestamp(),
+  const superadmin = await prisma.user.upsert({
+    where: { phone: SUPERADMIN_PHONE },
+    create: { phone: SUPERADMIN_PHONE, name: "Super Admin", role: "superadmin" },
+    update: { role: "superadmin" },
   });
 
-  await db.collection("users").doc(STORE_ADMIN_UID).set({
-    name: STORE_ADMIN_NAME,
-    avatarUrl: "",
-    phone: STORE_ADMIN_PHONE,
-    role: "admin",
-    storeIds: [STORE_ID],
-    fcmTokens: [],
-    createdAt: FieldValue.serverTimestamp(),
+  const storeAdmin = await prisma.user.upsert({
+    where: { phone: STORE_ADMIN_PHONE },
+    create: { phone: STORE_ADMIN_PHONE, name: STORE_ADMIN_NAME, role: "admin" },
+    update: { role: "admin" },
   });
 
-  const storeSnap = await db.collection("stores").doc(STORE_ID).get();
-  if (!storeSnap.exists) {
-    await db.collection("stores").doc(STORE_ID).set({
-      name: "Lady's shop",
-      tagline: "Feel Beautiful, Always. ✨",
-      avatarUrl: "",
-      coverUrl: "",
-      phone: "+99362123456",
-      address: "Ashgabat, Bitaraplyk shayoly 142-nji jayy",
-      geopoint: null,
-      adminIds: [STORE_ADMIN_UID],
-      postsCount: 0,
-      reelsCount: 0,
-      createdBy: SUPERADMIN_UID,
-      createdAt: FieldValue.serverTimestamp(),
-      active: true,
+  let store = await prisma.store.findFirst({ where: { name: STORE_NAME } });
+  if (!store) {
+    store = await prisma.store.create({
+      data: {
+        name: STORE_NAME,
+        tagline: "Feel Beautiful, Always. ✨",
+        phone: "+99362123456",
+        address: "Ashgabat, Bitaraplyk shayoly 142-nji jayy",
+        createdById: superadmin.id,
+        active: true,
+      },
     });
 
-    const orders = [
-      { itemQuantity: 3, createdAt: dayTimestamp(1, 10) },
-      { itemQuantity: 2, createdAt: dayTimestamp(1, 15) },
-      { itemQuantity: 5, createdAt: dayTimestamp(0, 11) },
-    ];
-    // Sample rows for the dashboard's orders report only — deliberately not
-    // tied to any real uid (see the note above on why a second seeded
-    // account for the same phone caused real bugs).
-    for (const order of orders) {
-      await db.collection("orders").add({
-        storeId: STORE_ID,
-        adminId: SUPERADMIN_UID,
-        userId: "demo-customer",
-        chatId: null,
-        itemQuantity: order.itemQuantity,
-        userPhone: PLAIN_USER_PHONE,
-        status: "accepted",
-        createdAt: order.createdAt,
-        updatedAt: order.createdAt,
-      });
-    }
+    await prisma.storeAdmin.create({ data: { storeId: store.id, userId: storeAdmin.id } });
+
+    await prisma.order.createMany({
+      data: [
+        {
+          storeId: store.id,
+          adminId: superadmin.id,
+          userId: storeAdmin.id,
+          chatId: `${storeAdmin.id}_${store.id}`,
+          itemQuantity: 3,
+          userPhone: STORE_ADMIN_PHONE,
+          createdAt: daysAgo(1, 10),
+        },
+        {
+          storeId: store.id,
+          adminId: superadmin.id,
+          userId: storeAdmin.id,
+          chatId: `${storeAdmin.id}_${store.id}`,
+          itemQuantity: 2,
+          userPhone: STORE_ADMIN_PHONE,
+          createdAt: daysAgo(1, 15),
+        },
+        {
+          storeId: store.id,
+          adminId: superadmin.id,
+          userId: storeAdmin.id,
+          chatId: `${storeAdmin.id}_${store.id}`,
+          itemQuantity: 5,
+          userPhone: STORE_ADMIN_PHONE,
+          createdAt: daysAgo(0, 11),
+        },
+      ],
+    });
   }
 
   console.log("Seed complete.");
-  console.log(`Super Admin login → email: ${SUPERADMIN_EMAIL}  password: ${SUPERADMIN_PASSWORD}`);
-  console.log(`Store-admin phone (already has admin claims on "${STORE_ID}") → ${STORE_ADMIN_PHONE}`);
+  console.log(`Super Admin login (phone-OTP, same as everyone else) -> ${SUPERADMIN_PHONE}`);
   console.log(
-    `To test promote-to-admin: log into the mobile app with any phone number first (creates its Firestore user doc), then promote that number from the Stores > Manage Admins page.`
+    `Store-admin phone (already has admin rights on "${STORE_NAME}") -> ${STORE_ADMIN_PHONE}`
+  );
+  console.log(
+    "OTP_DEV_MODE=true on server/ echoes the code in the send response, no real SMS needed for local testing."
   );
 }
 
 main()
-  .then(() => process.exit(0))
-  .catch((e) => {
+  .then(() => prisma.$disconnect())
+  .catch(async (e) => {
     console.error(e);
+    await prisma.$disconnect();
     process.exit(1);
   });

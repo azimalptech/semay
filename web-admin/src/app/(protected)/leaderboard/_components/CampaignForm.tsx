@@ -2,20 +2,26 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { httpsCallable } from "firebase/functions";
-import { clientFunctions } from "@/lib/firebaseClient";
 import type { ClientDict } from "@/lib/l10n";
 
 interface StoreCampaign {
   id: string;
   name: string;
   campaignStartAtMillis: number | null;
+  campaignEndAtMillis: number | null;
   campaignImageUrl: string | null;
 }
 
 function toDateInputValue(millis: number | null): string {
   if (millis == null) return "";
   return new Date(millis).toISOString().slice(0, 10);
+}
+
+// The campaign is inclusive of the whole end day, so store the end at the last
+// millisecond of the picked date (UTC) — mirrors how the start is stored at the
+// day's first millisecond (midnight UTC).
+function endDateToMillis(dateStr: string): number {
+  return new Date(`${dateStr}T23:59:59.999Z`).getTime();
 }
 
 // Combines the campaign-start-date and gift-image controls into one form
@@ -37,6 +43,7 @@ export function CampaignForm({
   const selected = stores.find((s) => s.id === selectedId) ?? null;
 
   const [date, setDate] = useState(toDateInputValue(selected?.campaignStartAtMillis ?? null));
+  const [endDate, setEndDate] = useState(toDateInputValue(selected?.campaignEndAtMillis ?? null));
   const [savingDate, setSavingDate] = useState(false);
   const [dateError, setDateError] = useState<string | null>(null);
   const [dateSaved, setDateSaved] = useState(false);
@@ -48,6 +55,7 @@ export function CampaignForm({
     setSelectedId(id);
     const store = stores.find((s) => s.id === id);
     setDate(toDateInputValue(store?.campaignStartAtMillis ?? null));
+    setEndDate(toDateInputValue(store?.campaignEndAtMillis ?? null));
     setDateError(null);
     setDateSaved(false);
     setImageError(null);
@@ -56,23 +64,38 @@ export function CampaignForm({
   async function handleDateSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!date || !selected) return;
+    // An empty end date clears it (open-ended). Otherwise it must be on/after
+    // the start — mirror the server's guard so the user gets an inline error.
+    const startAtMillis = new Date(date).getTime();
+    const endAtMillis = endDate ? endDateToMillis(endDate) : null;
+    if (endAtMillis !== null && endAtMillis < startAtMillis) {
+      setDateError(t.saveDateFailed);
+      return;
+    }
     setSavingDate(true);
     setDateError(null);
     setDateSaved(false);
 
     try {
-      const setLeaderboardCampaignStart = httpsCallable<
-        { storeId: string; startAtMillis: number },
-        { success: boolean }
-      >(clientFunctions, "setLeaderboardCampaignStart");
-      const startAtMillis = new Date(date).getTime();
-      await setLeaderboardCampaignStart({ storeId: selected.id, startAtMillis });
+      const res = await fetch("/api/leaderboard/campaign-start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storeId: selected.id, startAtMillis, endAtMillis }),
+      });
+      if (!res.ok) {
+        setDateError(t.saveDateFailed);
+        return;
+      }
       setStores((prev) =>
-        prev.map((s) => (s.id === selected.id ? { ...s, campaignStartAtMillis: startAtMillis } : s)),
+        prev.map((s) =>
+          s.id === selected.id
+            ? { ...s, campaignStartAtMillis: startAtMillis, campaignEndAtMillis: endAtMillis }
+            : s,
+        ),
       );
       setDateSaved(true);
-    } catch (err) {
-      setDateError(err instanceof Error ? err.message : t.saveDateFailed);
+    } catch {
+      setDateError(t.saveDateFailed);
     } finally {
       setSavingDate(false);
     }
@@ -159,21 +182,54 @@ export function CampaignForm({
         {dateError && <p className="text-sm text-red-600">{dateError}</p>}
         {dateSaved && <p className="text-sm text-green-700">{t.dateSaved}</p>}
 
-        <form onSubmit={handleDateSubmit} className="mt-2 flex gap-2">
+        <form onSubmit={handleDateSubmit} className="mt-2 space-y-3">
           <input
             type="date"
             required
             value={date}
+            max={endDate || undefined}
             onChange={(e) => {
               setDate(e.target.value);
               setDateSaved(false);
             }}
-            className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900"
+            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900"
           />
+
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">{t.campaignEndLabel}</h3>
+            <p className="text-sm text-gray-500">{t.campaignEndDesc}</p>
+            <div className="mt-1 flex items-center gap-2">
+              <input
+                type="date"
+                value={endDate}
+                min={date || undefined}
+                onChange={(e) => {
+                  setEndDate(e.target.value);
+                  setDateSaved(false);
+                }}
+                className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900"
+              />
+              {endDate ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEndDate("");
+                    setDateSaved(false);
+                  }}
+                  className="text-sm text-gray-400 underline hover:text-gray-600"
+                >
+                  ✕
+                </button>
+              ) : (
+                <span className="text-xs text-gray-400">{t.campaignNoEnd}</span>
+              )}
+            </div>
+          </div>
+
           <button
             type="submit"
             disabled={savingDate || !date}
-            className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="w-full rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
             {savingDate ? t.savingDate : t.saveDate}
           </button>

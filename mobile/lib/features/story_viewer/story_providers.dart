@@ -1,26 +1,17 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../services/firestore_service.dart';
+import '../../core/api_client.dart';
+import '../feed/feed_providers.dart';
 
-/// That store's stories, oldest first, filtered to non-expired in memory as a
-/// safety net for the up-to-59-minute window before `expireStories` next runs.
-final storeStoriesProvider =
-    StreamProvider.family<
-      List<QueryDocumentSnapshot<Map<String, dynamic>>>,
-      String
-    >((ref, storeId) {
-      return ref
-          .watch(firestoreProvider)
-          .collection('stories')
-          .where('storeId', isEqualTo: storeId)
-          .orderBy('createdAt')
-          .snapshots()
-          .map((snap) {
-            final now = Timestamp.now();
-            return snap.docs.where((doc) {
-              final expiresAt = doc.data()['expiresAt'] as Timestamp?;
-              return expiresAt == null || expiresAt.compareTo(now) > 0;
-            }).toList();
-          });
-    }, isAutoDispose: true);
+/// That store's active stories, oldest first. The server already filters to
+/// non-expired (`expiresAt > now`); the story viewer just needs the ordered
+/// list. Uses PostDoc's JsonDoc wrapper so the viewer keeps reading
+/// `doc.id` / `doc.data()['mediaUrl']` unchanged.
+final storeStoriesProvider = FutureProvider.family<List<PostDoc>, String>((
+  ref,
+  storeId,
+) async {
+  final json = await ref.watch(apiClientProvider).get('/stores/$storeId/stories');
+  final list = (json['stories'] as List<dynamic>? ?? const []);
+  return list.map((e) => PostDoc(e as Map<String, dynamic>)).toList();
+}, isAutoDispose: true);

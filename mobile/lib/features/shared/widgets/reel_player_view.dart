@@ -7,6 +7,8 @@ import 'package:go_router/go_router.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../../core/app_icon.dart';
+import '../../../core/format.dart';
+import '../../../core/interaction_buffer.dart';
 import '../../../core/l10n.dart';
 import '../../../core/media_cache.dart';
 import '../../../core/theme.dart';
@@ -308,8 +310,14 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
     final store = ref.watch(storeSummaryProvider(storeId)).value;
     final likeState = ref.watch(likeStateProvider(widget.postId));
     final isLiked = likeState.isLiked;
-    final isSaved = ref.watch(isSavedProvider(widget.postId)).value ?? false;
+    final isSaved = ref.watch(isSavedProvider(widget.postId));
     final likesCount = likeState.likesCount;
+    final pending =
+        ref.watch(pendingInteractionsProvider(widget.postId)).value ??
+        (views: 0, sent: 0, shares: 0);
+    final sentCount = (widget.post['sentCount'] as int? ?? 0) + pending.sent;
+    final sharesCount = (widget.post['sharesCount'] as int? ?? 0) + pending.shares;
+    final viewsCount = (widget.post['viewsCount'] as int? ?? 0) + pending.views;
     final role = ref.watch(appRoleProvider).value;
     final storeIds = ref.watch(storeIdsProvider).value ?? [];
     final isOwner =
@@ -489,7 +497,7 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
                       _RailAction(
                         iconName: isLiked ? 'heart_filled' : 'heart',
                         color: isLiked ? AppColors.error : Colors.white,
-                        label: likesCount > 0 ? '$likesCount' : null,
+                        label: likesCount > 0 ? formatCount(likesCount) : null,
                         onTap: () => ref
                             .read(likeStateProvider(widget.postId).notifier)
                             .toggle(),
@@ -498,9 +506,7 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
                       _RailAction(
                         iconName: 'send',
                         color: Colors.white,
-                        label: (widget.post['sentCount'] as int? ?? 0) > 0
-                            ? '${widget.post['sentCount']}'
-                            : null,
+                        label: sentCount > 0 ? formatCount(sentCount) : null,
                         onTap: () => showSendToChatSheet(
                           context,
                           ref,
@@ -522,9 +528,7 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
                       _RailAction(
                         iconName: 'arrow_share',
                         color: Colors.white,
-                        label: (widget.post['sharesCount'] as int? ?? 0) > 0
-                            ? '${widget.post['sharesCount']}'
-                            : null,
+                        label: sharesCount > 0 ? formatCount(sharesCount) : null,
                         onTap: () =>
                             shareAndNotify(context, ref, widget.postId),
                       ),
@@ -532,9 +536,7 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
                       _RailAction(
                         icon: Icons.visibility_outlined,
                         color: Colors.white,
-                        label: (widget.post['viewsCount'] as int? ?? 0) > 0
-                            ? '${widget.post['viewsCount']}'
-                            : null,
+                        label: viewsCount > 0 ? formatCount(viewsCount) : null,
                       ),
                     ],
                   ),

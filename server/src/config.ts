@@ -11,6 +11,13 @@ const schema = z.object({
   ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
 
+  // Per-IP request cap (backstop against a single runaway/abusive client).
+  // Kept generous by default because Turkmen carrier NAT can put many real
+  // users behind one IP — precise per-user throttling lives at the auth layer
+  // (per-phone OTP limits). Auth endpoints get a tighter cap (below).
+  RATE_LIMIT_MAX_PER_MIN: z.coerce.number().int().positive().default(3000),
+  RATE_LIMIT_AUTH_MAX_PER_MIN: z.coerce.number().int().positive().default(60),
+
   SMS_GATEWAY_URL: z.string().default(""),
   SMS_GATEWAY_USER: z.string().default(""),
   SMS_GATEWAY_PASSWORD: z.string().default(""),
@@ -27,11 +34,25 @@ const schema = z.object({
   GOOGLE_APPLICATION_CREDENTIALS: z.string().default(""),
   FIREBASE_PROJECT_ID: z.string().default(""),
 
-  MEDIA_ENDPOINT: z.string().default(""),
-  MEDIA_PUBLIC_BASE_URL: z.string().default(""),
-  MEDIA_BUCKET: z.string().default("semay"),
-  MEDIA_ACCESS_KEY: z.string().default(""),
-  MEDIA_SECRET_KEY: z.string().default(""),
+  // Local public media folder (replaces MinIO). MEDIA_DIR is where files are
+  // written on disk; MEDIA_PUBLIC_BASE_URL is where they're served from (the API
+  // serves /media itself, so this is normally <api-origin>/media).
+  MEDIA_DIR: z.string().default("./media"),
+  MEDIA_PUBLIC_BASE_URL: z.string().default("http://localhost:8080/media"),
+}).superRefine((cfg, ctx) => {
+  // In production (OTP_DEV_MODE=false) real SMS must be deliverable — otherwise
+  // every login silently 502s. Fail at boot instead, with a clear message.
+  if (!cfg.OTP_DEV_MODE) {
+    for (const key of ["SMS_GATEWAY_URL", "SMS_GATEWAY_USER", "SMS_GATEWAY_PASSWORD"] as const) {
+      if (!cfg[key]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is required when OTP_DEV_MODE=false (real SMS sending)`,
+        });
+      }
+    }
+  }
 });
 
 const parsed = schema.safeParse(process.env);

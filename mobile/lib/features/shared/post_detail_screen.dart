@@ -8,6 +8,8 @@ import 'package:go_router/go_router.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
 import '../../core/app_icon.dart';
+import '../../core/format.dart';
+import '../../core/interaction_buffer.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
@@ -240,8 +242,14 @@ class _ImagePostDetailContentState
     final caption = post['caption'] as String? ?? '';
     final likeState = ref.watch(likeStateProvider(postId));
     final isLiked = likeState.isLiked;
-    final isSaved = ref.watch(isSavedProvider(postId)).value ?? false;
+    final isSaved = ref.watch(isSavedProvider(postId));
     final likesCount = likeState.likesCount;
+    final pending =
+        ref.watch(pendingInteractionsProvider(postId)).value ??
+        (views: 0, sent: 0, shares: 0);
+    final sentCount = (post['sentCount'] as int? ?? 0) + pending.sent;
+    final sharesCount = (post['sharesCount'] as int? ?? 0) + pending.shares;
+    final viewsCount = (post['viewsCount'] as int? ?? 0) + pending.views;
     final storeId = post['storeId'] as String? ?? '';
 
     final role = ref.watch(appRoleProvider).value;
@@ -324,7 +332,7 @@ class _ImagePostDetailContentState
               onPressed: () =>
                   ref.read(likeStateProvider(postId).notifier).toggle(),
             ),
-            Text('$likesCount'),
+            Text(formatCount(likesCount)),
             IconButton(
               icon: const AppIcon('send'),
               onPressed: () => showSendToChatSheet(
@@ -336,12 +344,12 @@ class _ImagePostDetailContentState
                 postMediaUrl: mediaUrls.isNotEmpty ? mediaUrls.first : '',
               ),
             ),
-            Text('${post['sentCount'] as int? ?? 0}'),
+            Text(formatCount(sentCount)),
             IconButton(
               icon: const AppIcon('arrow_share'),
               onPressed: () => shareAndNotify(context, ref, postId),
             ),
-            Text('${post['sharesCount'] as int? ?? 0}'),
+            Text(formatCount(sharesCount)),
             const SizedBox(width: 8),
             Icon(
               Icons.visibility_outlined,
@@ -350,7 +358,7 @@ class _ImagePostDetailContentState
             ),
             const SizedBox(width: 2),
             Text(
-              '${post['viewsCount'] as int? ?? 0}',
+              formatCount(viewsCount),
               style: AppTypography.bodySmall.copyWith(
                 color: AppColors.textMuted,
               ),

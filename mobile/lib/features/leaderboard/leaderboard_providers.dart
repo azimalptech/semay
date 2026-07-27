@@ -1,7 +1,7 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../services/firestore_service.dart';
+import '../../core/api_client.dart';
+import '../../core/json_ext.dart';
 
 class StoreTab {
   const StoreTab({
@@ -15,53 +15,39 @@ class StoreTab {
   final int order;
   // null when this store hasn't had a 3x2 banner uploaded from the Super
   // Admin panel — the screen collapses the space entirely rather than
-  // showing a placeholder. Each store's own campaign banner, not a shared
-  // global one (see docs/02_DATA_MODEL.md's stores/{storeId}.campaignImageUrl).
+  // showing a placeholder.
   final String? campaignImageUrl;
 }
 
-/// Shop tabs across the top of the leaderboard — every active store, so the
-/// list matches whatever's actually visible to browse/order from elsewhere
-/// in the app. Sorted in memory by leaderboardOrder (superadmin-controlled,
-/// see docs/02_DATA_MODEL.md) rather than a Firestore orderBy — older stores
-/// predate that field, and orderBy would silently drop any doc missing it
-/// from the results instead of just sorting it last.
-final leaderboardStoresProvider = StreamProvider<List<StoreTab>>((ref) {
-  return ref
-      .watch(firestoreProvider)
-      .collection('stores')
-      .where('active', isEqualTo: true)
-      .snapshots()
-      .map((snap) {
-        final tabs = [
-          for (final doc in snap.docs)
-            StoreTab(
-              storeId: doc.id,
-              name: doc.data()['name'] as String? ?? '',
-              order: doc.data()['leaderboardOrder'] as int? ?? 1 << 30,
-              campaignImageUrl: doc.data()['campaignImageUrl'] as String?,
-            ),
-        ];
-        tabs.sort((a, b) {
-          final byOrder = a.order.compareTo(b.order);
-          return byOrder != 0 ? byOrder : a.name.compareTo(b.name);
-        });
-        return tabs;
-      });
+/// Shop tabs across the top of the leaderboard — every active store, sorted by
+/// leaderboardOrder (superadmin-controlled). REST + pull-to-refresh; no
+/// realtime channel (leaderboard changes are infrequent).
+final leaderboardStoresProvider = FutureProvider<List<StoreTab>>((ref) async {
+  final json = await ref.watch(apiClientProvider).get('/stores');
+  final stores = (json['stores'] as List<dynamic>? ?? const []);
+  final tabs = [
+    for (final s in stores)
+      StoreTab(
+        storeId: (s as Map<String, dynamic>)['id'] as String,
+        name: s['name'] as String? ?? '',
+        order: s['leaderboardOrder'] as int? ?? 1 << 30,
+        campaignImageUrl: s['campaignImageUrl'] as String?,
+      ),
+  ];
+  tabs.sort((a, b) {
+    final byOrder = a.order.compareTo(b.order);
+    return byOrder != 0 ? byOrder : a.name.compareTo(b.name);
+  });
+  return tabs;
 });
 
+/// A store's top-20 leaderboard entries (by order quantity). Server-computed
+/// aggregate (store_leaderboard table); one-shot fetch with pull-to-refresh.
 final leaderboardEntriesProvider =
-    StreamProvider.family<
-      List<QueryDocumentSnapshot<Map<String, dynamic>>>,
-      String
-    >((ref, storeId) {
-      return ref
-          .watch(firestoreProvider)
-          .collection('stores')
-          .doc(storeId)
-          .collection('leaderboard')
-          .orderBy('quantity', descending: true)
-          .limit(20)
-          .snapshots()
-          .map((snap) => snap.docs);
+    FutureProvider.family<List<JsonDoc>, String>((ref, storeId) async {
+      final json = await ref
+          .watch(apiClientProvider)
+          .get('/stores/$storeId/leaderboard');
+      final entries = (json['entries'] as List<dynamic>? ?? const []);
+      return entries.map((e) => JsonDoc(e as Map<String, dynamic>)).toList();
     }, isAutoDispose: true);
