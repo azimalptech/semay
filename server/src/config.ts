@@ -34,11 +34,28 @@ const schema = z.object({
   GOOGLE_APPLICATION_CREDENTIALS: z.string().default(""),
   FIREBASE_PROJECT_ID: z.string().default(""),
 
+  // Cross-process pub-sub for the realtime gateway. Unset = in-process only,
+  // which is correct for a single API process. REQUIRED as soon as more than one
+  // process/instance serves traffic: without it a message published on one
+  // process never reaches WebSocket subscribers on another, so users would
+  // silently miss realtime updates. See realtime/bus.ts.
+  REDIS_URL: z.string().default(""),
+
+  // Worker processes in cluster mode (npm run start:cluster). 0 = one per CPU
+  // core. Ignored by the single-process entry point.
+  CLUSTER_WORKERS: z.coerce.number().int().nonnegative().default(0),
+
   // Local public media folder (replaces MinIO). MEDIA_DIR is where files are
   // written on disk; MEDIA_PUBLIC_BASE_URL is where they're served from (the API
   // serves /media itself, so this is normally <api-origin>/media).
   MEDIA_DIR: z.string().default("./media"),
   MEDIA_PUBLIC_BASE_URL: z.string().default("http://localhost:8080/media"),
+
+  // Request/error logs are written as newline-delimited JSON to
+  // LOG_DIR/app.<n>.log, rotated daily and pruned to LOG_RETENTION_DAYS files.
+  LOG_DIR: z.string().default("./logs"),
+  LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
+  LOG_RETENTION_DAYS: z.coerce.number().int().positive().default(14),
 }).superRefine((cfg, ctx) => {
   // In production (OTP_DEV_MODE=false) real SMS must be deliverable — otherwise
   // every login silently 502s. Fail at boot instead, with a clear message.

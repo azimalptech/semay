@@ -12,17 +12,19 @@ import '../core/api_client.dart';
 import '../core/firebase_options.dart';
 import '../core/theme.dart';
 
-// firebase_options.dart is still a demo/placeholder project (see its
-// REPLACE_ME values) — there is no real VAPID key to fetch a working web
-// token against yet. This mirrors that same placeholder convention.
-const _webVapidKey = 'REPLACE_ME_VAPID_KEY';
+// Web push needs a VAPID key, which is per-project and can't be derived from
+// firebase_options.dart. Web is not a shipping target (the product is Android +
+// iOS), so rather than calling getToken with a placeholder that always throws,
+// registration is skipped on web unless a real key is supplied at build time:
+//   flutter build web --dart-define=FCM_VAPID_KEY=...
+const _webVapidKey = String.fromEnvironment('FCM_VAPID_KEY');
 
 final messagingProvider = Provider<FirebaseMessaging>(
   (ref) => FirebaseMessaging.instance,
 );
 
-// Mirrors users/{uid}.activeChatId (see ChatService.setActiveChat) in plain
-// synchronous memory — a Firestore round-trip is too slow for "should the
+// Mirrors users.activeChatId (see ChatService.setActiveChat) in plain
+// synchronous memory — an API round-trip is too slow for "should the
 // foreground banner about to show right now be suppressed", and this needs
 // to be readable from main.dart's foreground handler, which runs outside
 // any BuildContext/ProviderScope. Same "simple global mutable flag, not
@@ -46,9 +48,9 @@ final rootNavigatorKey = GlobalKey<NavigatorState>();
 // foreground FCM delivery never shows anything automatically, so this is
 // what stands in for it. Skipped entirely when the recipient is already
 // looking straight at this exact chat (both a local synchronous check here
-// and the server's own activeChatId-filtered send in onMessageCreated.ts —
-// belt and suspenders, since the local check catches anything that could
-// race the server's Firestore read).
+// and the server's own activeChatId-filtered send in server/src/chats/
+// service.ts's sendChatPush — belt and suspenders, since the local check
+// catches anything that could race the server's read of that flag).
 Future<void> showForegroundMessageBanner(RemoteMessage message) async {
   debugPrint(
     'showForegroundMessageBanner: fired data=${message.data} '
@@ -247,7 +249,7 @@ class _ForegroundBannerState extends State<_ForegroundBanner>
 // Marks the message the push refers to as "delivered" — the double-gray-
 // check state (see chat_thread_screen.dart's _MessageBubble), meaning the
 // recipient's device actually received it, independent of whether they ever
-// open the thread. onMessageCreated (backend) attaches chatId/messageId as
+// open the thread. The server's sendChatPush attaches chatId/messageId as
 // the FCM data payload specifically so this has something to write to;
 // notification-only fields (title/body) carry nothing identifying which
 // message this was.
@@ -310,6 +312,9 @@ class NotificationService {
   /// docs/07_MIGRATION.md Phase 7). Called from SeMayApp once auth resolves.
   Future<void> initAndSyncToken() async {
     try {
+      // Web without a configured VAPID key can't produce a usable token — bail
+      // rather than throwing on every launch (see _webVapidKey).
+      if (kIsWeb && _webVapidKey.isEmpty) return;
       await _messaging.requestPermission();
       final token = kIsWeb
           ? await _messaging.getToken(vapidKey: _webVapidKey)

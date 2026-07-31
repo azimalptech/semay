@@ -1,10 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { requireAuth } from "../auth/middleware.js";
+import { requireAuth, requireFreshAuth } from "../auth/middleware.js";
 import { prisma } from "../db.js";
 import { annotateWithUserFlags } from "../posts/service.js";
-import { registerFcmToken } from "./service.js";
+import { AccountDeletionBlockedError, deleteAccount, registerFcmToken } from "./service.js";
 
 const updateMeSchema = z.object({
   name: z.string().max(120).optional(),
@@ -85,6 +85,25 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       data: body.data,
     });
     return reply.send({ user: toProfile(user) });
+  });
+
+  // Self-service account deletion (App Store / Play Store both require it).
+  // requireFreshAuth so a token minted before the caller was granted store-admin
+  // can't be replayed to slip past the store-owner check inside deleteAccount.
+  app.delete("/users/me", { preHandler: [requireAuth, requireFreshAuth] }, async (req, reply) => {
+    try {
+      await deleteAccount(req.auth!.sub);
+    } catch (err) {
+      if (err instanceof AccountDeletionBlockedError) {
+        return reply.code(409).send({ error: "STORE_OWNER_CANNOT_DELETE" });
+      }
+      // No branch for AccountAlreadyDeletedError: a tombstone can never produce
+      // valid claims again (auth/claims.ts), so requireFreshAuth rejects a
+      // replayed delete with 401 ACCOUNT_DELETED before reaching this call. The
+      // service keeps that guard for direct/programmatic callers.
+      throw err;
+    }
+    return reply.send({ ok: true });
   });
 
   // UNIQUE(token) + upsert-on-conflict — reinstall/relogin on the same device

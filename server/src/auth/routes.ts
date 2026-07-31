@@ -17,6 +17,7 @@ import {
 } from "./otpStore.js";
 import { smsProvider } from "./sms.js";
 import { createSession, findActiveSession, revokeSession, rotateSession, SessionInvalidError } from "./session.js";
+import { verifyPassword } from "./superadminAuth.js";
 import { findOrCreateUserByPhone } from "./users.js";
 
 const phoneSchema = z.string().regex(/^\+?[1-9]\d{6,14}$/, "Invalid phone number");
@@ -30,9 +31,33 @@ const verifySchema = z.object({
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
 const logoutSchema = z.object({ refreshToken: z.string().min(1) });
 const changePhoneSchema = z.object({ phone: phoneSchema, code: z.string().regex(/^\d{6}$/) });
+const superadminLoginSchema = z.object({
+  phone: phoneSchema,
+  password: z.string().min(1).max(255),
+  deviceInfo: z.string().max(255).optional(),
+});
+
+// Tighter per-IP cap for the unauthenticated auth surface. The global limit is
+// deliberately generous (carrier NAT puts many real users behind one IP), but
+// that generosity is wrong here: the per-phone cooldown/lockout in otpStore only
+// bounds abuse of a SINGLE number, so one IP could still pump OTP SMS to
+// thousands of DIFFERENT numbers — real money out of the SMS gateway, and a
+// phone-number enumeration oracle. RATE_LIMIT_AUTH_MAX_PER_MIN existed in the
+// config and .env.example for exactly this and was never actually wired up.
+//
+// Skipped under test, matching app.ts (the global limiter isn't registered there,
+// and route-level config would have nothing to attach to).
+const authRateLimit =
+  process.env.NODE_ENV === "test"
+    ? {}
+    : {
+        config: {
+          rateLimit: { max: config.RATE_LIMIT_AUTH_MAX_PER_MIN, timeWindow: "1 minute" },
+        },
+      };
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
-  app.post("/auth/otp/send", async (req, reply) => {
+  app.post("/auth/otp/send", authRateLimit, async (req, reply) => {
     const body = sendSchema.safeParse(req.body);
     if (!body.success) {
       return reply.code(400).send({ error: "INVALID_PHONE" });
@@ -70,7 +95,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.post("/auth/otp/verify", async (req, reply) => {
+  app.post("/auth/otp/verify", authRateLimit, async (req, reply) => {
     const body = verifySchema.safeParse(req.body);
     if (!body.success) {
       return reply.code(400).send({ error: "INVALID_INPUT" });
@@ -113,7 +138,48 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  app.post("/auth/refresh", async (req, reply) => {
+  // Password login for the Super Admin web panel only — see superadminAuth.ts
+  // for why this exists alongside (not instead of) the OTP flow above, which
+  // every other account still uses. Rate-limited the same as the OTP routes:
+  // this is now the one password-guessable surface in the system, and it
+  // guards the single most privileged role, so it needs it more, not less.
+  app.post("/auth/superadmin/login", authRateLimit, async (req, reply) => {
+    const body = superadminLoginSchema.safeParse(req.body);
+    if (!body.success) {
+      return reply.code(400).send({ error: "INVALID_INPUT" });
+    }
+    const { phone, password, deviceInfo } = body.data;
+
+    // Generic failure for every rejection reason (unknown phone, wrong
+    // password, a real account that just isn't superadmin, no password set
+    // yet) — a differentiated error would let an attacker enumerate which
+    // phone numbers exist or hold the superadmin role.
+    const user = await prisma.user.findUnique({ where: { phone } });
+    const passwordOk = await verifyPassword(password, user?.passwordHash ?? null);
+    if (!user || user.role !== "superadmin" || !passwordOk) {
+      return reply.code(401).send({ error: "INVALID_CREDENTIALS" });
+    }
+
+    const claims = await getClaimsForUser(user.id);
+    const accessToken = signAccessToken(claims);
+    const { refreshToken } = await createSession(user.id, deviceInfo);
+
+    return reply.send({
+      accessToken,
+      refreshToken,
+      user: {
+        id: user.id,
+        phone: user.phone,
+        name: user.name,
+        avatarUrl: user.avatarUrl,
+        role: user.role,
+        language: user.language,
+        darkMode: user.darkMode,
+      },
+    });
+  });
+
+  app.post("/auth/refresh", authRateLimit, async (req, reply) => {
     const body = refreshSchema.safeParse(req.body);
     if (!body.success) {
       return reply.code(400).send({ error: "INVALID_INPUT" });

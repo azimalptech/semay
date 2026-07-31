@@ -5,7 +5,9 @@ import websocketPlugin from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { config } from "./config.js";
-import { prisma } from "./db.js";
+import { isDbReady } from "./db.js";
+import { registerErrorHandler } from "./lib/errors.js";
+import { logTargets } from "./lib/logging.js";
 import { ensureMediaDir, MEDIA_DIR } from "./media/storage.js";
 import { authRoutes } from "./auth/routes.js";
 import { userRoutes } from "./users/routes.js";
@@ -28,20 +30,24 @@ export async function buildApp(): Promise<FastifyInstance> {
     // real client IP (correct logs + per-client rate limiting), not the proxy's.
     trustProxy: true,
     logger: {
-      level: process.env.NODE_ENV === "test" ? "silent" : "info",
-      transport:
-        process.env.NODE_ENV === "production" || process.env.NODE_ENV === "test"
-          ? undefined
-          : { target: "pino-pretty" },
+      level: process.env.NODE_ENV === "test" ? "silent" : config.LOG_LEVEL,
+      transport: process.env.NODE_ENV === "test" ? undefined : { targets: logTargets() },
     },
   });
 
-  // Liveness/readiness — registered BEFORE the rate limiter so proxy health
-  // probes (which can be frequent) are never throttled. Also the first thing to
-  // hit once the DB is provisioned, to confirm the API can reach MySQL.
-  app.get("/health", async () => {
-    await prisma.$queryRaw`SELECT 1`;
-    return { ok: true, ts: new Date().toISOString() };
+  registerErrorHandler(app);
+
+  // Liveness — registered BEFORE the rate limiter so proxy health probes (which
+  // can be frequent) are never throttled. Deliberately does NOT touch the DB:
+  // this endpoint is public and unthrottled, so a DB round-trip here would let
+  // anyone drain the Prisma connection pool by hammering it.
+  app.get("/health", async () => ({ ok: true, ts: new Date().toISOString() }));
+
+  // Readiness — the DB check, kept separate and behind the rate limiter below.
+  // Result is cached briefly so a burst of probes collapses into one query.
+  app.get("/health/ready", async (_req, reply) => {
+    const ready = await isDbReady();
+    return reply.code(ready ? 200 : 503).send({ ok: ready });
   });
 
   // Security headers on every response (safe defaults for a JSON API).
@@ -67,7 +73,25 @@ export async function buildApp(): Promise<FastifyInstance> {
   // performance — the API serving it is fine for dev and modest load.
   // Created here (before the static mount, which requires the dir to exist).
   await ensureMediaDir();
-  await app.register(fastifyStatic, { root: MEDIA_DIR, prefix: "/media/", index: false });
+  await app.register(fastifyStatic, {
+    root: MEDIA_DIR,
+    prefix: "/media/",
+    index: false,
+    // Defense in depth behind media/routes.ts's extension allowlist. These files
+    // are user-supplied bytes served from the API's own origin, so if anything
+    // ever did land here with an active content type, these headers stop it
+    // executing: no MIME sniffing, and a CSP that forbids scripts entirely.
+    // Receives a FastifyReply, so use .header() — NOT the raw response's
+    // .setHeader(), which does not exist here and throws inside the send stream,
+    // crashing the process on the very first media request.
+    setHeaders(res) {
+      res.header("X-Content-Type-Options", "nosniff");
+      res.header("Content-Security-Policy", "default-src 'none'; sandbox");
+      // Immutable: keys are content-addressed by UUID and never rewritten, so a
+      // long cache is safe and keeps media serving off the app entirely.
+      res.header("Cache-Control", "public, max-age=31536000, immutable");
+    },
+  });
 
   await app.register(websocketPlugin);
 

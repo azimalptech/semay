@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionClaims } from "@/lib/session";
-import { getAccessToken } from "@/lib/accessToken";
-import { ApiError, callApi } from "@/lib/apiClient";
+import { ApiError, callAuthedApi } from "@/lib/apiClient";
 
 // proxy.ts gates /api/stores/:path* optimistically — this is the secure
 // re-check (fresh DB read) before forwarding to the real API, which does its
@@ -13,11 +12,7 @@ export async function POST(request: Request) {
 
   const body = await request.json();
   try {
-    const result = await callApi("/stores", {
-      method: "POST",
-      body,
-      accessToken: await getAccessToken(),
-    });
+    const result = await callAuthedApi("/stores", { method: "POST", body });
     return NextResponse.json(result, { status: 201 });
   } catch (err) {
     if (err instanceof ApiError) return NextResponse.json(err.body, { status: err.status });

@@ -59,11 +59,13 @@ dependencies:
   uuid: ^4.6.0
   connectivity_plus: ^7.3.1
 
-# firebase_auth 6.5.5 / cloud_firestore 6.7.0 / cloud_functions 6.3.4 declare
-# firebase_core_platform_interface ^7.1.0 but their compiled code actually
-# needs the `FirebasePlugin` API that only exists from 8.0.0 onward (7.1.0
-# only has `FirebasePluginPlatform`) — a broken constraint in those releases.
-# Force 8.0.0 until upstream ships a fixed patch.
+# firebase_messaging 16.4.2 declares firebase_core_platform_interface ^7.1.0, but
+# its compiled code extends `FirebasePlugin`, which only exists from 8.0.0 onward
+# (7.1.0 has only `FirebasePluginPlatform`). That is a broken constraint in the
+# published package, so the override is load-bearing: without it `pub get`
+# resolves happily and then the Dart build fails with "Type 'FirebasePlugin' not
+# found". Remove only after upstream ships a fixed constraint AND an Android build
+# actually succeeds without it — `flutter pub get` passing proves nothing here.
 dependency_overrides:
   firebase_core_platform_interface: ^8.0.0
 

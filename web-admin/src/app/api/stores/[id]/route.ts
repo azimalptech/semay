@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionClaims } from "@/lib/session";
-import { getAccessToken } from "@/lib/accessToken";
-import { ApiError, callApi } from "@/lib/apiClient";
+import { ApiError, callAuthedApi } from "@/lib/apiClient";
 
 export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const claims = await getSessionClaims();
@@ -9,10 +8,7 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
 
   const { id } = await params;
   try {
-    const result = await callApi(`/stores/${id}`, {
-      method: "DELETE",
-      accessToken: await getAccessToken(),
-    });
+    const result = await callAuthedApi(`/stores/${id}`, { method: "DELETE" });
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof ApiError) return NextResponse.json(err.body, { status: err.status });

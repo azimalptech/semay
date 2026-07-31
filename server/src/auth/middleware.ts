@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 
 import { verifyAccessToken, type AccessTokenPayload } from "../lib/jwt.js";
 import { getClaimsForUser } from "./claims.js";
+import { isUserTokenRevoked } from "./revocation.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -25,11 +26,18 @@ export async function requireAuth(
   if (!token) {
     return reply.code(401).send({ error: "UNAUTHENTICATED" });
   }
+  let payload: AccessTokenPayload;
   try {
-    req.auth = verifyAccessToken(token);
+    payload = verifyAccessToken(token);
   } catch {
     return reply.code(401).send({ error: "UNAUTHENTICATED" });
   }
+  // A deleted account's outstanding access token must stop working immediately,
+  // not at its natural expiry — see revocation.ts.
+  if (isUserTokenRevoked(payload.sub)) {
+    return reply.code(401).send({ error: "UNAUTHENTICATED" });
+  }
+  req.auth = payload;
 }
 
 /** Slow path: re-derives claims from the DB and compares claims_version against

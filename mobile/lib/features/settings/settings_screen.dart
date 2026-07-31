@@ -155,6 +155,18 @@ class SettingsScreen extends ConsumerWidget {
               ),
             ),
           ),
+          // Self-service account deletion is an App Store / Play Store
+          // requirement for any app with accounts, not just a nicety.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: TextButton(
+              onPressed: () => _confirmDeleteAccount(context, ref),
+              child: Text(
+                s.deleteAccount,
+                style: const TextStyle(color: AppColors.error),
+              ),
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.all(16),
             child: Center(
@@ -286,6 +298,45 @@ Future<void> _confirmLogout(BuildContext context, WidgetRef ref) async {
   );
   if (confirmed == true) {
     await ref.read(authServiceProvider).signOut();
+  }
+}
+
+Future<void> _confirmDeleteAccount(BuildContext context, WidgetRef ref) async {
+  final s = ref.read(l10nProvider);
+  // Resolved before the dialog's await — afterwards this screen may already be
+  // gone (deletion clears the session, which redirects the router), and reading
+  // an unmounted BuildContext then would throw.
+  final messenger = ScaffoldMessenger.of(context);
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(s.deleteAccount),
+      content: Text(s.deleteAccountConfirm),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: Text(s.cancel),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: AppColors.error),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: Text(s.deleteAccountConfirmAction),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+
+  try {
+    await ref.read(authServiceProvider).deleteAccount();
+    // On success the router redirects to login via the cleared session — no
+    // snackbar, since this screen is already gone.
+  } on AccountDeletionBlockedException {
+    messenger.showSnackBar(
+      SnackBar(content: Text(s.deleteAccountStoreOwner)),
+    );
+  } catch (_) {
+    messenger.showSnackBar(SnackBar(content: Text(s.deleteAccountFailed)));
   }
 }
 

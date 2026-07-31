@@ -7,17 +7,10 @@ export interface Dict {
   dashboard: string;
   stores: string;
   logOut: string;
-  sendCode: string;
-  sendingCode: string;
-  otpSendFailed: string;
-  codeLabel: string;
-  codeSentPrefix: string;
-  devCodeHint: string;
-  changeNumber: string;
-  verifyCode: string;
-  verifying: string;
-  invalidCode: string;
-  notAuthorized: string;
+  password: string;
+  logIn: string;
+  loggingIn: string;
+  invalidCredentials: string;
   ordersReport: string;
   ordersReportDesc: (days: number) => string;
   day: string;
@@ -155,17 +148,10 @@ const dict: Record<Lang, Dict> = {
     dashboard: "Hasabat",
     stores: "Dükanlar",
     logOut: "Çykmak",
-    sendCode: "Kod iber",
-    sendingCode: "Iberilýär...",
-    otpSendFailed: "Kod iberip bolmady.",
-    codeLabel: "SMS kody",
-    codeSentPrefix: "Koda iberildi:",
-    devCodeHint: "Dev kody (diňe synag):",
-    changeNumber: "Belgini üýtget",
-    verifyCode: "Tassykla",
-    verifying: "Barlanýar...",
-    invalidCode: "Kod nädogry.",
-    notAuthorized: "Rugsat berilmedi — bu hasap Super Admin däl.",
+    password: "Açar söz",
+    logIn: "Gir",
+    loggingIn: "Girilýär...",
+    invalidCredentials: "Telefon belgisi ýa-da açar söz nädogry.",
     ordersReport: "Sargytlar hasabaty",
     ordersReportDesc: (days: number) =>
       `Diňe okamak üçin. Soňky ${days} günüň sargyt edilen haryt sany. Her sargyt hasaba alynýar — status ýa-da tassyklama ýok.`,
@@ -281,17 +267,10 @@ const dict: Record<Lang, Dict> = {
     dashboard: "Отчёт",
     stores: "Магазины",
     logOut: "Выйти",
-    sendCode: "Отправить код",
-    sendingCode: "Отправка...",
-    otpSendFailed: "Не удалось отправить код.",
-    codeLabel: "SMS-код",
-    codeSentPrefix: "Код отправлен на:",
-    devCodeHint: "Dev-код (только тест):",
-    changeNumber: "Изменить номер",
-    verifyCode: "Подтвердить",
-    verifying: "Проверка...",
-    invalidCode: "Неверный код.",
-    notAuthorized: "Доступ запрещён — этот аккаунт не Супер Админ.",
+    password: "Пароль",
+    logIn: "Войти",
+    loggingIn: "Вход...",
+    invalidCredentials: "Неверный номер телефона или пароль.",
     ordersReport: "Отчёт по заказам",
     ordersReportDesc: (days: number) =>
       `Только для чтения. Общее количество заказанных товаров за последние ${days} дней. Учитывается каждый заказ — статуса или подтверждения нет.`,

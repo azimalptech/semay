@@ -3,14 +3,8 @@ import type { WebSocket } from "ws";
 
 import { prisma } from "../db.js";
 import { verifyAccessToken } from "../lib/jwt.js";
-import { findChannelHandler } from "./channels.js";
+import { findChannelHandler, type ChannelAuthCtx } from "./channels.js";
 import { subscribe, type RealtimeEvent } from "./bus.js";
-
-// How often an open connection's cached claims_version is re-checked against
-// the DB — a demoted/revoked user's socket gets force-closed instead of
-// riding out the connection indefinitely (mirrors requireFreshAuth's HTTP
-// check, but sockets have no natural "next request" to piggyback on).
-const CLAIMS_RECHECK_MS = 30_000;
 
 interface ClientMessage {
   type?: "subscribe" | "unsubscribe";
@@ -32,11 +26,8 @@ export async function realtimeGateway(app: FastifyInstance): Promise<void> {
     }
 
     let userId: string;
-    let claimsVersion: number;
     try {
-      const payload = verifyAccessToken(token);
-      userId = payload.sub;
-      claimsVersion = payload.claimsVersion;
+      userId = verifyAccessToken(token).sub;
     } catch {
       socket.close(4401, "UNAUTHENTICATED");
       return;
@@ -44,18 +35,58 @@ export async function realtimeGateway(app: FastifyInstance): Promise<void> {
 
     const unsubscribers = new Map<string, () => void>();
 
-    const recheck = setInterval(() => {
-      prisma.user
-        .findUnique({ where: { id: userId }, select: { claimsVersion: true } })
-        .then((u) => {
-          if (!u || u.claimsVersion !== claimsVersion) {
-            socket.close(4401, "CLAIMS_STALE");
-          }
-        })
-        .catch(() => {
-          /* transient DB hiccup — re-checked on the next tick */
-        });
-    }, CLAIMS_RECHECK_MS);
+    // Claims invalidation is event-driven, not polled. The previous version ran
+    // one DB query per connection every 30s; at 20k concurrent sockets that is
+    // ~660 queries/sec of pure overhead, scaling linearly with connection count
+    // and doing nothing almost every time. bumpClaimsVersion now publishes on
+    // this channel instead, so a demotion closes the socket in milliseconds
+    // rather than up to 30s later, at zero steady-state cost.
+    let claimsUnsub: (() => void) | undefined;
+    void subscribe(`user:${userId}:claims`, () => {
+      socket.close(4401, "CLAIMS_STALE");
+    }).then((unsub) => {
+      claimsUnsub = unsub;
+      // The socket may already have closed while the subscribe was in flight.
+      if (socket.readyState !== socket.OPEN) unsub();
+    });
+
+    // Authorization still re-reads role/storeIds from the DB rather than trusting
+    // the token's snapshot — a demoted admin must not be able to subscribe to a
+    // store's chats mid-session. But an app launch subscribes to many channels at
+    // once (chat list, each open thread, visible posts), and doing two queries per
+    // channel turned one launch into ~20 queries. Cached for a few seconds so a
+    // burst collapses into a single lookup, which is still far fresher than the
+    // 15-minute access token it replaces.
+    const AUTH_CTX_TTL_MS = 5_000;
+    let cachedCtx: { at: number; ctx: ChannelAuthCtx } | undefined;
+    let ctxInFlight: Promise<ChannelAuthCtx | undefined> | undefined;
+
+    async function authContext(): Promise<ChannelAuthCtx | undefined> {
+      const now = Date.now();
+      if (cachedCtx && now - cachedCtx.at < AUTH_CTX_TTL_MS) return cachedCtx.ctx;
+      ctxInFlight ??= (async () => {
+        try {
+          const [user, storeAdminRows] = await Promise.all([
+            prisma.user.findUnique({
+              where: { id: userId },
+              select: { role: true, deletedAt: true },
+            }),
+            prisma.storeAdmin.findMany({ where: { userId }, select: { storeId: true } }),
+          ]);
+          if (!user || user.deletedAt) return undefined;
+          const ctx: ChannelAuthCtx = {
+            userId,
+            role: user.role,
+            storeIds: storeAdminRows.map((r) => r.storeId),
+          };
+          cachedCtx = { at: Date.now(), ctx };
+          return ctx;
+        } finally {
+          ctxInFlight = undefined;
+        }
+      })();
+      return ctxInFlight;
+    }
 
     socket.on("message", (raw: Buffer) => {
       let msg: ClientMessage;
@@ -76,36 +107,48 @@ export async function realtimeGateway(app: FastifyInstance): Promise<void> {
           return;
         }
 
-        // Re-fetch role/storeIds from the DB per subscribe rather than trusting
-        // the connection's cached claimsVersion snapshot — cheap, and this is
-        // exactly the kind of check that must not be allowed to go stale for
-        // an entire connection's lifetime (a demoted admin subscribing to a
-        // store's chats mid-session, say).
-        prisma.user
-          .findUnique({ where: { id: userId }, select: { role: true } })
-          .then(async (u) => {
-            if (!u) return;
-            const storeAdminRows = await prisma.storeAdmin.findMany({
-              where: { userId },
-              select: { storeId: true },
-            });
-            const ctx = { userId, role: u.role, storeIds: storeAdminRows.map((r) => r.storeId) };
+        // Mark the channel as claimed synchronously, before the awaits below.
+        // A client that sends two subscribe frames for the same channel back to
+        // back would otherwise pass the has() check twice and register two
+        // listeners, of which only the last unsubscriber is retained — leaking a
+        // listener (and a duplicate event stream) for the connection's lifetime.
+        unsubscribers.set(channel, () => {});
+
+        void (async () => {
+          try {
+            const ctx = await authContext();
+            if (!ctx) {
+              unsubscribers.delete(channel);
+              return;
+            }
 
             const allowed = await found.handler.authorize(ctx, found.match);
             if (!allowed) {
+              unsubscribers.delete(channel);
               send(socket, { channel, type: "error", error: "FORBIDDEN" });
               return;
             }
 
-            const unsub = subscribe(channel, (event: RealtimeEvent) => {
+            // Awaited so the subscription is live before the snapshot goes out —
+            // otherwise an event landing in between is lost and the client keeps
+            // a stale snapshot with no diff to correct it (see bus.ts).
+            const unsub = await subscribe(channel, (event: RealtimeEvent) => {
               send(socket, { channel, ...event });
             });
+
+            // The socket (or this channel) may have gone away mid-await.
+            if (socket.readyState !== socket.OPEN || !unsubscribers.has(channel)) {
+              unsub();
+              return;
+            }
             unsubscribers.set(channel, unsub);
 
             const data = await found.handler.snapshot(found.match);
             send(socket, { channel, type: "snapshot", data });
-          })
-          .catch(() => {});
+          } catch {
+            unsubscribers.delete(channel);
+          }
+        })();
       } else if (msg.type === "unsubscribe") {
         unsubscribers.get(channel)?.();
         unsubscribers.delete(channel);
@@ -113,7 +156,7 @@ export async function realtimeGateway(app: FastifyInstance): Promise<void> {
     });
 
     socket.on("close", () => {
-      clearInterval(recheck);
+      claimsUnsub?.();
       for (const unsub of unsubscribers.values()) unsub();
       unsubscribers.clear();
     });

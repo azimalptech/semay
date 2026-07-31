@@ -4,6 +4,7 @@ import { z } from "zod";
 import { requireAuth, requireFreshAuth } from "../auth/middleware.js";
 import { requireStoreAdmin } from "../auth/authz.js";
 import { prisma } from "../db.js";
+import { deleteMediaByUrl } from "../media/storage.js";
 import { createStory, getStoryRings, markStoreSeen, recordStoryView } from "./service.js";
 
 const createStorySchema = z.object({
@@ -77,11 +78,17 @@ export async function storyRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: [requireAuth, requireFreshAuth] },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const story = await prisma.story.findUnique({ where: { id }, select: { storeId: true } });
+      const story = await prisma.story.findUnique({
+        where: { id },
+        select: { storeId: true, mediaUrl: true },
+      });
       if (!story) return reply.code(404).send({ error: "NOT_FOUND" });
       if (!(await assertCanManageStory(req, reply, story.storeId))) return;
 
       await prisma.story.delete({ where: { id } });
+      // Stories are the highest-churn media in the app (every one expires after
+      // 24h), so leaking their files would grow the disk without bound.
+      await deleteMediaByUrl(story.mediaUrl);
       return reply.send({ ok: true });
     }
   );

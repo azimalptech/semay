@@ -26,9 +26,9 @@ export class SmsSendError extends Error {
  * modes — set SMS_GATEWAY_URL to the base that exposes `/message` with HTTP
  * Basic auth: the phone's LAN address (Local Server), a self-hosted relay, or
  * the cloud relay `https://api.sms-gate.app/3rdparty/v1` (Cloud "Connect"). SMS
- * here is OTP-only (one message at a time), so it sends directly — the
- * sms_dispatch_queue/cursor tables are vestigial (they existed for Firebase-era
- * bulk pacing that this codebase no longer does). */
+ * here is OTP-only (one message at a time), so it sends directly — no queue or
+ * pacing cursor is involved (the vestigial Firebase-era tables for that have
+ * been dropped from the schema). */
 class GatewaySmsProvider implements SmsProvider {
   private static readonly timeoutMs = 15_000;
 

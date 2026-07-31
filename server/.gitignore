@@ -15,10 +15,11 @@ serviceAccount*.json
 prisma/*.db
 prisma/*.db-journal
 
-# Media (local dev uploads if not using MinIO)
-uploads/
+# Media — user uploads are runtime data, never committed
+media/
 
 # Logs
+logs/
 *.log
 npm-debug.log*
 

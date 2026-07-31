@@ -119,6 +119,17 @@ class S {
       ? 'Вы уверены, что хотите выйти? Чтобы увидеть свои заказы, нужно будет войти снова.'
       : 'Çykmak isleýändigiňize ynanýarsyňyzmy? Sargytlaryňyzy görmek üçin täzeden girmeli bolarsyňyz.';
   String get cancel => isRu ? 'Отмена' : 'Ýatyr';
+  String get deleteAccount => isRu ? 'Удалить аккаунт' : 'Hasaby pozmak';
+  String get deleteAccountConfirm => isRu
+      ? 'Удалить аккаунт навсегда? Ваше имя, номер, чаты, сохранённые и понравившиеся посты будут удалены. Это действие нельзя отменить.'
+      : 'Hasabyňyzy hemişelik pozmakçymy? Adyňyz, belgiňiz, söhbetdeşlikleriňiz, ýatda saklananlar we halanlar pozulýar. Bu yzyna alynmaýar.';
+  String get deleteAccountConfirmAction => isRu ? 'Удалить' : 'Poz';
+  String get deleteAccountStoreOwner => isRu
+      ? 'Аккаунты владельцев магазинов нельзя удалить здесь. Свяжитесь с поддержкой.'
+      : 'Dükan eýeleriniň hasaplary bu ýerde pozulmaýar. Goldaw bilen habarlaşyň.';
+  String get deleteAccountFailed => isRu
+      ? 'Не удалось удалить аккаунт. Попробуйте позже.'
+      : 'Hasap pozulmady. Soňra synanyşyň.';
   String get selectLanguage => isRu ? 'Выберите язык' : 'Dil saýlaň';
   String get noNotificationsYet =>
       isRu ? 'Пока нет уведомлений' : 'Häzirlikçe bildiriş ýok';

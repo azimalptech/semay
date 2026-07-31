@@ -1,5 +1,11 @@
 # 07 — Firebase → Self-Hosted MySQL Migration
 
+> **Operational state lives in [`08_OPERATIONS.md`](./08_OPERATIONS.md).** This file is the
+> phase-by-phase history of the migration. Everything about running the result — topology, the
+> requirements for 100k daily active users, the scheduled reaper, and the security hardening pass
+> (media upload allowlist, error-message leakage, auth rate limiting, account deletion) — is there.
+> Read 08 before deploying or changing auth/media/realtime.
+
 **Status: IN PROGRESS (Phase 9 done; 9b offline outbox + Phase 10 staging/cutover remain).** Full
 architecture + rationale: the approved plan at
 `.claude/plans/iterative-launching-meteor.md`. This doc is the living, in-repo reference kept
@@ -16,9 +22,11 @@ empty and cutover is "point the app at the new server."
 ## New components
 
 - **`server/`** — the new self-hosted API (Node.js + TypeScript, Fastify + `ws`, Prisma → MySQL 8,
-  MinIO for media, Firebase Admin SDK for FCM send only). Replaces `backend/functions/` (Firebase
-  Cloud Functions) and Firestore/Auth/Storage.
-- **`backend/`** — the OLD Firebase Cloud Functions. Stays until cutover, then retired.
+  a local public media folder, Firebase Admin SDK for FCM send only). Replaces the old Firebase Cloud
+  Functions and Firestore/Auth/Storage.
+- **`backend/`** — the OLD Firebase Cloud Functions. **Deleted** (2026-07-30, at the owner's explicit
+  request) once nothing in the running stack or CI referenced it. `docs/03_CLOUD_FUNCTIONS_API.md` is
+  now the only remaining record of those contracts.
 - **`mobile/`** / **`web-admin/`** — rewritten in Phases 9 / 8 to consume the new API; provider
   names/signatures kept stable so screens change minimally.
 
@@ -26,7 +34,7 @@ empty and cutover is "point the app at the new server."
 
 | Phase | What                                                                      | Status                  |
 | ----- | ------------------------------------------------------------------------- | ----------------------- |
-| 0     | **Owner:** provision TM server (MySQL 8, TLS, Node, MinIO, backups)       | ⬜ owner task           |
+| 0     | **Owner:** provision TM server (MySQL 8, TLS, Node, disk for media, backups) | ⬜ owner task        |
 | 1     | Server scaffold + Prisma schema (`server/prisma/schema.prisma`)           | ✅                      |
 | 2     | Auth (OTP, sessions, JWT fast/slow, phone-UNIQUE race) + concurrency test | ✅                      |
 | 3     | Core CRUD + storage + authz middleware + per-route/role test matrix       | ✅                      |
@@ -308,6 +316,11 @@ separate mechanism from everyone else's phone-OTP flow, and the new `users` sche
 password columns at all. Asked the owner rather than guessing (CLAUDE.md's "don't invent product
 decisions" rule): **superadmin now uses the same phone-OTP flow as mobile** — one auth system, no new
 schema fields. A superadmin is just a `users` row with `role='superadmin'`.
+>
+> **Superseded 2026-07-30** — see `docs/08_OPERATIONS.md` §9. The owner
+> explicitly asked for phone+password login on the superadmin panel instead;
+> `users.passwordHash` exists now, scoped to that one panel. Mobile and every
+> other role still use OTP exactly as decided here.
 
 - **Session model** — `access_token`/`refresh_token` httpOnly cookies (JWT + opaque, same tokens
   `server/`'s `/auth/otp/verify` and `/auth/refresh` issue). `src/proxy.ts` is the fast, optimistic
@@ -468,6 +481,21 @@ behavior stays traceable to a decision, same as the phases above.
   detail screen — it opens a **shuffled, continuously-scrolling pager of that media type**, seeded to the
   tapped item: `SearchPostsPagerScreen` for images/carousels, `SearchReelsPagerScreen` for reels
   ("posts and reels, separately"), both reusing the grid's shuffled order.
+- **Media storage is a plain local folder, not MinIO.** The Phase 3/8 notes below describe a MinIO
+  bucket + presigned URLs; that object store is gone. `server/src/media/storage.ts` writes uploads as
+  plain files under `MEDIA_DIR` (`server/media/`, gitignored), served back by `@fastify/static` at
+  `/media/*` with HTTP range support for video seeking. The presigned-upload *shape* is unchanged from
+  the client's point of view — `POST /media/upload-url` still returns a 5-minute upload URL, but it's
+  now an HMAC-signed `PUT /api/v1/media/blob/*` on the API itself rather than a MinIO URL, with a path
+  traversal guard (`pathForKey`) and a 120MB cap. One fewer service for the owner to run and back up;
+  in production the folder can be fronted by a Caddy/Nginx `file_server` for performance.
+  `web-admin`'s duplicated MinIO client was deleted (it had no remaining importers) along with the
+  `minio` dependency in both packages.
+- **Logs are written to disk.** `server/src/lib/logging.ts` adds a `pino-roll` transport alongside the
+  console one: newline-delimited JSON to `LOG_DIR/app.<date>.log` (`server/logs/`, gitignored), rotated
+  daily and pruned to `LOG_RETENTION_DAYS` (default 14) files so they can't grow unbounded on the
+  server. `LOG_LEVEL` is configurable; pretty console output stays for non-production only. Previously
+  logs went to stdout exclusively, so anything not captured by the process supervisor was lost.
 - **Super-admin orders report**: the dashboard `OrdersTable` gained a total-orders + total-items
   summary, an inclusive **date-range (from/to) calendar filter**, and a click-to-toggle **sort-by-date**
   column header. All client-side over the existing 90-day fetch — no schema or API change.

@@ -68,6 +68,14 @@ model User {
   language  Language @default(tk)
   darkMode  Boolean  @default(false)
 
+  // Password login for the Super Admin web panel ONLY, at the owner's explicit
+  // request (2026-07-30) — a deliberate deviation from Phase 8's original
+  // decision to give superadmin the same OTP flow as everyone else (see
+  // docs/07_MIGRATION.md). Null for every regular/store-admin user; the mobile
+  // app never reads or sets this column. bcrypt hash, never plaintext — see
+  // auth/superadminAuth.ts.
+  passwordHash String? @db.VarChar(255)
+
   // Transient "which chat is open on this device" pointer (onMessageCreated
   // reads it to suppress a redundant push). Plain nullable id, no FK relation —
   // it's cleared on dispose and a dangling value is harmless.
@@ -79,6 +87,14 @@ model User {
   claimsVersion Int @default(0)
 
   createdAt DateTime @default(now())
+
+  // Set by deleteAccount (users/service.ts). The row is NOT removed: orders
+  // reference it and stores must keep accurate sales history, so the account is
+  // anonymized in place instead — phone/name/avatar scrubbed, personal data
+  // (chats, likes, notifications, sessions, tokens) hard-deleted. A tombstoned
+  // row can never be signed into: its phone is rewritten to a `del_…` sentinel,
+  // which frees the real number for a genuine fresh signup.
+  deletedAt DateTime?
 
   storeAdminRoles      StoreAdmin[]
   storesCreated        Store[]               @relation("StoreCreatedBy")
@@ -503,23 +519,24 @@ model OtpCode {
   @@map("otp_codes")
 }
 
-model SmsDispatchQueue {
-  id          BigInt   @id @default(autoincrement())
-  phone       String   @db.VarChar(20)
-  message     String   @db.VarChar(255)
-  simIndex    Int?
-  scheduledAt DateTime
-  status      String   @default("pending") @db.VarChar(20)
-  createdAt   DateTime @default(now())
+// sms_dispatch_queue / sms_dispatch_cursor were removed here: they existed for
+// Firebase-era bulk SMS pacing that this codebase no longer does. OTP is the only
+// SMS this system sends, one message at a time, straight through the gateway
+// (auth/sms.ts) — nothing ever read or wrote these tables.
 
-  @@index([status, scheduledAt])
-  @@map("sms_dispatch_queue")
-}
+// Distributed lease so exactly one process runs a scheduled job at a time, across
+// every worker AND every machine (see maintenance.ts).
+//
+// Deliberately NOT MySQL's GET_LOCK: that lock belongs to the *session*, while
+// Prisma hands each query an arbitrary pooled connection — so RELEASE_LOCK
+// usually runs on a different connection than GET_LOCK, silently fails, and the
+// lock stays held by a pooled connection that never closes. The job would then
+// run once and never again. A row with an expiry is connection-agnostic and
+// self-healing: a holder that crashes mid-run just lets the lease lapse.
+model MaintenanceLease {
+  name        String   @id @db.VarChar(64)
+  lockedUntil DateTime
+  updatedAt   DateTime @updatedAt
 
-// Single-row (id=1) global send-pacing cursor, updated with SELECT ... FOR UPDATE.
-model SmsDispatchCursor {
-  id         Int      @id @default(1)
-  nextSlotAt DateTime
-
-  @@map("sms_dispatch_cursor")
+  @@map("maintenance_leases")
 }

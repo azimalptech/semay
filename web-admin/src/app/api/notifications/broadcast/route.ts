@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionClaims } from "@/lib/session";
-import { getAccessToken } from "@/lib/accessToken";
-import { ApiError, callApi } from "@/lib/apiClient";
+import { ApiError, callAuthedApi } from "@/lib/apiClient";
 
 export async function POST(request: Request) {
   const claims = await getSessionClaims();
@@ -9,11 +8,7 @@ export async function POST(request: Request) {
 
   const body = await request.json();
   try {
-    const result = await callApi("/notifications/broadcast", {
-      method: "POST",
-      body,
-      accessToken: await getAccessToken(),
-    });
+    const result = await callAuthedApi("/notifications/broadcast", { method: "POST", body });
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof ApiError) return NextResponse.json(err.body, { status: err.status });

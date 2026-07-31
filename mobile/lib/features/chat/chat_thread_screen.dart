@@ -99,8 +99,8 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Read by onMessageCreated to suppress a push notification for a chat
-    // the recipient already has open — see chat_service.dart's
+    // Read by the server's sendChatPush to suppress a push notification for a
+    // chat the recipient already has open — see chat_service.dart's
     // setActiveChat and that function's comment.
     ref.read(chatServiceProvider).setActiveChat(widget.chatId);
     _controller.addListener(_onTextChanged);

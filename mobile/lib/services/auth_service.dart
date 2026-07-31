@@ -23,6 +23,11 @@ class OtpLockedException implements Exception {
   final DateTime lockedUntil;
 }
 
+/// A store admin/superadmin tried to self-delete. Their stores and accepted
+/// orders would cascade other users' data, so that path needs the superadmin
+/// panel rather than the in-app button.
+class AccountDeletionBlockedException implements Exception {}
+
 enum AppRole { unauthenticated, user, admin, superadmin }
 
 /// Kept as the same name/shape every screen and router.dart already expects
@@ -122,6 +127,27 @@ class AuthService {
       throw _mapOtpException(e);
     }
     _ref.invalidate(userProfileProvider);
+  }
+
+  /// Permanently deletes this account, then clears the local session.
+  ///
+  /// The server anonymizes the row in place (orders belong to the store, not the
+  /// customer — see server/src/users/service.ts) and immediately revokes the
+  /// access token, so no local call after this can succeed. Local logout is
+  /// therefore unconditional once the server confirms: leaving a dead token in
+  /// secure storage would just strand the app on a screen every request 401s on.
+  Future<void> deleteAccount() async {
+    try {
+      await _api.delete('/users/me');
+    } on ApiException catch (e) {
+      if (e.error == 'STORE_OWNER_CANNOT_DELETE') {
+        throw AccountDeletionBlockedException();
+      }
+      // ALREADY_DELETED (410) means the account is gone and only this device
+      // hadn't noticed — fall through to the local logout below.
+      if (e.error != 'ALREADY_DELETED') rethrow;
+    }
+    await _ref.read(sessionControllerProvider.notifier).logout();
   }
 
   Future<void> signOut() async {

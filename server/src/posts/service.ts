@@ -1,6 +1,7 @@
 import { Prisma, type Post, type PostType } from "@prisma/client";
 
 import { prisma } from "../db.js";
+import { deleteMediaByUrls } from "../media/storage.js";
 import { publish } from "../realtime/bus.js";
 
 const POST_COUNTS_SELECT = {
@@ -62,7 +63,14 @@ export async function updateCaption(postId: string, caption: string): Promise<Po
 export async function deletePostCascade(postId: string): Promise<void> {
   const post = await prisma.post.findUniqueOrThrow({
     where: { id: postId },
-    select: { storeId: true, type: true },
+    // media/thumbnail URLs are read BEFORE the delete — the rows cascade away, so
+    // afterwards there is nothing left to tell us which files to clean up.
+    select: {
+      storeId: true,
+      type: true,
+      thumbnailUrl: true,
+      media: { select: { url: true } },
+    },
   });
   await prisma.$transaction(async (tx) => {
     await tx.post.delete({ where: { id: postId } }); // cascades media/likes/saves/views/sent/shares
@@ -74,6 +82,12 @@ export async function deletePostCascade(postId: string): Promise<void> {
           : { postsCount: { decrement: 1 } },
     });
   });
+
+  // After the commit: the DB is the source of truth, so files are only removed
+  // once the rows referencing them are definitely gone. Best-effort by design
+  // (see deleteMediaByUrl) — a stray file is recoverable, a failed delete of an
+  // already-deleted post is not.
+  await deleteMediaByUrls([...post.media.map((m) => m.url), post.thumbnailUrl]);
 }
 
 function isDuplicateKeyError(err: unknown): boolean {
