@@ -232,7 +232,17 @@ model Post {
   shares PostShare[]
 
   @@index([storeId, createdAt])
-  @@index([type, createdAt]) // reels feed + global feed
+  @@index([type, createdAt]) // a store's posts filtered by type; /reels (single type)
+  // The global /feed — the app's home screen and hottest query — filters
+  // `type IN ('image','carousel')` and orders by createdAt. The composite index
+  // above CANNOT serve that: it orders by createdAt only *within* one type, so
+  // spanning two types made MariaDB abandon the index entirely and fall back to
+  // a full table scan plus a filesort of every matching row. Measured on 300k
+  // posts: 135ms and growing linearly, vs 0.2ms with this index (it walks
+  // createdAt DESC and filters out reels as it goes, touching ~30 rows to
+  // return 20). Posts are read constantly and written rarely, so the extra
+  // write cost is the right trade.
+  @@index([createdAt])
   @@map("posts")
 }
 
@@ -428,6 +438,14 @@ model Order {
   itemQuantity Int
   userPhone    String      @db.VarChar(20)
   status       OrderStatus @default(accepted)
+  // Client-generated idempotency key, same mechanism messages already use.
+  // Accepting an order is a real sale that also increments the prize
+  // leaderboard, and it had NO dedup: if the request succeeded but the response
+  // was lost (flaky mobile network), the admin's natural retry created a second
+  // order and double-counted the customer's standings. The client sends one key
+  // per accept-sheet session, so a retry collapses onto the first order while a
+  // deliberately re-opened sheet still creates a genuine second one.
+  clientKey    String?     @unique @db.VarChar(64)
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
 

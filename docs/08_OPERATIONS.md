@@ -128,7 +128,43 @@ Fixed during hardening, each with the reasoning that makes it non-obvious:
   is now a pure liveness check; the DB probe moved to `/health/ready`, behind the
   rate limiter, with its result cached ~2s so a burst of probes collapses into one
   query.
+- **Cross-chat message disclosure via reply-to (IDOR).** `sendMessage` resolved
+  the quoted message by id **alone**, then copied its text onto the new message
+  and returned it to the sender. Message ids are sequential `BIGINT`s, so any
+  authenticated user could sit in their own chat and walk `id=1,2,3…` to read the
+  first 512 characters of *every private message in the database* — every
+  customer's conversation with every store. The lookup is now scoped
+  `{ id, chatId }`, and the stored `replyToMessageId` uses the validated id so a
+  foreign pointer isn't persisted either. An out-of-chat id now behaves exactly
+  like a deleted one: the message sends, without a quote.
+  (`chat.reply-idor.test.ts`; `sharedPostId`/`sharedStoryId` were checked and are
+  **not** affected — they copy no server-side content, and posts/stories are
+  already readable by any authenticated user.)
 - **Account deletion revocation.** See §8.
+
+## 6a. Query performance: the feed index
+
+`/feed` — the app's home screen, and the single hottest query in the system —
+filters `type IN ('image','carousel')` and orders by `createdAt`. The
+`(type, createdAt)` index **cannot** serve that: it orders by `createdAt` only
+*within* one type, so spanning two made MariaDB abandon the index entirely.
+
+Measured on a 300k-post scratch database (never the live one):
+
+| | plan | time |
+|---|---|---|
+| before | `ALL` — full scan of 293k rows + `Using filesort` | **135 ms** |
+| after `@@index([createdAt])` | `rows: 20`, no filesort | **0.2 ms** |
+
+~650× faster, and the old cost grew linearly with total post count. `/reels`
+(single type) and `/stores/:id/posts` already used their indexes correctly and
+were left alone.
+
+**Deliberately not changed:** these endpoints use `LIMIT/OFFSET`, and a deep
+offset still walks the skipped rows (~550 ms at offset 5000). Fixing that means
+cursor pagination — an API change rippling into the mobile client — for a
+scenario (scrolling 5000+ posts deep) that effectively never happens. Revisit
+only if real traffic shows deep pagination.
 
 ## 7. Before launch (not yet done)
 
@@ -172,6 +208,26 @@ new account rather than resurrecting the tombstone.
 Store admins and superadmins are refused (409 `STORE_OWNER_CANNOT_DELETE`): their
 stores and accepted orders would cascade *other* users' data, which is a superadmin
 operation rather than a self-service button.
+
+## 8a. Order idempotency
+
+Accepting an order is a real sale **and** increments the prize leaderboard, but
+originally had no dedup of any kind. The mobile sheet has a `_submitting` flag,
+which stops a naive double-tap — it does **not** stop the realistic failure: the
+request succeeds server-side, the response is lost on a flaky mobile connection,
+the admin sees an error and taps again. That recorded a second sale and
+double-counted the customer's standings, directly corrupting prize results.
+
+`orders.clientKey` (nullable `UNIQUE`) now mirrors the mechanism messages already
+used. The client mints **one key per opened accept-sheet**, not per tap: a retry
+inside that sheet collapses onto the original order, while deliberately reopening
+the sheet mints a new key and creates a genuine second sale.
+
+The order's "Order accepted ✅" chat message uses a deterministic
+`order:{orderId}` key, so a retry that follows an attempt which died *between*
+creating the order and posting its message still posts it exactly once — the gap
+a naive early-return would have left open. Omitting `clientKey` entirely is
+still accepted (older app builds), and simply behaves as before.
 
 ## 9. Superadmin panel: password login (deviation from Phase 8)
 

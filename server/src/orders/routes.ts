@@ -6,7 +6,12 @@ import { ChatForbiddenError, ChatNotFoundError, getChatForParticipant } from "..
 import { prisma } from "../db.js";
 import { acceptOrder } from "./service.js";
 
-const acceptOrderSchema = z.object({ itemQuantity: z.number().int().positive().max(9999) });
+const acceptOrderSchema = z.object({
+  itemQuantity: z.number().int().positive().max(9999),
+  // Optional so an older app build keeps working — it just loses the dedup
+  // guarantee, exactly the behavior every build had before this existed.
+  clientKey: z.string().min(1).max(64).optional(),
+});
 const listQuerySchema = z.object({ storeId: z.string().optional() });
 
 export async function orderRoutes(app: FastifyInstance): Promise<void> {
@@ -26,7 +31,12 @@ export async function orderRoutes(app: FastifyInstance): Promise<void> {
       throw err;
     }
 
-    const order = await acceptOrder(chat, req.auth!.sub, body.data.itemQuantity);
+    const order = await acceptOrder(
+      chat,
+      req.auth!.sub,
+      body.data.itemQuantity,
+      body.data.clientKey
+    );
     return reply.code(201).send({ order });
   });
 

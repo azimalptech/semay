@@ -145,10 +145,17 @@ class ChatService {
     required String chatId,
     required int itemQuantity,
     required String userPhone, // ignored — server auto-fills from the customer
+    // Idempotency key: the server collapses a retry carrying the same key onto
+    // the original order instead of recording a second sale. Optional so this
+    // stays compatible with any caller that hasn't been updated.
+    String? clientKey,
   }) async {
     final json = await _api.post(
       '/chats/$chatId/orders',
-      body: {'itemQuantity': itemQuantity},
+      body: {
+        'itemQuantity': itemQuantity,
+        'clientKey': ?clientKey,
+      },
     );
     return (json['order'] as Map<String, dynamic>)['id'] as String;
   }

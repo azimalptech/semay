@@ -139,15 +139,28 @@ export async function sendMessage(
 
   let replyToText: string | null = null;
   let replyToSenderRole: SenderRole | null = null;
+  let replyToMessageId: bigint | null = null;
   if (input.replyToMessageId) {
-    const replyTo = await prisma.message.findUnique({
-      where: { id: BigInt(input.replyToMessageId) },
-      select: { text: true, senderRole: true },
+    // `chatId: chat.id` in the WHERE is load-bearing, not defensive noise: this
+    // copies the quoted message's text onto the new message, which is then
+    // returned to the sender. Looking it up by id ALONE let any authenticated
+    // user quote any message in the database from inside their own chat and
+    // read back the first 512 chars — and message ids are sequential BIGINTs,
+    // so every private conversation in the system could be walked by simply
+    // incrementing the id. Scoping the lookup to this chat makes an
+    // out-of-chat id return nothing, exactly like a deleted one.
+    const replyTo = await prisma.message.findFirst({
+      where: { id: BigInt(input.replyToMessageId), chatId: chat.id },
+      select: { id: true, text: true, senderRole: true },
     });
     if (replyTo) {
+      replyToMessageId = replyTo.id;
       replyToText = replyTo.text.slice(0, 512);
       replyToSenderRole = replyTo.senderRole;
     }
+    // A non-match falls through with all three left null — the message still
+    // sends, just without the quote, rather than 4xx-ing on a race where the
+    // quoted message was deleted between the client rendering it and sending.
   }
 
   let txResult;
@@ -164,7 +177,10 @@ export async function sendMessage(
         orderId: input.orderId,
         sharedPostId: input.sharedPostId,
         sharedStoryId: input.sharedStoryId,
-        replyToMessageId: input.replyToMessageId ? BigInt(input.replyToMessageId) : undefined,
+        // The validated id, NOT input.replyToMessageId — storing the raw value
+        // would persist a pointer into someone else's chat even though the
+        // quote text above was correctly withheld.
+        replyToMessageId: replyToMessageId ?? undefined,
         replyToText: replyToText ?? undefined,
         replyToSenderRole: replyToSenderRole ?? undefined,
         clientKey: input.clientKey,

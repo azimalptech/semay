@@ -1,20 +1,57 @@
-import type { Chat, Order } from "@prisma/client";
+import { Prisma, type Chat, type Order } from "@prisma/client";
 
 import { sendMessage } from "../chats/service.js";
 import { prisma } from "../db.js";
 import { withRetry } from "../lib/withRetry.js";
 import { sendPushToUsers } from "../notifications/push.js";
 
+/** Posts the order's system message into the chat, exactly once.
+ *
+ * Reuses sendMessage so the chat's last-message/unread fields and every realtime
+ * publish stay in sync the same way a normal message would. The clientKey is
+ * derived from the order id rather than random, which is what makes this safe to
+ * call again on a retried accept: the second call dedupes against the first
+ * inside sendMessage instead of posting "Order accepted ✅" twice. */
+async function ensureOrderMessage(chat: Chat, adminId: string, order: Order): Promise<void> {
+  await sendMessage(chat, "admin", adminId, {
+    text: "Order accepted ✅",
+    orderId: order.id,
+    clientKey: `order:${order.id}`,
+  });
+}
+
 /** The tap itself is the completed sale — there is no pending/approval status,
  * `status` only ever holds `'accepted'` (matches the old callable's contract:
  * no updateOrderStatus, no Super Admin approval step). */
-export async function acceptOrder(chat: Chat, adminId: string, itemQuantity: number): Promise<Order> {
+export async function acceptOrder(
+  chat: Chat,
+  adminId: string,
+  itemQuantity: number,
+  clientKey?: string
+): Promise<Order> {
   const customer = await prisma.user.findUniqueOrThrow({
     where: { id: chat.userId },
     select: { phone: true, name: true },
   });
 
-  const order = await withRetry(() =>
+  // Idempotency fast-path, mirroring sendMessage: a retried accept (lost
+  // response on a flaky network) must return the original sale rather than
+  // recording a second one and double-incrementing the prize leaderboard.
+  if (clientKey) {
+    const existing = await prisma.order.findUnique({ where: { clientKey } });
+    if (existing) {
+      // Deliberately still runs: if the very first attempt died between
+      // creating the order and posting its chat message, this retry is what
+      // finally posts it. sendMessage's own clientKey dedup makes it a no-op
+      // when the message already exists.
+      await ensureOrderMessage(chat, adminId, existing);
+      return existing;
+    }
+  }
+
+  let order: Order;
+  try {
+    order = await withRetry(() =>
     prisma.$transaction(async (tx) => {
       const order = await tx.order.create({
         data: {
@@ -24,6 +61,7 @@ export async function acceptOrder(chat: Chat, adminId: string, itemQuantity: num
           chatId: chat.id,
           itemQuantity,
           userPhone: customer.phone,
+          clientKey,
         },
       });
 
@@ -55,13 +93,25 @@ export async function acceptOrder(chat: Chat, adminId: string, itemQuantity: num
       }
       return order;
     })
-  );
+    );
+  } catch (err) {
+    // Two simultaneous accepts carrying the same key raced past the fast-path
+    // check above; the loser returns the winner's order rather than erroring.
+    if (
+      clientKey &&
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      const winner = await prisma.order.findUnique({ where: { clientKey } });
+      if (winner) {
+        await ensureOrderMessage(chat, adminId, winner);
+        return winner;
+      }
+    }
+    throw err;
+  }
 
-  // System message referencing the order — reuses sendMessage so the chat's
-  // last-message/unread fields and every realtime publish (chat, chat
-  // messages, both list channels) stay in sync the same way a normal message
-  // would, instead of duplicating that logic here.
-  await sendMessage(chat, "admin", adminId, { text: "Order accepted ✅", orderId: order.id });
+  await ensureOrderMessage(chat, adminId, order);
 
   const superadmins = await prisma.user.findMany({
     where: { role: "superadmin" },

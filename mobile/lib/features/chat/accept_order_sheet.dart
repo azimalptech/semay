@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../core/l10n.dart';
 import '../../services/chat_service.dart';
@@ -35,6 +36,14 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
   int _quantity = 1;
   bool _submitting = false;
 
+  // One key per opened sheet, deliberately NOT regenerated per tap. Accepting
+  // an order records a sale and moves the prize leaderboard, so a send that
+  // succeeded server-side but lost its response (flaky signal) must not become
+  // a second sale when the admin retries — the server dedupes on this key.
+  // Reopening the sheet mints a new one, so a genuinely intended second order
+  // still goes through.
+  final String _clientKey = const Uuid().v4();
+
   Future<void> _submit(String userPhone) async {
     setState(() => _submitting = true);
     try {
@@ -44,6 +53,7 @@ class _AcceptOrderSheetState extends ConsumerState<AcceptOrderSheet> {
             chatId: widget.chatId,
             itemQuantity: _quantity,
             userPhone: userPhone,
+            clientKey: _clientKey,
           );
       if (mounted) Navigator.of(context).pop();
       if (mounted) {
