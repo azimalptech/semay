@@ -1,6 +1,7 @@
 import type { UserNotification } from "@prisma/client";
 
 import { prisma } from "../db.js";
+import { parseBigIntId } from "../lib/ids.js";
 import { sendPushToUsers } from "./push.js";
 
 /** Shared by broadcastNotification and decideNotificationRequest's approve
@@ -35,18 +36,26 @@ export async function listNotifications(
   userId: string,
   opts: { before?: string; limit: number }
 ): Promise<UserNotification[]> {
+  // A malformed cursor is treated as "no cursor" (first page) rather than
+  // crashing the request — see lib/ids.ts.
+  const before = parseBigIntId(opts.before);
   return prisma.userNotification.findMany({
-    where: { userId, ...(opts.before ? { id: { lt: BigInt(opts.before) } } : {}) },
+    where: { userId, ...(before !== undefined ? { id: { lt: before } } : {}) },
     orderBy: { id: "desc" },
     take: opts.limit,
   });
 }
 
-export async function markNotificationRead(id: string, userId: string): Promise<void> {
+/** Returns false when `id` isn't a valid id, so the route can answer 400
+ * instead of the 500 a raw BigInt() conversion used to produce. */
+export async function markNotificationRead(id: string, userId: string): Promise<boolean> {
+  const notificationId = parseBigIntId(id);
+  if (notificationId === undefined) return false;
   await prisma.userNotification.updateMany({
-    where: { id: BigInt(id), userId, readAt: null },
+    where: { id: notificationId, userId, readAt: null },
     data: { readAt: new Date() },
   });
+  return true;
 }
 
 export async function markAllNotificationsRead(userId: string): Promise<void> {

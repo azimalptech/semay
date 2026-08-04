@@ -106,8 +106,15 @@ export async function storyRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // "Seen by N" shown to the owning store's admin in the story viewer footer.
+  // The authorization the comment always described was missing: any authenticated
+  // user could read any store's reach numbers, which is competitive information a
+  // rival store shouldn't get. Now actually restricted to that store's admins.
   app.get("/stories/:id/views", { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const story = await prisma.story.findUnique({ where: { id }, select: { storeId: true } });
+    if (!story) return reply.code(404).send({ error: "NOT_FOUND" });
+    if (!(await assertCanManageStory(req, reply, story.storeId))) return;
+
     const count = await prisma.storyView.count({ where: { storyId: id } });
     return reply.send({ count });
   });

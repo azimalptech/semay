@@ -140,7 +140,69 @@ Fixed during hardening, each with the reasoning that makes it non-obvious:
   (`chat.reply-idor.test.ts`; `sharedPostId`/`sharedStoryId` were checked and are
   **not** affected — they copy no server-side content, and posts/stories are
   already readable by any authenticated user.)
+- **Phone-number harvesting via `GET /users/:id`.** The phone gate was
+  `role === 'admin' || 'superadmin'`, so **any** store admin could read **any**
+  user's number — customers who had never contacted their store, and other
+  admins. Directly harvestable, because store leaderboards are readable by every
+  authenticated user and expose raw `userId`s: walk a rival store's leaderboard,
+  resolve the whole list to phone numbers. Phone is the login identity in this
+  system, which is what makes it worth protecting. A store admin now only sees
+  the number of someone who has actually opened a chat with one of *their*
+  stores (one indexed existence check) — exactly the case the chat header needs.
+  Superadmin, and a user viewing themselves, are unaffected.
+- **Interaction-counter inflation.** `POST /posts/interactions` accepted up to
+  100000 per field across 1000 items — 100,000,000 fabricated views in one
+  request — with no server-side dedup, because dedup deliberately lives
+  client-side (see §6b). `interaction_buffer.dart` stores at most one row per
+  `(post, kind)` per window, so an honest client sends 0 or 1 per field; the cap
+  is now 1, and repeats of the same `postId` inside one batch are collapsed
+  server-side (the per-item cap alone didn't stop listing a post 1000 times).
+- **`GET /stories/:id/views` had no authorization** despite a comment saying it
+  was for "the owning store's admin" — any authenticated user could read any
+  store's reach numbers, which is competitive information. Now restricted to
+  that store's admins.
+- **Malformed numeric ids returned 500.** `BigInt("abc")` throws, and several
+  routes fed a raw path param or cursor straight into it, so
+  `/notifications/abc/read` and friends surfaced as an unhandled INTERNAL error.
+  `lib/ids.ts` parses strictly (digits only — `BigInt()` itself would accept
+  `" 12 "`, `"-1"`, `"0x10"`); routes answer 400, cursors fall back to page one.
+- **JWT algorithm pinned to HS256.** Hardening, not a live hole: jsonwebtoken v9
+  already rejects `alg:none` outright (verified empirically) and the secret is
+  symmetric, so RS256→HS256 confusion doesn't apply. What an unpinned verify did
+  accept is a different HMAC variant (HS512); pinning keeps the accepted-token
+  set exactly equal to the issued-token set.
 - **Account deletion revocation.** See §8.
+
+### Checked and deliberately NOT changed
+
+Recording these so a future audit doesn't re-litigate them:
+
+- **Firebase API keys in `mobile/lib/core/firebase_options.dart`** are *not*
+  secrets. Client API keys identify the project; they don't authorize anything.
+  Safe to ship in the app binary.
+- **`sharedPostId` / `sharedStoryId` on messages** are stored unvalidated, but
+  copy no server-side content (unlike the reply-to quote, which did). The client
+  refetches via `/posts/:id`, already readable by any authenticated user.
+- **`activeChatId` on `PATCH /users/me`** accepts any chat id, but is only ever
+  read back for the *owning* user's own push suppression, so setting a foreign
+  id affects nobody else.
+- **Deep `LIMIT/OFFSET` pagination** — see §6a.
+
+## 6b. Interaction counters are client-authoritative by design
+
+View/send/share dedup lives entirely in the mobile client
+(`interaction_buffer.dart`: one row per `(post, kind)` per 30-minute window,
+flushed in batches, survives offline). That was a deliberate trade for offline
+batching, and it means the server cannot verify these counts — it can only bound
+them, which is what the cap above does.
+
+The consequence to be aware of: a determined caller can still add 1 per post per
+request, repeatedly, bounded only by the rate limiter. These are vanity metrics
+(the prize leaderboard is driven by *orders*, not views), so that was judged
+acceptable. The `post_views` / `post_sent` / `post_shares` tables still exist in
+the schema but are **never written** — only cleared on account deletion. They are
+the leftover of the old server-side dedup and are where per-user dedup would go
+if these counts ever need to be trustworthy.
 
 ## 6a. Query performance: the feed index
 

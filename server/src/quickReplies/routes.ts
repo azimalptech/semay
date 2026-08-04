@@ -4,6 +4,7 @@ import { z } from "zod";
 import { requireAuth, requireFreshAuth } from "../auth/middleware.js";
 import { requireStoreAdmin } from "../auth/authz.js";
 import { prisma } from "../db.js";
+import { parseBigIntId } from "../lib/ids.js";
 
 const createSchema = z.object({
   text: z.string().min(1).max(512),
@@ -75,12 +76,15 @@ export async function quickReplyRoutes(app: FastifyInstance): Promise<void> {
       const body = updateSchema.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "INVALID_INPUT" });
 
-      const existing = await prisma.storeQuickReply.findUnique({ where: { id: BigInt(id) } });
+      const replyId = parseBigIntId(id);
+      if (replyId === undefined) return reply.code(400).send({ error: "INVALID_INPUT" });
+
+      const existing = await prisma.storeQuickReply.findUnique({ where: { id: replyId } });
       if (!existing) return reply.code(404).send({ error: "NOT_FOUND" });
       if (!(await assertCanManage(req, reply, existing.storeId))) return;
 
       const quickReply = await prisma.storeQuickReply.update({
-        where: { id: BigInt(id) },
+        where: { id: replyId },
         data: body.data,
       });
       return reply.send({ quickReply });
@@ -92,11 +96,14 @@ export async function quickReplyRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: [requireAuth, requireFreshAuth] },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const existing = await prisma.storeQuickReply.findUnique({ where: { id: BigInt(id) } });
+      const replyId = parseBigIntId(id);
+      if (replyId === undefined) return reply.code(400).send({ error: "INVALID_INPUT" });
+
+      const existing = await prisma.storeQuickReply.findUnique({ where: { id: replyId } });
       if (!existing) return reply.code(404).send({ error: "NOT_FOUND" });
       if (!(await assertCanManage(req, reply, existing.storeId))) return;
 
-      await prisma.storeQuickReply.delete({ where: { id: BigInt(id) } });
+      await prisma.storeQuickReply.delete({ where: { id: replyId } });
       return reply.send({ ok: true });
     }
   );

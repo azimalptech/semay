@@ -112,7 +112,25 @@ export interface InteractionBatchItem {
  * skipped; an unknown/deleted postId is ignored rather than failing the batch. */
 export async function applyInteractionBatch(items: InteractionBatchItem[]): Promise<void> {
   const touched = new Set<string>();
+
+  // Collapse repeats of the same postId before applying. The per-item cap in
+  // routes.ts bounds ONE entry, but nothing stopped a caller listing the same
+  // post 1000 times in a single batch to multiply it back up. A real client
+  // aggregates per post before sending (interaction_buffer.dart builds a map
+  // keyed by postId), so duplicates only ever arrive from a crafted request.
+  const merged = new Map<string, InteractionBatchItem>();
   for (const item of items) {
+    const prev = merged.get(item.postId);
+    if (!prev) {
+      merged.set(item.postId, { ...item });
+      continue;
+    }
+    prev.views = Math.max(prev.views ?? 0, item.views ?? 0);
+    prev.sent = Math.max(prev.sent ?? 0, item.sent ?? 0);
+    prev.shares = Math.max(prev.shares ?? 0, item.shares ?? 0);
+  }
+
+  for (const item of merged.values()) {
     const data: Record<string, { increment: number }> = {};
     if (item.views && item.views > 0) data.viewsCount = { increment: item.views };
     if (item.sent && item.sent > 0) data.sentCount = { increment: item.sent };

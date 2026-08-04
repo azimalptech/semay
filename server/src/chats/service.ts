@@ -1,6 +1,7 @@
 import { Prisma, type Chat, type Message, type MessageMediaType, type SenderRole } from "@prisma/client";
 
 import { prisma } from "../db.js";
+import { parseBigIntId } from "../lib/ids.js";
 import type { AccessTokenPayload } from "../lib/jwt.js";
 import { publish } from "../realtime/bus.js";
 import { withRetry } from "../lib/withRetry.js";
@@ -24,7 +25,7 @@ export class ChatForbiddenError extends Error {
  * (used everywhere a route needs to authorize a chat action). Superadmin
  * counts as the admin side (read/moderate any chat, same as other admin-only
  * surfaces in this codebase). */
-export function resolveChatSide(chat: Chat, auth: AccessTokenPayload): ChatSide | null {
+function resolveChatSide(chat: Chat, auth: AccessTokenPayload): ChatSide | null {
   if (auth.sub === chat.userId) return "user";
   if (auth.role === "superadmin") return "admin";
   if (auth.role === "admin" && auth.storeIds.includes(chat.storeId)) return "admin";
@@ -140,7 +141,8 @@ export async function sendMessage(
   let replyToText: string | null = null;
   let replyToSenderRole: SenderRole | null = null;
   let replyToMessageId: bigint | null = null;
-  if (input.replyToMessageId) {
+  const requestedReplyTo = parseBigIntId(input.replyToMessageId);
+  if (requestedReplyTo !== undefined) {
     // `chatId: chat.id` in the WHERE is load-bearing, not defensive noise: this
     // copies the quoted message's text onto the new message, which is then
     // returned to the sender. Looking it up by id ALONE let any authenticated
@@ -150,7 +152,7 @@ export async function sendMessage(
     // incrementing the id. Scoping the lookup to this chat makes an
     // out-of-chat id return nothing, exactly like a deleted one.
     const replyTo = await prisma.message.findFirst({
-      where: { id: BigInt(input.replyToMessageId), chatId: chat.id },
+      where: { id: requestedReplyTo, chatId: chat.id },
       select: { id: true, text: true, senderRole: true },
     });
     if (replyTo) {
@@ -274,10 +276,12 @@ export async function listMessages(
   chatId: string,
   opts: { before?: string; limit: number }
 ): Promise<Message[]> {
+  // A malformed cursor means "first page", not a 500 — see lib/ids.ts.
+  const before = parseBigIntId(opts.before);
   return prisma.message.findMany({
     where: {
       chatId,
-      ...(opts.before ? { id: { lt: BigInt(opts.before) } } : {}),
+      ...(before !== undefined ? { id: { lt: before } } : {}),
     },
     orderBy: { id: "desc" },
     take: opts.limit,

@@ -42,7 +42,7 @@ async function isChatParticipant(ctx: ChannelAuthCtx, chatId: string): Promise<b
 
 // Ordered by specificity — "chat:{id}:messages" must be tested before the
 // bare "chat:{id}" pattern would otherwise also match its prefix.
-export const channelHandlers: ChannelHandler[] = [
+const channelHandlers: ChannelHandler[] = [
   {
     pattern: /^post:([\w-]+)$/,
     authorize: async () => true, // public read, matches the old rules

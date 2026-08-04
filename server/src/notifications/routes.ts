@@ -30,7 +30,8 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/notifications/:id/read", { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    await markNotificationRead(id, req.auth!.sub);
+    const ok = await markNotificationRead(id, req.auth!.sub);
+    if (!ok) return reply.code(400).send({ error: "INVALID_INPUT" });
     return reply.send({ ok: true });
   });
 

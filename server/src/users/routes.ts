@@ -53,10 +53,18 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Minimal public profile of another user — used by the admin's chat thread
-  // header to show the customer's name/avatar. `phone` is included only when
-  // the requester is an admin/superadmin (a store admin talking to that
-  // customer legitimately sees their number, same as the old chat did) — a
-  // plain user never sees another user's phone.
+  // header to show the customer's name/avatar.
+  //
+  // `phone` is the login identity in this system, so who may see it is deliberately
+  // narrow. The check used to be `role === 'admin' || 'superadmin'`, which meant ANY
+  // store admin could read ANY user's number — including customers who had never
+  // contacted their store, and other admins. That was directly harvestable: store
+  // leaderboards are readable by every authenticated user and expose raw userIds, so
+  // an admin could walk a rival store's leaderboard and resolve the whole list to
+  // phone numbers.
+  //
+  // Now a store admin only sees the number of someone who actually opened a chat
+  // with one of THEIR stores — exactly the case the chat header needs it for.
   app.get("/users/:id", { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const user = await prisma.user.findUnique({
@@ -64,7 +72,18 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       select: { id: true, name: true, avatarUrl: true, phone: true },
     });
     if (!user) return reply.code(404).send({ error: "NOT_FOUND" });
-    const canSeePhone = req.auth!.role === "admin" || req.auth!.role === "superadmin";
+
+    const auth = req.auth!;
+    let canSeePhone = auth.role === "superadmin" || auth.sub === id;
+    if (!canSeePhone && auth.role === "admin" && auth.storeIds.length > 0) {
+      // One indexed existence check on chats(userId, …) — not a scan.
+      const sharedChat = await prisma.chat.findFirst({
+        where: { userId: id, storeId: { in: auth.storeIds } },
+        select: { id: true },
+      });
+      canSeePhone = sharedChat !== null;
+    }
+
     return reply.send({
       user: {
         id: user.id,

@@ -39,14 +39,24 @@ const updateCaptionSchema = z.object({ caption: z.string().max(2000) });
 // Batched view/send/share increments from the mobile interaction buffer. Each
 // item is one post; the client already deduped per its 30-minute re-count
 // window, so these are plain increments, not once-ever records.
+// Per-field cap of 1, deliberately — NOT a round "big enough" number.
+// interaction_buffer.dart stores at most one row per (post, kind) per 30-minute
+// window and aggregates by counting those rows, so an honest client sends
+// exactly 0 or 1 for each field. The previous cap of 100000 let any user turn a
+// single request into 100,000,000 fabricated views/shares (1000 items x 100000),
+// with no server-side dedup to catch it since dedup lives entirely client-side.
+// Clamping to what a real client can actually produce closes the amplification
+// while being impossible for a legitimate flush to hit.
+const MAX_PER_FLUSH = 1;
+
 const interactionBatchSchema = z.object({
   items: z
     .array(
       z.object({
         postId: z.string().min(1).max(64),
-        views: z.number().int().nonnegative().max(100000).optional(),
-        sent: z.number().int().nonnegative().max(100000).optional(),
-        shares: z.number().int().nonnegative().max(100000).optional(),
+        views: z.number().int().nonnegative().max(MAX_PER_FLUSH).optional(),
+        sent: z.number().int().nonnegative().max(MAX_PER_FLUSH).optional(),
+        shares: z.number().int().nonnegative().max(MAX_PER_FLUSH).optional(),
       })
     )
     .max(1000),
