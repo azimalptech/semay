@@ -88,7 +88,9 @@ class _PostCardState extends ConsumerState<PostCard> {
         ref.watch(pendingInteractionsProvider(postId)).value ??
         (views: 0, sent: 0, shares: 0);
     final sentCount = (post['sentCount'] as int? ?? 0) + pending.sent;
-    final sharesCount = (post['sharesCount'] as int? ?? 0) + pending.shares;
+    // No sharesCount here: the design's share control carries no count (Figma
+    // 426:6054), unlike like/send/view. Shares are still recorded server-side
+    // and surface in the store's own stats.
     final viewsCount = (post['viewsCount'] as int? ?? 0) + pending.views;
     // A reel's mediaUrls[0] is a video file — sharing that as an "image"
     // preview breaks the chat bubble, so prefer the thumbnail whenever one
@@ -104,44 +106,11 @@ class _PostCardState extends ConsumerState<PostCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
-            child: GestureDetector(
-              onTap: () => context.push('/store/$storeId'),
-              child: Row(
-                children: [
-                  CircleAvatar(
-                    radius: 16,
-                    backgroundColor: AppColors.backgroundCard,
-                    backgroundImage: storeAvatarUrl.isNotEmpty
-                        ? CachedNetworkImageProvider(storeAvatarUrl)
-                        : null,
-                    child: storeAvatarUrl.isEmpty
-                        ? Icon(
-                            Icons.storefront,
-                            size: 16,
-                            color: AppColors.textMuted,
-                          )
-                        : null,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      storeName,
-                      style: AppTypography.bodyMediumSemibold,
-                    ),
-                  ),
-                  IconButton(
-                    icon: AppIcon(
-                      isSaved ? 'bookmark_filled' : 'bookmark',
-                      color: AppColors.textPrimary,
-                    ),
-                    onPressed: () => toggleSaveAndNotify(context, ref, postId),
-                  ),
-                ],
-              ),
-            ),
-          ),
+          // Figma 426:6025 — the store identity, the carousel counter and the
+          // page dots all sit ON the image, not in rows above/below it. The
+          // image is square (393x393 on a 393pt frame), expressed as an
+          // AspectRatio so it holds on any screen width rather than pinning a
+          // literal 393px that would be wrong on every other device.
           DoubleTapLikeOverlay(
             isLiked: isLiked,
             onLike: () => ref.read(likeStateProvider(postId).notifier).like(),
@@ -159,30 +128,77 @@ class _PostCardState extends ConsumerState<PostCard> {
                 : null,
             child: AspectRatio(
               aspectRatio: 1,
-              child: _PostMedia(
-                postId: postId,
-                type: type,
-                mediaUrls: mediaUrls,
-                thumbnailUrl: thumbnailUrl,
-                page: _page,
-                onPageChanged: (i) => setState(() => _page = i),
-                positionNotifier: _reelPosition,
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: _PostMedia(
+                      postId: postId,
+                      type: type,
+                      mediaUrls: mediaUrls,
+                      thumbnailUrl: thumbnailUrl,
+                      page: _page,
+                      onPageChanged: (i) => setState(() => _page = i),
+                      positionNotifier: _reelPosition,
+                    ),
+                  ),
+                  // 426:6026 — pt 12, pb 16, px 12, name pill left / counter right.
+                  Positioned(
+                    top: 12,
+                    left: 12,
+                    right: 12,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        GestureDetector(
+                          onTap: () => context.push('/store/$storeId'),
+                          child: _StorePill(
+                            name: storeName,
+                            avatarUrl: storeAvatarUrl,
+                          ),
+                        ),
+                        const Spacer(),
+                        if (mediaUrls.length > 1)
+                          _GlassBadge(
+                            borderRadius: 16,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            child: Text(
+                              '${_page + 1}/${mediaUrls.length}',
+                              style: AppTypography.bodySmall.copyWith(
+                                color: AppColors.textOnPrimary,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  // 426:6033 — dots sit at y=367 of the 393pt image, i.e. 12pt
+                  // clear of the bottom edge once the 14pt pill is accounted for.
+                  if (mediaUrls.length > 1)
+                    Positioned(
+                      bottom: 12,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: _GlassBadge(
+                          borderRadius: 24,
+                          padding: const EdgeInsets.all(4),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: _buildCarouselDots(
+                              mediaUrls.length,
+                              _page,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
-          // Carousel page dots get their own line above the action icons —
-          // previously both sat in one Stack (Figma 195:4335 has the dots
-          // centered "between" the icons), which visually crowded/collided
-          // once the icon row grew send/share/view counts too. Separate
-          // lines can never collide, at any screen width or icon-row length.
-          if (mediaUrls.length > 1)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: _buildCarouselDots(mediaUrls.length, _page),
-              ),
-            ),
           Padding(
             padding: EdgeInsets.fromLTRB(
               16,
@@ -231,53 +247,50 @@ class _PostCardState extends ConsumerState<PostCard> {
                         size: 24,
                         color: AppColors.textPrimary,
                       ),
-                      if (sentCount > 0) ...[
-                        const SizedBox(width: 4),
-                        Text(
-                          formatCount(sentCount),
-                          style: AppTypography.bodySmall,
-                        ),
-                      ],
+                      // 426:6049 — always shown, matching like/view. The design
+                      // has no hide-when-zero state for any of the three.
+                      const SizedBox(width: 4),
+                      Text(
+                        formatCount(sentCount),
+                        style: AppTypography.bodySmall,
+                      ),
                     ],
                   ),
                 ),
                 const SizedBox(width: 16),
+                // Figma 426:6050 — the view count is a first-class stat in the
+                // row, same 24pt icon and primary-coloured 13pt count as like
+                // and send, using Figma's own exported eye glyph rather than a
+                // Material stand-in. Always shown (the design has no zero
+                // state), unlike the old muted-grey conditional treatment.
+                AppIcon('eye', size: 24, color: AppColors.textPrimary),
+                const SizedBox(width: 4),
+                Text(formatCount(viewsCount), style: AppTypography.bodySmall),
+                const Spacer(),
+                // 426:6053 — bookmark moved here from the old header row above
+                // the image, which no longer exists.
+                InkWell(
+                  onTap: () => toggleSaveAndNotify(context, ref, postId),
+                  child: AppIcon(
+                    isSaved ? 'bookmark_filled' : 'bookmark',
+                    size: 24,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                // 426:6054 — share is the last item, and carries no count in
+                // the design (unlike like/send/view).
                 InkWell(
                   onTap: () => shareAndNotify(context, ref, postId),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      AppIcon(
-                        'arrow_share',
-                        size: 24,
-                        color: AppColors.textPrimary,
-                      ),
-                      if (sharesCount > 0) ...[
-                        const SizedBox(width: 4),
-                        Text(
-                          formatCount(sharesCount),
-                          style: AppTypography.bodySmall,
-                        ),
-                      ],
-                    ],
+                  child: AppIcon(
+                    'arrow_share',
+                    size: 24,
+                    color: AppColors.textPrimary,
                   ),
                 ),
-                const SizedBox(width: 16),
-                Icon(
-                  Icons.visibility_outlined,
-                  size: 24,
-                  color: AppColors.textMuted,
-                ),
-                if (viewsCount > 0) ...[
-                  const SizedBox(width: 4),
-                  Text(
-                    formatCount(viewsCount),
-                    style: AppTypography.bodySmall.copyWith(
-                      color: AppColors.textMuted,
-                    ),
-                  ),
-                ],
-                const Spacer(),
+                // Not in the Figma card, which only draws the customer state.
+                // Kept for the post's own store admin so they retain a way to
+                // edit/delete from the feed (owner's decision).
                 if (widget.showOwnerActions) ...[
                   const SizedBox(width: 16),
                   InkWell(
@@ -381,6 +394,81 @@ String _formatDate(dynamic timestamp) {
 /// signaling "more that way" without needing a dot per item (which would
 /// overflow the row for a 10-photo carousel). At <=5 items, every dot is
 /// shown at full size — there's nothing to hide.
+/// The translucent, blurred chip the design uses for everything overlaid on a
+/// post image — the store pill, the "1/8" counter and the dot strip.
+///
+/// Figma calls this background/alpha-black (rgba(0,0,0,0.4)) with a 6px
+/// backdrop blur. The blur is what keeps white text legible over a bright
+/// photo, so it's part of the design rather than decoration; ClipRRect is
+/// required because BackdropFilter would otherwise blur the whole layer.
+class _GlassBadge extends StatelessWidget {
+  const _GlassBadge({
+    required this.child,
+    required this.borderRadius,
+    required this.padding,
+  });
+
+  final Widget child;
+  final double borderRadius;
+  final EdgeInsetsGeometry padding;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(borderRadius),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+        child: Container(
+          padding: padding,
+          color: AppColors.overlayAlphaBlack,
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+/// Store avatar + name overlaid on the top-left of a post image (Figma
+/// 426:6027). Note the name is Body/Small REGULAR in white here — not the
+/// semibold treatment it has in the caption below the image.
+class _StorePill extends StatelessWidget {
+  const _StorePill({required this.name, required this.avatarUrl});
+
+  final String name;
+  final String avatarUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    return _GlassBadge(
+      borderRadius: 50,
+      // Asymmetric by design: 4 on the avatar side, 12 after the text.
+      padding: const EdgeInsets.fromLTRB(4, 4, 12, 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CircleAvatar(
+            radius: 12,
+            backgroundColor: AppColors.backgroundCard,
+            backgroundImage: avatarUrl.isNotEmpty
+                ? CachedNetworkImageProvider(avatarUrl)
+                : null,
+            child: avatarUrl.isEmpty
+                ? Icon(Icons.storefront, size: 12, color: AppColors.textMuted)
+                : null,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            name,
+            style: AppTypography.bodySmall.copyWith(
+              color: AppColors.textOnPrimary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 List<Widget> _buildCarouselDots(int count, int page) {
   const windowSize = 5;
   final windowStart = count <= windowSize
