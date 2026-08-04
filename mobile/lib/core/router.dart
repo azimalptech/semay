@@ -314,30 +314,33 @@ class _TabIcon {
 // constants, so this needs to be re-evaluated on every build to pick up a
 // theme change instead of freezing whichever colors were live the first
 // time this file was loaded.
+// Figma "Menu bar 2" (426:2161) draws every nav glyph in a 28pt box.
+const double _navIconSize = 28;
+
 List<_TabIcon> _buildTabIcons() => [
   _TabIcon(
-    inactive: AppIcon('home_outline', color: AppColors.textSecondary),
-    active: AppIcon('home', color: AppColors.brand),
+    inactive: AppIcon('home_outline', size: _navIconSize, color: AppColors.textSecondary),
+    active: AppIcon('home', size: _navIconSize, color: AppColors.brand),
     label: 'Home',
   ),
   _TabIcon(
-    inactive: AppIcon('play_square', color: AppColors.textSecondary),
-    active: AppIcon('play_square_filled', color: AppColors.brand),
+    inactive: AppIcon('play_square', size: _navIconSize, color: AppColors.textSecondary),
+    active: AppIcon('play_square_filled', size: _navIconSize, color: AppColors.brand),
     label: 'Reels',
   ),
   _TabIcon(
-    inactive: AppIcon('trophy_star', color: AppColors.textSecondary),
-    active: AppIcon('trophy_star_filled', color: AppColors.brand),
+    inactive: AppIcon('trophy_star', size: _navIconSize, color: AppColors.textSecondary),
+    active: AppIcon('trophy_star_filled', size: _navIconSize, color: AppColors.brand),
     label: 'Leaderboard',
   ),
   _TabIcon(
-    inactive: AppIcon('send', color: AppColors.textSecondary),
-    active: AppIcon('send_filled', color: AppColors.brand),
+    inactive: AppIcon('send', size: _navIconSize, color: AppColors.textSecondary),
+    active: AppIcon('send_filled', size: _navIconSize, color: AppColors.brand),
     label: 'Chat',
   ),
   _TabIcon(
-    inactive: AppIcon('user', color: AppColors.textSecondary),
-    active: AppIcon('user_filled', color: AppColors.brand),
+    inactive: AppIcon('user', size: _navIconSize, color: AppColors.textSecondary),
+    active: AppIcon('user_filled', size: _navIconSize, color: AppColors.brand),
     label: 'Profile',
   ),
 ];
@@ -498,9 +501,15 @@ class _TabNavBar extends ConsumerWidget {
     final unreadChats = ref.watch(totalUnreadChatCountProvider);
     return SafeArea(
       top: false,
+      // Figma "Menu bar 2" (426:2161): 80pt tall, card background, a 1pt top
+      // divider, 20pt side padding / 16pt vertical, 12pt between items.
       child: Container(
-        height: 64,
-        color: AppColors.backgroundCard,
+        height: 80,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        decoration: BoxDecoration(
+          color: AppColors.backgroundCard,
+          border: Border(top: BorderSide(color: AppColors.borderDivider)),
+        ),
         child: AnimatedBuilder(
           animation: controller,
           builder: (context, _) {
@@ -510,7 +519,8 @@ class _TabNavBar extends ConsumerWidget {
                 : settledIndex.toDouble();
             return Row(
               children: [
-                for (var i = 0; i < tabIcons.length; i++)
+                for (var i = 0; i < tabIcons.length; i++) ...[
+                  if (i > 0) const SizedBox(width: 12),
                   Expanded(
                     child: _NavIconButton(
                       icon: tabIcons[i],
@@ -519,6 +529,7 @@ class _TabNavBar extends ConsumerWidget {
                       badgeCount: i == _chatPageIndex ? unreadChats : 0,
                     ),
                   ),
+                ],
               ],
             );
           },
@@ -545,13 +556,17 @@ class _NavIconButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return InkResponse(
       onTap: onTap,
-      child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          decoration: BoxDecoration(
-            color: AppColors.brand.withValues(alpha: 0.1 * activation),
-            borderRadius: BorderRadius.circular(999),
-          ),
+      // Figma 195:8153: each item fills its share of the row (flex-1) with 6pt
+      // vertical padding and a 36pt radius — the pill spans the full item
+      // width rather than hugging the icon, so it can't be a Center + fixed
+      // horizontal padding. The active tint is brand at 10%, which the
+      // activation factor cross-fades as the pager is dragged.
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        decoration: BoxDecoration(
+          color: AppColors.brand.withValues(alpha: 0.1 * activation),
+          borderRadius: BorderRadius.circular(36),
+        ),
           child: Stack(
             clipBehavior: Clip.none,
             alignment: Alignment.center,
@@ -588,8 +603,7 @@ class _NavIconButton extends StatelessWidget {
                     ),
                   ),
                 ),
-            ],
-          ),
+          ],
         ),
       ),
     );
