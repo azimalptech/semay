@@ -130,6 +130,14 @@ final routerProvider = Provider<GoRouter>((ref) {
       // off until the data is actually settled.
       if (role.isLoading || profile.isLoading) return null;
 
+      // A FAILED profile fetch is not the same as "this user has no name".
+      // When /users/me errors (API unreachable, tunnel down, token rejected),
+      // isLoading is false, hasError is true and .value is null — so the
+      // name.isEmpty test below read empty and bounced people who already had
+      // a name onto /auth/name on every launch. Only act on a profile that
+      // genuinely loaded; on error stay put so the screen's own retry can run.
+      if (profile.hasError || !profile.hasValue) return null;
+
       final name = profile.value?['name'] as String? ?? '';
       if (name.isEmpty) return loc == '/auth/name' ? null : '/auth/name';
 
