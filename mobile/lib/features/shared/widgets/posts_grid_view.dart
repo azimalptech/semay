@@ -66,13 +66,17 @@ class PostsGridView extends ConsumerWidget {
               ),
             )
           else
+            // Figma 223:5401 — three flex-1 cells per row with NO gap and no
+            // outer padding, so thumbnails butt edge to edge and the grid spans
+            // the full width. Each cell is 131x131 on a 393pt frame, i.e.
+            // square, which is the delegate's default aspect ratio.
             SliverPadding(
-              padding: const EdgeInsets.all(2),
+              padding: EdgeInsets.zero,
               sliver: SliverGrid(
                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: 3,
-                  crossAxisSpacing: 2,
-                  mainAxisSpacing: 2,
+                  crossAxisSpacing: 0,
+                  mainAxisSpacing: 0,
                 ),
                 delegate: SliverChildBuilderDelegate((context, index) {
                   final doc = posts[index];
