@@ -28,6 +28,11 @@ class OtpLockedException implements Exception {
 /// panel rather than the in-app button.
 class AccountDeletionBlockedException implements Exception {}
 
+/// The OTP was correct but this phone has no account yet and no name was
+/// supplied. The code remains valid — collect a name and call verifyOtp again
+/// with the SAME code. See server/src/auth/otpStore.ts NameRequiredError.
+class NameRequiredException implements Exception {}
+
 enum AppRole { unauthenticated, user, admin, superadmin }
 
 /// Kept as the same name/shape every screen and router.dart already expects
@@ -93,11 +98,19 @@ class AuthService {
 
   /// Verifies the code, then persists the resulting access/refresh tokens.
   /// Throws [OtpException] for a wrong code or [OtpLockedException] once the
-  /// phone is locked out.
-  Future<void> verifyOtp(String phone, String code) async {
+  /// phone is locked out, and [NameRequiredException] when this phone has no
+  /// account yet and no [name] was supplied — the server creates the account
+  /// and its name in one transaction, so a nameless row can't exist.
+  ///
+  /// The code is NOT consumed by a NAME_REQUIRED rejection: the caller collects
+  /// a name and calls this again with the same [code].
+  Future<void> verifyOtp(String phone, String code, {String? name}) async {
     final Map<String, dynamic> data;
     try {
-      data = await _api.post('/auth/otp/verify', body: {'phone': phone, 'code': code});
+      data = await _api.post(
+        '/auth/otp/verify',
+        body: {'phone': phone, 'code': code, 'name': ?name},
+      );
     } on ApiException catch (e) {
       throw _mapOtpException(e);
     }
@@ -183,6 +196,10 @@ class AuthService {
           'Invalid code',
           attemptsRemaining: body?['attemptsRemaining'] as int?,
         );
+      case 'NAME_REQUIRED':
+        // Not an error to show — the code was right, we just need a name
+        // before the account can be created. The OTP is still valid.
+        return NameRequiredException();
       default:
         return OtpException(e.error);
     }

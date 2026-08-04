@@ -94,7 +94,7 @@ describe("DELETE /users/me", () => {
 
     // A brand-new account, not a resurrection of the tombstone.
     const { findOrCreateUserByPhone } = await import("../src/auth/users.js");
-    const fresh = await findOrCreateUserByPhone(original.phone);
+    const fresh = await findOrCreateUserByPhone(original.phone, "Reused Number");
     userIds.push(fresh.id);
     expect(fresh.id).not.toBe(customer.userId);
     expect(fresh.deletedAt).toBeNull();

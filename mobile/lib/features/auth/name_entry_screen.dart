@@ -4,8 +4,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/l10n.dart';
 import '../../services/auth_service.dart';
 
+/// Collects the name for a FIRST-TIME signup.
+///
+/// [pendingPhone]/[pendingCode] are set when we arrived here from the OTP
+/// screen's NAME_REQUIRED response: no account exists yet, so submitting
+/// finishes the original verify call and the server creates the account and
+/// its name in one transaction. When they're null this falls back to updating
+/// an already-signed-in account, which is how the router's own
+/// empty-name redirect reaches this screen.
 class NameEntryScreen extends ConsumerStatefulWidget {
-  const NameEntryScreen({super.key});
+  const NameEntryScreen({super.key, this.pendingPhone, this.pendingCode});
+
+  final String? pendingPhone;
+  final String? pendingCode;
 
   @override
   ConsumerState<NameEntryScreen> createState() => _NameEntryScreenState();
@@ -31,9 +42,17 @@ class _NameEntryScreenState extends ConsumerState<NameEntryScreen> {
       _error = null;
     });
     try {
-      // Updates users/{uid}.name; the router redirect reacts to the
-      // now-non-empty profile and routes to the role's home.
-      await ref.read(authServiceProvider).completeProfile(name);
+      final phone = widget.pendingPhone;
+      final code = widget.pendingCode;
+      if (phone != null && code != null) {
+        // Signup: completes the verify that returned NAME_REQUIRED. The code
+        // was never consumed, so this is the same one-shot login — it signs the
+        // user in, and the router takes it from there.
+        await ref.read(authServiceProvider).verifyOtp(phone, code, name: name);
+      } else {
+        // Already signed in — just set the name on the existing account.
+        await ref.read(authServiceProvider).completeProfile(name);
+      }
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {

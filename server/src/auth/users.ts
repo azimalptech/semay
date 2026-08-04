@@ -7,12 +7,19 @@ import { prisma } from "../db.js";
  * INSERT is the concurrency primitive — on MySQL duplicate-key error (P2002)
  * the loser just re-SELECTs and returns the winner's row instead of creating
  * a second account for the same phone under concurrent signup. */
-export async function findOrCreateUserByPhone(phone: string): Promise<User> {
+/// `name` is REQUIRED: accounts must never exist without one (see
+/// otpStore.verifyOtp, which is the only production path that creates users
+/// and enforces the same rule inside its transaction). Leaving it optional
+/// here would let a future caller quietly reintroduce nameless signups.
+export async function findOrCreateUserByPhone(
+  phone: string,
+  name: string
+): Promise<User> {
   const existing = await prisma.user.findUnique({ where: { phone } });
   if (existing) return existing;
 
   try {
-    return await prisma.user.create({ data: { phone } });
+    return await prisma.user.create({ data: { phone, name } });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       const winner = await prisma.user.findUnique({ where: { phone } });

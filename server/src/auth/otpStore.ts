@@ -1,3 +1,5 @@
+import type { User } from "@prisma/client";
+
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { generateOtpCode } from "../lib/crypto.js";
@@ -69,8 +71,31 @@ export async function clearOtp(phone: string): Promise<void> {
 /** Verifies a code and consumes the row on success. `SELECT ... FOR UPDATE`
  * serializes concurrent verify attempts against the same phone so the attempts
  * counter (and the lockout it drives) can't be raced. Throws on any failure. */
-export async function verifyOtp(phone: string, code: string): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+/** Thrown when a code is correct but the phone has no account yet and the
+ * caller supplied no name. Deliberately raised INSIDE verifyOtp's transaction
+ * so the whole thing rolls back and the OTP row survives — the client can then
+ * collect a name and retry with the SAME code instead of requesting a new one.
+ *
+ * Checking this after the code is validated (rather than before) is what keeps
+ * it from becoming a phone-number enumeration oracle: an attacker without a
+ * valid code can't tell a registered number from an unregistered one. */
+export class NameRequiredError extends Error {
+  constructor() {
+    super("A name is required to create an account");
+    this.name = "NameRequiredError";
+  }
+}
+
+/** Verifies the code and, on success, returns the account for `phone` —
+ * creating it if this is a first-time signup, in which case `name` is
+ * mandatory (see NameRequiredError). Creation lives in the same transaction as
+ * the code check so an account can never come into existence without a name. */
+export async function verifyOtp(
+  phone: string,
+  code: string,
+  name?: string
+): Promise<User> {
+  return prisma.$transaction(async (tx) => {
     const rows = await tx.$queryRaw<
       {
         phone: string;
@@ -101,6 +126,21 @@ export async function verifyOtp(phone: string, code: string): Promise<void> {
       throw new OtpInvalidError(config.OTP_MAX_ATTEMPTS - attempts);
     }
 
+    // Code is correct from here on.
+    const existing = await tx.user.findUnique({ where: { phone } });
+    const trimmed = name?.trim() ?? "";
+    if (!existing && trimmed.length === 0) {
+      // Rolls the transaction back, so the OTP row above is NOT deleted and
+      // the same code still works on the retry that carries a name.
+      throw new NameRequiredError();
+    }
+
     await tx.otpCode.delete({ where: { phone } });
+
+    // findOrCreateUserByPhone's insert-then-reselect race handling isn't needed
+    // here: this runs inside the same SELECT ... FOR UPDATE transaction that
+    // holds the otp_codes row for this phone, so two concurrent verifies for
+    // the same number are already serialised.
+    return existing ?? tx.user.create({ data: { phone, name: trimmed } });
   });
 }

@@ -20,7 +20,7 @@ describe("findOrCreateUserByPhone concurrency", () => {
     const CONCURRENCY = 20;
 
     const results = await Promise.all(
-      Array.from({ length: CONCURRENCY }, () => findOrCreateUserByPhone(phone))
+      Array.from({ length: CONCURRENCY }, () => findOrCreateUserByPhone(phone, "Concurrency Test"))
     );
 
     const distinctIds = new Set(results.map((u) => u.id));

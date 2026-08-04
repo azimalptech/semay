@@ -10,6 +10,7 @@ import { requireAuth } from "./middleware.js";
 import {
   clearOtp,
   OtpCooldownError,
+  NameRequiredError,
   OtpInvalidError,
   OtpLockedError,
   requestOtp,
@@ -18,7 +19,6 @@ import {
 import { smsProvider } from "./sms.js";
 import { createSession, findActiveSession, revokeSession, rotateSession, SessionInvalidError } from "./session.js";
 import { verifyPassword } from "./superadminAuth.js";
-import { findOrCreateUserByPhone } from "./users.js";
 
 const phoneSchema = z.string().regex(/^\+?[1-9]\d{6,14}$/, "Invalid phone number");
 
@@ -26,6 +26,11 @@ const sendSchema = z.object({ phone: phoneSchema });
 const verifySchema = z.object({
   phone: phoneSchema,
   code: z.string().regex(/^\d{6}$/),
+  // Required only when this phone has no account yet — the server answers
+  // NAME_REQUIRED (without consuming the code) so the client can collect one
+  // and retry. Ignored for an existing account, so returning users are never
+  // asked again.
+  name: z.string().trim().min(1).max(120).optional(),
   deviceInfo: z.string().max(255).optional(),
 });
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
@@ -100,10 +105,13 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (!body.success) {
       return reply.code(400).send({ error: "INVALID_INPUT" });
     }
-    const { phone, code, deviceInfo } = body.data;
+    const { phone, code, name, deviceInfo } = body.data;
 
+    let user;
     try {
-      await verifyOtp(phone, code);
+      // Account creation happens inside verifyOtp's transaction, so a row can
+      // never exist without a name — see NameRequiredError there.
+      user = await verifyOtp(phone, code, name);
     } catch (err) {
       if (err instanceof OtpLockedError) {
         return reply
@@ -115,10 +123,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           .code(401)
           .send({ error: "OTP_INVALID", attemptsRemaining: err.attemptsRemaining });
       }
+      if (err instanceof NameRequiredError) {
+        // The code was correct and is still valid — the client collects a name
+        // and retries this same call with it.
+        return reply.code(400).send({ error: "NAME_REQUIRED" });
+      }
       throw err;
     }
 
-    const user = await findOrCreateUserByPhone(phone);
     const claims = await getClaimsForUser(user.id);
     const accessToken = signAccessToken(claims);
     const { refreshToken } = await createSession(user.id, deviceInfo);

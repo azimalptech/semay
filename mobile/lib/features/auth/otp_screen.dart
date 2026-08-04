@@ -120,6 +120,14 @@ class _OtpScreenState extends ConsumerState<OtpScreen> {
       // first) stranded on a blank "page not found" screen with no way
       // back in short of restarting the app.
       await ref.read(authServiceProvider).verifyOtp(phone, code);
+    } on NameRequiredException {
+      // First-time signup: the code was correct and is still valid, but the
+      // account isn't created until we have a name (the server refuses to make
+      // a nameless one). Hand the phone AND code to the name screen, which
+      // finishes the same verify call. Nothing is signed in yet, so the router
+      // can't route us — this navigation is explicit.
+      if (!mounted) return;
+      context.push('/auth/name', extra: {'phone': phone, 'code': code});
     } on OtpLockedException catch (e) {
       if (!mounted) return;
       setState(() {

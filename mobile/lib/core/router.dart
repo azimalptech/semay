@@ -171,7 +171,15 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/auth/name',
-        builder: (context, state) => const NameEntryScreen(),
+        builder: (context, state) {
+          // Set when the OTP screen bounced here with NAME_REQUIRED — carries
+          // the still-valid code so signup can be completed in one call.
+          final extra = state.extra as Map<String, dynamic>?;
+          return NameEntryScreen(
+            pendingPhone: extra?['phone'] as String?,
+            pendingCode: extra?['code'] as String?,
+          );
+        },
       ),
       GoRoute(
         path: '/search',
