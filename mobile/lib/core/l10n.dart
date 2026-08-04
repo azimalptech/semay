@@ -69,6 +69,11 @@ class S {
   // Store profile
   String get posts => isRu ? 'Посты' : 'Postlar';
   String get reels => 'Reels';
+
+  /// Store header total-likes stat ("Halananlar" = likes RECEIVED, Figma
+  /// 223:5365). Distinct from `likes` further down, which is the profile's
+  /// "my liked posts" list ("Halanlarym" = likes I GAVE).
+  String get storeLikes => isRu ? 'Лайки' : 'Halananlar';
   String get videos => isRu ? 'Видео' : 'Post';
   String get editProfile => isRu ? 'Редактировать' : 'Profili üýtget';
   String get share => isRu ? 'Поделиться' : 'Paýlaş';

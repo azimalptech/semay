@@ -37,6 +37,8 @@ class StoreProfileScreen extends ConsumerWidget {
     // the same two numbers for a consistent "posts vs reels" split at a glance.
     final postsCount = store?['postsCount'] as int? ?? 0;
     final reelsCount = store?['reelsCount'] as int? ?? 0;
+    // Store-level likes rollup — see server/src/posts/service.ts setToggle.
+    final likesCount = store?['likesCount'] as int? ?? 0;
 
     return DefaultTabController(
       length: 2,
@@ -85,6 +87,7 @@ class StoreProfileScreen extends ConsumerWidget {
                 isOwnStore: isOwnStore,
                 postsCount: postsCount,
                 reelsCount: reelsCount,
+                likesCount: likesCount,
               ),
             ),
             SliverOverlapAbsorber(
@@ -134,6 +137,7 @@ class _StoreHeader extends ConsumerWidget {
     required this.isOwnStore,
     required this.postsCount,
     required this.reelsCount,
+    required this.likesCount,
   });
 
   final String storeId;
@@ -141,6 +145,7 @@ class _StoreHeader extends ConsumerWidget {
   final bool isOwnStore;
   final int postsCount;
   final int reelsCount;
+  final int likesCount;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -227,16 +232,24 @@ class _StoreHeader extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(name, style: AppTypography.titleLarge),
-                    const SizedBox(height: 6),
-                    // Moved up next to the avatar/name (was previously only
-                    // shown as small tab-bar labels further down) — the two
-                    // numbers people scan for first, Instagram-style.
+                    // Figma "Title/Small" (18/600/-0.36), not titleLarge.
+                    Text(name, style: AppTypography.titleSmall),
+                    const SizedBox(height: 8),
+                    // Three equal-width columns, matching Figma 426:2047 where
+                    // each stat is flex-1 — not fixed-gap blocks. Expanded is
+                    // what reproduces that, and it keeps the three labels
+                    // aligned regardless of how wide each number renders.
                     Row(
                       children: [
-                        _StatBlock(count: postsCount, label: s.posts),
-                        const SizedBox(width: 40),
-                        _StatBlock(count: reelsCount, label: s.reels),
+                        Expanded(
+                          child: _StatBlock(count: postsCount, label: s.posts),
+                        ),
+                        Expanded(
+                          child: _StatBlock(count: reelsCount, label: s.reels),
+                        ),
+                        Expanded(
+                          child: _StatBlock(count: likesCount, label: s.storeLikes),
+                        ),
                       ],
                     ),
                   ],
@@ -245,13 +258,11 @@ class _StoreHeader extends ConsumerWidget {
             ],
           ),
           if (tagline.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Text(
-              tagline,
-              style: AppTypography.bodySmall.copyWith(
-                color: AppColors.textSecondary,
-              ),
-            ),
+            const SizedBox(height: 16),
+            // Figma 367:2222 — Body/Medium (15/400/-0.3) in primary text, not
+            // the smaller secondary style this used to render. The design shows
+            // it wrapping to multiple lines, so no maxLines clamp.
+            Text(tagline, style: AppTypography.bodyMedium),
           ],
           const SizedBox(height: 16),
           Row(
@@ -347,13 +358,29 @@ class _TabLabel extends StatelessWidget {
   }
 }
 
-/// "24 Posts" / "13 Reels" stat block — count bold above, label muted below,
-/// matching the pattern _InfoRow uses for Phone/Location further down.
+/// One "245 / Postlar" stat column on the store header.
+///
+/// Type and colour are taken from Figma 223:5365: the number is Body/Large Bold
+/// (17/600/-0.34) in primary text and the label is Body/Small (13/400/-0.26) in
+/// SECONDARY — not the muted grey and not the 18/700 this previously used.
 class _StatBlock extends StatelessWidget {
   const _StatBlock({required this.count, required this.label});
 
   final int count;
   final String label;
+
+  /// Figma shows "24.34K" for a large total while leaving 245 and 342 plain, so
+  /// compacting kicks in only at 1000. Two decimals with trailing zeros trimmed
+  /// reproduces "24.34K" exactly (24340 -> "24.34K", 24000 -> "24K").
+  static String _format(int value) {
+    if (value < 1000) return '$value';
+    final unit = value >= 1000000 ? 'M' : 'K';
+    final scaled = value / (value >= 1000000 ? 1000000 : 1000);
+    final text = scaled
+        .toStringAsFixed(2)
+        .replaceFirst(RegExp(r'\.?0+$'), '');
+    return '$text$unit';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -361,17 +388,14 @@ class _StatBlock extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          '$count',
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.w700,
-            color: AppColors.textPrimary,
-          ),
-        ),
+        Text(_format(count), style: AppTypography.bodyLargeBold),
         Text(
           label,
-          style: AppTypography.caption.copyWith(color: AppColors.textMuted),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: AppTypography.bodySmall.copyWith(
+            color: AppColors.textSecondary,
+          ),
         ),
       ],
     );

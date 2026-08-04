@@ -183,6 +183,14 @@ model Store {
   geoLng           Decimal?  @db.Decimal(9, 6)
   postsCount       Int       @default(0)
   reelsCount       Int       @default(0)
+  // Total likes across this store's posts — the "Halananlar" stat on the store
+  // detail header. Denormalized for the same reason postsCount/reelsCount are:
+  // the header is read constantly and a SUM over every post of the store on each
+  // load would scale with catalogue size. Maintained in the same transaction as
+  // the per-post like toggle (posts/service.ts setToggle), so it can't drift.
+  // Deliberately NOT backfilled from existing likes (owner's call) — it starts at
+  // 0 and counts from the migration forward.
+  likesCount       Int       @default(0)
   createdById      String    @db.VarChar(36)
   active           Boolean   @default(true)
   leaderboardOrder Int?

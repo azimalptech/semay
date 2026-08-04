@@ -159,6 +159,13 @@ async function setToggle(
   model: "postLike" | "postSave",
   countField: "likesCount" | "savesCount"
 ): Promise<void> {
+  // Likes additionally roll up to the store's own total (the "Halananlar" stat
+  // on the store detail header). Kept inside the same transaction as the
+  // per-post counter so the two can never disagree — a store total maintained
+  // outside the transaction would drift on any rollback. Saves don't roll up:
+  // there is no store-level saves stat in the design.
+  const rollsUpToStore = countField === "likesCount";
+
   const changed = await prisma.$transaction(async (tx) => {
     if (on) {
       try {
@@ -168,13 +175,36 @@ async function setToggle(
         if (isDuplicateKeyError(err)) return false;
         throw err;
       }
-      await tx.post.update({ where: { id: postId }, data: { [countField]: { increment: 1 } } });
+      const post = await tx.post.update({
+        where: { id: postId },
+        data: { [countField]: { increment: 1 } },
+        select: { storeId: true },
+      });
+      if (rollsUpToStore) {
+        await tx.store.update({
+          where: { id: post.storeId },
+          data: { likesCount: { increment: 1 } },
+        });
+      }
       return true;
     }
     // @ts-expect-error -- model is one of two delegates sharing this shape
     const deleted = await tx[model].deleteMany({ where: { postId, userId } });
     if (deleted.count === 0) return false;
-    await tx.post.update({ where: { id: postId }, data: { [countField]: { decrement: 1 } } });
+    const post = await tx.post.update({
+      where: { id: postId },
+      data: { [countField]: { decrement: 1 } },
+      select: { storeId: true },
+    });
+    if (rollsUpToStore) {
+      // Clamped at zero: the counter starts from 0 by design (no backfill), so
+      // unliking a post that was liked BEFORE the counter existed would
+      // otherwise drive the store total negative.
+      await tx.store.updateMany({
+        where: { id: post.storeId, likesCount: { gt: 0 } },
+        data: { likesCount: { decrement: 1 } },
+      });
+    }
     return true;
   });
   if (changed) await publishPostCounts(postId);

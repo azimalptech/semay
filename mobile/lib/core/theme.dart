@@ -40,7 +40,8 @@ class AppColors {
 
   /// Store Detail's "Call" button — deliberately not [brand]; a call action
   /// reads as green everywhere else in the app (dialer icons, etc.) too.
-  static const Color callGreen = Color(0xFF22C55E);
+  // Figma state-colors/success. Was 0xFF22C55E, which did not match the design.
+  static const Color callGreen = Color(0xFF00C950);
 
   /// Story-ring accent (Homepage story bar) — distinct from `brand`.
   static const Color storyRing = Color(0xFFFF08ED);
@@ -59,9 +60,32 @@ class AppColors {
 class AppTypography {
   AppTypography._();
 
+  /// Bundled in pubspec.yaml (SIL OFL — assets/fonts/Geist-OFL.txt). Applied via
+  /// ThemeData.fontFamily below, so individual styles don't repeat it.
+  ///
+  /// Letter-spacing throughout this class is Figma's -2% expressed in logical
+  /// pixels (15 * -0.02 = -0.3, 13 * -0.02 = -0.26, and so on).
+  static const String fontFamily = 'Geist';
+
   static TextStyle get titleLarge => TextStyle(
     fontSize: 22,
     fontWeight: FontWeight.w600,
+    color: AppColors.textPrimary,
+  );
+
+  /// Figma "Title/Small" — store name on the store detail header.
+  static TextStyle get titleSmall => TextStyle(
+    fontSize: 18,
+    fontWeight: FontWeight.w600,
+    letterSpacing: -0.36,
+    color: AppColors.textPrimary,
+  );
+
+  /// Figma "Body/Large Bold" — the stat numbers (245 / 342 / 24.34K).
+  static TextStyle get bodyLargeBold => TextStyle(
+    fontSize: 17,
+    fontWeight: FontWeight.w600,
+    letterSpacing: -0.34,
     color: AppColors.textPrimary,
   );
 
@@ -118,6 +142,10 @@ class AppTheme {
 
   static ThemeData get light => ThemeData(
     useMaterial3: true,
+    // Every text style in the Figma file is Geist. Set once here so it applies
+    // app-wide rather than per-widget — previously unset, so the whole app
+    // rendered in Roboto and no screen could match the design.
+    fontFamily: AppTypography.fontFamily,
     scaffoldBackgroundColor: AppColors.backgroundPrimary,
     colorScheme: ColorScheme.fromSeed(
       seedColor: AppColors.brand,
@@ -142,6 +170,7 @@ class AppTheme {
   // getters correctly resolve to the dark palette above.
   static ThemeData get dark => ThemeData(
     useMaterial3: true,
+    fontFamily: AppTypography.fontFamily,
     scaffoldBackgroundColor: AppColors.backgroundPrimary,
     colorScheme: ColorScheme.fromSeed(
       seedColor: AppColors.brand,
