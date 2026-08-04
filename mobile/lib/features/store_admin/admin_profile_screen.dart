@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
-import '../../core/app_icon.dart';
 import '../../services/auth_service.dart';
 import '../settings/settings_screen.dart';
 import '../store_profile/store_profile_screen.dart';
@@ -33,17 +31,14 @@ class AdminOwnStoreScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final storeIds = ref.watch(storeIdsProvider).value ?? [];
     if (storeIds.isEmpty) {
-      return Scaffold(
-        appBar: AppBar(
-          actions: [
-            IconButton(
-              icon: const AppIcon('settings'),
-              onPressed: () => context.push('/admin/settings'),
-            ),
-          ],
-        ),
-        body: const SizedBox.shrink(),
-      );
+      // No store to show — render the ordinary profile/settings screen rather
+      // than an empty Scaffold. This is reachable in normal use: a SUPERADMIN
+      // manages no store of their own, so the Profile tab previously rendered
+      // SizedBox.shrink() and left them staring at a blank page with only a
+      // gear icon. The same applied to a store admin whose last store had just
+      // been deleted. SettingsScreen already handles a null storeId by hiding
+      // the store-scoped rows, so it degrades cleanly.
+      return const SettingsScreen(storeId: null);
     }
     return StoreProfileScreen(storeId: storeIds.first);
   }
