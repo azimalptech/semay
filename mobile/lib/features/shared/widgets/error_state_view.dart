@@ -33,22 +33,28 @@ class ErrorStateView extends ConsumerWidget {
               ),
             ),
             const SizedBox(height: 20),
+            // Title is Title/Small (18/600) in the design, notably larger than
+            // the subtitle beneath it — not the 15pt this used to render.
             Text(
               s.noConnection,
-              style: AppTypography.bodyMediumSemibold,
+              style: AppTypography.titleSmall,
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 6),
             Text(
               message ?? s.checkConnection,
-              style: AppTypography.bodySmall.copyWith(
+              style: AppTypography.bodyMedium.copyWith(
                 color: AppColors.textSecondary,
               ),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 20),
+            // Figma draws this as a WHITE pill with dark text sitting on the
+            // page background, not a filled brand button — it's a recovery
+            // affordance on an error screen, deliberately quieter than a
+            // primary call to action.
             Material(
-              color: AppColors.brand,
+              color: AppColors.backgroundCard,
               shape: const StadiumBorder(),
               child: InkWell(
                 customBorder: const StadiumBorder(),
@@ -61,7 +67,7 @@ class ErrorStateView extends ConsumerWidget {
                   child: Text(
                     s.tryAgain,
                     style: AppTypography.buttonSmall.copyWith(
-                      color: Colors.white,
+                      color: AppColors.textPrimary,
                     ),
                   ),
                 ),
