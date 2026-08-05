@@ -5,6 +5,15 @@ import { getClaimsForUser } from "../src/auth/claims.js";
 import { prisma } from "../src/db.js";
 import { signAccessToken } from "../src/lib/jwt.js";
 
+/** Every row these helpers create carries this name, so a global teardown can
+ * find and purge fixtures even when a test file crashes before its own
+ * afterAll runs. That leak was real: the dev database had accumulated 11
+ * nameless accounts, 10 of them superadmins, purely from failed test runs.
+ *
+ * Naming them also keeps fixtures from masquerading as the nameless accounts
+ * that signup no longer permits (see auth/otpStore.ts NameRequiredError). */
+export const TEST_FIXTURE_NAME = "__TEST_FIXTURE__";
+
 /** Creates a real user row (bypassing the OTP flow, which is covered
  * elsewhere) and signs a real access token from their *actual* DB claims —
  * exercises the same signAccessToken/verifyAccessToken path production uses. */
@@ -12,7 +21,9 @@ export async function createUserWithToken(
   role: Role = "user"
 ): Promise<{ userId: string; token: string }> {
   const phone = `+9937${Math.floor(1_000_000 + Math.random() * 8_999_999)}`;
-  const user = await prisma.user.create({ data: { phone, role } });
+  const user = await prisma.user.create({
+    data: { phone, role, name: TEST_FIXTURE_NAME },
+  });
   const claims = await getClaimsForUser(user.id);
   return { userId: user.id, token: signAccessToken(claims) };
 }

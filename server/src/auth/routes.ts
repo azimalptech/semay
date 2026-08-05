@@ -6,7 +6,8 @@ import { config } from "../config.js";
 import { prisma } from "../db.js";
 import { getClaimsForUser } from "./claims.js";
 import { signAccessToken } from "../lib/jwt.js";
-import { requireAuth } from "./middleware.js";
+import { requireRole } from "./authz.js";
+import { requireAuth, requireFreshAuth } from "./middleware.js";
 import {
   clearOtp,
   OtpCooldownError,
@@ -18,7 +19,7 @@ import {
 } from "./otpStore.js";
 import { smsProvider } from "./sms.js";
 import { createSession, findActiveSession, revokeSession, rotateSession, SessionInvalidError } from "./session.js";
-import { verifyPassword } from "./superadminAuth.js";
+import { hashPassword, verifyPassword } from "./superadminAuth.js";
 
 const phoneSchema = z.string().regex(/^\+?[1-9]\d{6,14}$/, "Invalid phone number");
 
@@ -40,6 +41,14 @@ const superadminLoginSchema = z.object({
   phone: phoneSchema,
   password: z.string().min(1).max(255),
   deviceInfo: z.string().max(255).optional(),
+});
+// 12 chars minimum: this single password guards broadcast-to-every-user, store
+// creation/deletion and cross-store order visibility, and it is the one
+// brute-forceable surface in a system where everything else needs possession of
+// a phone. The seeded value was 10 characters and a dictionary word.
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(255),
+  newPassword: z.string().min(12).max(255),
 });
 
 // Tighter per-IP cap for the unauthenticated auth surface. The global limit is
@@ -190,6 +199,47 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       },
     });
   });
+
+  // Self-service password change for the superadmin panel. Until now the only
+  // way to change it was a direct UPDATE against the database, which meant in
+  // practice it never got changed — the account was still on its seeded value.
+  //
+  // requireFreshAuth so a token minted before a demotion can't be replayed
+  // here, and the CURRENT password is required even though the caller is
+  // already authenticated: an access token left behind on an unlocked machine
+  // shouldn't be enough to lock the real owner out.
+  app.post(
+    "/auth/superadmin/change-password",
+    { preHandler: [requireAuth, requireFreshAuth, requireRole("superadmin")], ...authRateLimit },
+    async (req, reply) => {
+      const body = changePasswordSchema.safeParse(req.body);
+      if (!body.success) {
+        // Surfaces the length rule rather than a bare INVALID_INPUT, since
+        // that's the only way the caller can act on the rejection.
+        return reply
+          .code(400)
+          .send({ error: "INVALID_INPUT", message: "New password must be at least 12 characters" });
+      }
+
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: req.auth!.sub } });
+      if (!(await verifyPassword(body.data.currentPassword, user.passwordHash))) {
+        return reply.code(401).send({ error: "INVALID_CREDENTIALS" });
+      }
+
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash: await hashPassword(body.data.newPassword) },
+      });
+
+      // Every existing session dies, this one included. A password change is
+      // the standard response to "someone may have my credentials", so leaving
+      // other logins alive would defeat the point; the caller simply signs in
+      // again with the new password.
+      await prisma.session.deleteMany({ where: { userId: user.id } });
+
+      return reply.send({ ok: true });
+    }
+  );
 
   app.post("/auth/refresh", authRateLimit, async (req, reply) => {
     const body = refreshSchema.safeParse(req.body);

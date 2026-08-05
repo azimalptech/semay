@@ -1,7 +1,15 @@
 import type { FastifyBaseLogger } from "fastify";
 
+import { stat, unlink } from "node:fs/promises";
+import path from "node:path";
+
 import { prisma } from "./db.js";
-import { deleteMediaByUrls } from "./media/storage.js";
+import {
+  deleteMediaByUrls,
+  keyForPublicUrl,
+  listMediaFiles,
+  MEDIA_DIR,
+} from "./media/storage.js";
 
 // Nothing in this codebase ever removed expired data, which meant three tables
 // (and the media folder) grew without bound:
@@ -116,6 +124,61 @@ async function reapExpiredOtps(log: FastifyBaseLogger): Promise<void> {
   if (count > 0) log.info({ otpCodes: count }, "reaped expired OTP codes");
 }
 
+/** Removes media files on disk that nothing in the database references any more.
+ *
+ * Deletion paths clean up their own files as they go, but only for deletions
+ * made SINCE that was implemented, and only when the process survived long
+ * enough to finish. Anything orphaned before then — or by a crash between the
+ * DB commit and the unlink — is invisible to the database and would sit on disk
+ * forever. This is the backstop that bounds it.
+ *
+ * A file is only removed once it is BOTH unreferenced and older than the grace
+ * window: an upload lands on disk before the row that points at it is written,
+ * so a newly-uploaded file is legitimately unreferenced for a short time. */
+const ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
+
+async function reapOrphanedMedia(log: FastifyBaseLogger): Promise<void> {
+  const referenced = new Set<string>();
+  const add = (url: string | null | undefined) => {
+    const key = keyForPublicUrl(url ?? "");
+    if (key) referenced.add(key.replace(/\\/g, "/"));
+  };
+
+  for (const m of await prisma.postMedia.findMany({ select: { url: true } })) add(m.url);
+  for (const p of await prisma.post.findMany({ select: { thumbnailUrl: true } })) add(p.thumbnailUrl);
+  for (const s of await prisma.story.findMany({ select: { mediaUrl: true } })) add(s.mediaUrl);
+  for (const u of await prisma.user.findMany({ select: { avatarUrl: true } })) add(u.avatarUrl);
+  for (const s of await prisma.store.findMany({
+    select: { avatarUrl: true, coverUrl: true, campaignImageUrl: true },
+  })) {
+    add(s.avatarUrl);
+    add(s.coverUrl);
+    add(s.campaignImageUrl);
+  }
+  for (const m of await prisma.message.findMany({
+    where: { mediaUrl: { not: null } },
+    select: { mediaUrl: true },
+  })) {
+    add(m.mediaUrl);
+  }
+
+  const cutoff = Date.now() - ORPHAN_GRACE_MS;
+  let removed = 0;
+  for (const abs of await listMediaFiles()) {
+    const key = path.relative(MEDIA_DIR, abs).replace(/\\/g, "/");
+    if (referenced.has(key)) continue;
+    try {
+      const info = await stat(abs);
+      if (info.mtimeMs > cutoff) continue; // still inside the upload grace window
+      await unlink(abs);
+      removed++;
+    } catch {
+      /* already gone or unreadable — nothing to do */
+    }
+  }
+  if (removed > 0) log.info({ files: removed }, "reaped orphaned media files");
+}
+
 /** One full reap pass, guarded by the lease. Exported for tests so they exercise
  * the same code path the scheduler runs, lease included. */
 export async function runReapCycle(log: FastifyBaseLogger): Promise<void> {
@@ -125,6 +188,7 @@ export async function runReapCycle(log: FastifyBaseLogger): Promise<void> {
     await reapExpiredStories(log);
     await reapDeadSessions(log);
     await reapExpiredOtps(log);
+    await reapOrphanedMedia(log);
   } finally {
     await releaseLease();
   }

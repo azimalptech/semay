@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, unlink, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
@@ -147,6 +147,49 @@ describe("maintenance reaper", () => {
     await runReapCycle(log);
 
     expect(await prisma.story.findUnique({ where: { id: stale.id } })).toBeNull();
+  });
+
+  // Deletion paths clean up their own files, but only for deletions made since
+  // that existed and only if the process survived to finish. This is the
+  // backstop — without it the dev media folder had 26 files against ~1 live
+  // reference.
+  it("deletes unreferenced media, but never a referenced or a freshly-uploaded file", async () => {
+    const admin = await createUserWithToken("admin");
+    userIds.push(admin.userId);
+    const store = await createStore("Orphan Store", admin.userId);
+    storeIds.push(store.id);
+
+    const orphanKey = `posts/orphan-${Date.now()}.jpg`;
+    const liveKey = `posts/live-${Date.now()}.jpg`;
+    const freshKey = `posts/fresh-${Date.now()}.jpg`;
+    for (const k of [orphanKey, liveKey, freshKey]) {
+      await writeFile(path.join(MEDIA_DIR, k), "bytes");
+    }
+
+    // Referenced by a real post row.
+    await prisma.post.create({
+      data: {
+        storeId: store.id,
+        type: "image",
+        caption: "",
+        thumbnailUrl: "",
+        media: { create: [{ url: publicUrlForKey(liveKey), position: 0 }] },
+      },
+    });
+
+    // Age the orphan past the grace window; leave `fresh` with a current mtime
+    // so it stands in for an upload whose row hasn't been written yet.
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await utimes(path.join(MEDIA_DIR, orphanKey), old, old);
+
+    await runReapCycle(log);
+
+    expect(existsSync(path.join(MEDIA_DIR, orphanKey))).toBe(false);
+    expect(existsSync(path.join(MEDIA_DIR, liveKey))).toBe(true);
+    expect(existsSync(path.join(MEDIA_DIR, freshKey))).toBe(true);
+
+    await unlink(path.join(MEDIA_DIR, liveKey)).catch(() => {});
+    await unlink(path.join(MEDIA_DIR, freshKey)).catch(() => {});
   });
 
   it("never reaps an OTP row that is still serving a lockout", async () => {
