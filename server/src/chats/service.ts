@@ -168,6 +168,23 @@ export async function sendMessage(
   let txResult;
   try {
     txResult = await withRetry(() => prisma.$transaction(async (tx) => {
+    // Take the chat row's exclusive lock UP FRONT, before the INSERT.
+    //
+    // Without this, two messages landing in the same chat deadlock roughly once
+    // per 1500 concurrent sends — confirmed against MySQL's own LATEST DETECTED
+    // DEADLOCK report, not inferred. The mechanism: `messages_chatId_fkey`
+    // makes the INSERT take a SHARED lock on the parent chats row, and the
+    // UPDATE below then needs that same row EXCLUSIVELY. Two transactions each
+    // holding S and each waiting to upgrade to X can only be resolved by InnoDB
+    // rolling one of them back.
+    //
+    // Locking X first turns that lock-upgrade deadlock into an ordinary queue:
+    // the second sender waits for the first to commit, then proceeds. withRetry
+    // below still covers genuine contention, but it no longer has to absorb a
+    // self-inflicted one — and it could not always do so, since 8 retries were
+    // observed to be exhausted under sustained same-chat load.
+    await tx.$queryRaw`SELECT id FROM chats WHERE id = ${chat.id} FOR UPDATE`;
+
     const message = await tx.message.create({
       data: {
         chatId: chat.id,

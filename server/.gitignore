@@ -15,8 +15,13 @@ serviceAccount*.json
 prisma/*.db
 prisma/*.db-journal
 
-# Media — user uploads are runtime data, never committed
-media/
+# Media — user uploads are runtime data, never committed.
+# Leading slash matters: an unanchored `media/` matches a directory of that name
+# at ANY depth, which silently swallowed src/media/ (routes.ts + storage.ts —
+# the signed-upload endpoint and the disk-storage layer). Already-tracked files
+# ignore .gitignore, so this stayed invisible until a fresh clone-and-recommit
+# dropped both source files without a word.
+/media/
 
 # Logs
 logs/

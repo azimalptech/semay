@@ -18,6 +18,62 @@ import { config } from "./config.js";
 // point, which is what the tests and local development use.
 const workerCount = config.CLUSTER_WORKERS > 0 ? config.CLUSTER_WORKERS : availableParallelism();
 
+/** Refuses to start if the workers would collectively ask MySQL for more
+ * connections than it allows.
+ *
+ * Every worker owns an independent Prisma pool, so the connection count
+ * multiplies by worker while MySQL's max_connections stays fixed. Load testing
+ * hit this exactly: 8 workers on Prisma's default pool wanted 264 connections
+ * against MariaDB's stock 151, and the overflow surfaced as scattered HTTP 500s
+ * ("Too many database connections opened") on whichever requests happened to be
+ * unlucky. Nothing in the logs pointed at the cause, and the failure only
+ * appeared under concurrency — the worst combination to debug in production.
+ *
+ * Checking it here converts that into a boot failure with an actionable
+ * message. Deliberately fatal rather than a warning: a server that starts and
+ * then fails a fraction of requests is worse than one that refuses to start. */
+async function assertConnectionBudgetFits(workers: number): Promise<void> {
+  // Prisma's default when connection_limit is absent from the URL.
+  const DEFAULT_POOL = availableParallelism() * 2 + 1;
+  const limitParam = new URL(config.DATABASE_URL).searchParams.get("connection_limit");
+  const perWorker = limitParam ? Number(limitParam) : DEFAULT_POOL;
+  const wanted = perWorker * workers;
+
+  const { prisma } = await import("./db.js");
+  const rows = await prisma.$queryRaw<{ Value: string }[]>`SHOW VARIABLES LIKE 'max_connections'`;
+  const maxConnections = Number(rows[0]?.Value ?? 0);
+  await prisma.$disconnect();
+
+  if (!maxConnections) {
+    console.warn("[cluster] could not read MySQL max_connections — skipping budget check");
+    return;
+  }
+
+  // Leave room for the web-admin panel's own pool, mysqldump during a backup,
+  // and a human with a mysql shell open. A cluster sized to the exact ceiling
+  // locks everyone else out at the worst possible moment.
+  const RESERVED = 40;
+  if (wanted + RESERVED > maxConnections) {
+    const suggested = Math.max(5, Math.floor((maxConnections - RESERVED) / workers));
+    console.error(
+      `[cluster] connection budget does not fit:\n` +
+        `  ${workers} workers x ${perWorker} connections = ${wanted}, plus ${RESERVED} reserved ` +
+        `for the admin panel and maintenance,\n` +
+        `  but MySQL max_connections = ${maxConnections}.\n` +
+        `  Fix EITHER by raising max_connections in my.ini (recommended: ${wanted + RESERVED} or more),\n` +
+        `  OR by setting connection_limit=${suggested} in DATABASE_URL,\n` +
+        `  OR by lowering CLUSTER_WORKERS.\n` +
+        `  Starting anyway would return sporadic 500s under load, not a clean failure.`
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    `[cluster] connection budget OK: ${workers} x ${perWorker} = ${wanted} ` +
+      `(+${RESERVED} reserved) of ${maxConnections}`
+  );
+}
+
 if (cluster.isPrimary) {
   if (!config.REDIS_URL) {
     // Failing loudly beats a deployment that appears healthy while silently
@@ -29,6 +85,8 @@ if (cluster.isPrimary) {
     );
     process.exit(1);
   }
+
+  await assertConnectionBudgetFits(workerCount);
 
   console.log(`[cluster] primary ${process.pid} forking ${workerCount} workers`);
   for (let i = 0; i < workerCount; i++) cluster.fork();

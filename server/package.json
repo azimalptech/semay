@@ -20,7 +20,10 @@
     "db:seed": "tsx prisma/seed.ts",
     "test": "vitest run",
     "service:install": "node scripts/service.mjs install",
-    "service:uninstall": "node scripts/service.mjs uninstall"
+    "service:uninstall": "node scripts/service.mjs uninstall",
+    "backup": "node --env-file=.env scripts/backup.mjs",
+    "backup:verify": "node --env-file=.env scripts/backup.mjs --verify",
+    "loadtest": "node --env-file=.env scripts/loadtest.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

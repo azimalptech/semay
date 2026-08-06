@@ -11,9 +11,19 @@ import { requireRole } from "../auth/authz.js";
 import { config } from "../config.js";
 import { pathForKey, publicUrlForKey, signUpload, verifyUpload } from "./storage.js";
 
+// Strict allowlist, NOT a character-class regex. Uploaded files are served
+// publicly from the API's own origin, so an admin who could store `x.html`,
+// `x.svg` or `x.js` there would get script execution on that origin — stored XSS
+// against every user, including the superadmin panel's session cookies. Only
+// formats the app actually renders are permitted, and `svg` is deliberately
+// excluded (it is an XML document that can carry <script>, not an inert image).
+const ALLOWED_FILE_EXTS = ["jpg", "jpeg", "png", "webp", "heic", "mp4", "mov", "webm"] as const;
+
 const uploadUrlSchema = z.object({
-  // e.g. "jpg", "png", "mp4" — no leading dot, no path traversal.
-  fileExt: z.string().regex(/^[a-zA-Z0-9]{1,10}$/),
+  fileExt: z
+    .string()
+    .toLowerCase()
+    .pipe(z.enum(ALLOWED_FILE_EXTS)),
   folder: z.enum(["posts", "stores", "stories", "chats"]),
 });
 

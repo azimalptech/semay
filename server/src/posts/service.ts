@@ -2,6 +2,7 @@ import { Prisma, type Post, type PostType } from "@prisma/client";
 
 import { prisma } from "../db.js";
 import { deleteMediaByUrls } from "../media/storage.js";
+import { withRetry } from "../lib/withRetry.js";
 import { publish } from "../realtime/bus.js";
 
 const POST_COUNTS_SELECT = {
@@ -31,7 +32,14 @@ export interface CreatePostInput {
 // old onPostCreated/onPostDeleted Firestore triggers with a same-transaction
 // update instead of an async trigger.
 export async function createPost(input: CreatePostInput): Promise<Post> {
-  return prisma.$transaction(async (tx) => {
+  return withRetry(() => prisma.$transaction(async (tx) => {
+    // Same up-front exclusive lock as setToggle, for the same reason: the post
+    // INSERT takes a shared lock on the parent stores row via posts.storeId,
+    // and the counter UPDATE below needs it exclusively. Two admins of one
+    // store posting simultaneously is rare but not impossible, and the cost of
+    // ordering the lock correctly is one extra indexed row read.
+    await tx.$queryRaw`SELECT id FROM stores WHERE id = ${input.storeId} FOR UPDATE`;
+
     const post = await tx.post.create({
       data: {
         storeId: input.storeId,
@@ -51,7 +59,7 @@ export async function createPost(input: CreatePostInput): Promise<Post> {
           : { postsCount: { increment: 1 } },
     });
     return post;
-  });
+  }));
 }
 
 export async function updateCaption(postId: string, caption: string): Promise<Post> {
@@ -72,7 +80,11 @@ export async function deletePostCascade(postId: string): Promise<void> {
       media: { select: { url: true } },
     },
   });
-  await prisma.$transaction(async (tx) => {
+  await withRetry(() => prisma.$transaction(async (tx) => {
+    // Lock the store row before the delete, matching createPost/setToggle —
+    // the cascade touches posts.storeId's foreign key, so the same shared-then-
+    // exclusive upgrade applies here.
+    await tx.$queryRaw`SELECT id FROM stores WHERE id = ${post.storeId} FOR UPDATE`;
     await tx.post.delete({ where: { id: postId } }); // cascades media/likes/saves/views/sent/shares
     await tx.store.update({
       where: { id: post.storeId },
@@ -81,7 +93,7 @@ export async function deletePostCascade(postId: string): Promise<void> {
           ? { reelsCount: { decrement: 1 } }
           : { postsCount: { decrement: 1 } },
     });
-  });
+  }));
 
   // After the commit: the DB is the source of truth, so files are only removed
   // once the rows referencing them are definitely gone. Best-effort by design
@@ -166,7 +178,32 @@ async function setToggle(
   // there is no store-level saves stat in the design.
   const rollsUpToStore = countField === "likesCount";
 
-  const changed = await prisma.$transaction(async (tx) => {
+  const changed = await withRetry(() => prisma.$transaction(async (tx) => {
+    // Lock the rows this transaction is going to UPDATE before writing the
+    // like/save row, and always in the same order: post, then store.
+    //
+    // This is the highest-concurrency write in the product, and without the
+    // up-front lock it deadlocked on 7.5% of requests under 50 concurrent
+    // likes on one post (measured, not estimated — see docs/08_OPERATIONS.md
+    // §7). `postLike.postId` is a foreign key, so inserting the like takes a
+    // SHARED lock on the parent posts row; the counter UPDATE immediately
+    // after needs that same row EXCLUSIVELY. Two likes on one post therefore
+    // both hold S and both wait to upgrade to X, and InnoDB breaks the tie by
+    // killing one of them. Taking X first turns that into a plain queue.
+    //
+    // Ordering post-before-store matters as much as the locking itself: a
+    // transaction that took them in the opposite order would reintroduce
+    // deadlocks between different callers rather than within one.
+    const locked = await tx.$queryRaw<{ storeId: string }[]>`
+      SELECT storeId FROM posts WHERE id = ${postId} FOR UPDATE
+    `;
+    // Post deleted between the request and this lock — nothing to toggle.
+    if (locked.length === 0) return false;
+    const storeId = locked[0]!.storeId;
+    if (rollsUpToStore) {
+      await tx.$queryRaw`SELECT id FROM stores WHERE id = ${storeId} FOR UPDATE`;
+    }
+
     if (on) {
       try {
         // @ts-expect-error -- model is one of two delegates sharing this shape
@@ -175,14 +212,13 @@ async function setToggle(
         if (isDuplicateKeyError(err)) return false;
         throw err;
       }
-      const post = await tx.post.update({
+      await tx.post.update({
         where: { id: postId },
         data: { [countField]: { increment: 1 } },
-        select: { storeId: true },
       });
       if (rollsUpToStore) {
         await tx.store.update({
-          where: { id: post.storeId },
+          where: { id: storeId },
           data: { likesCount: { increment: 1 } },
         });
       }
@@ -191,22 +227,21 @@ async function setToggle(
     // @ts-expect-error -- model is one of two delegates sharing this shape
     const deleted = await tx[model].deleteMany({ where: { postId, userId } });
     if (deleted.count === 0) return false;
-    const post = await tx.post.update({
+    await tx.post.update({
       where: { id: postId },
       data: { [countField]: { decrement: 1 } },
-      select: { storeId: true },
     });
     if (rollsUpToStore) {
       // Clamped at zero: the counter starts from 0 by design (no backfill), so
       // unliking a post that was liked BEFORE the counter existed would
       // otherwise drive the store total negative.
       await tx.store.updateMany({
-        where: { id: post.storeId, likesCount: { gt: 0 } },
+        where: { id: storeId, likesCount: { gt: 0 } },
         data: { likesCount: { decrement: 1 } },
       });
     }
     return true;
-  });
+  }));
   if (changed) await publishPostCounts(postId);
 }
 

@@ -69,7 +69,7 @@ These are ordered by what breaks first if ignored.
 | 3 | **`connection_limit` × `CLUSTER_WORKERS` < MySQL `max_connections`** | This is the most common way a correctly-written app falls over under load: workers each open their own pool, exhaust `max_connections` (default 151), and every request starts failing while CPU sits idle. | `DATABASE_URL` |
 | 4 | **Serve `/media/*` from Caddy/Nginx**, not Node | Media is the highest-bandwidth traffic in the app. A static file server does it with near-zero CPU; Node does it while competing with API requests for the event loop. | point `file_server` at `MEDIA_DIR` |
 | 5 | **The maintenance reaper is running** | Stories and their media files, plus expired sessions, otherwise grow without bound. This was missing entirely until it was added — see §5. | `server/src/maintenance.ts` |
-| 6 | **Load-test before launch** | Everything above is necessary but not sufficient. Nothing here has been tested at 100k DAU; the numbers are engineering estimates. See §7. | — |
+| 6 | **Load-test before launch** | Everything above is necessary but not sufficient. **Done — see §7**, which found two defects (deadlocks on the like/message paths, and requirement 3 above being violated in the live `.env`) that no amount of review had surfaced. | `server/scripts/loadtest.mjs` |
 
 ### Sizing starting point
 
@@ -83,6 +83,11 @@ REDIS_URL="redis://127.0.0.1:6379"
 
 8 workers × 15 connections = 120, comfortably under MySQL's 151 default. If you
 raise `max_connections`, raise `connection_limit` with it — not before.
+
+`cluster.ts` checks this arithmetic against the server's real `max_connections`
+at boot and refuses to start if it does not fit, because getting it wrong does
+not fail cleanly — it fails as scattered 500s under load, with nothing in the
+logs pointing at the cause (§7).
 
 ## 3. Realtime: how it scales
 
@@ -261,22 +266,213 @@ cursor pagination — an API change rippling into the mobile client — for a
 scenario (scrolling 5000+ posts deep) that effectively never happens. Revisit
 only if real traffic shows deep pagination.
 
-## 7. Before launch (not yet done)
+## 7. Load test results (measured 2026-08-06)
 
-Honest list of what remains:
+Harness: `server/scripts/loadtest.mjs` (`npm run loadtest`). It drives the real
+HTTP and WebSocket surface — Fastify, auth middleware, Prisma, MySQL, the Redis
+bus — not a synthetic query benchmark, and removes everything it creates,
+including on Ctrl-C.
 
-1. **Load test.** Nothing above has been verified at 100k DAU. Test WebSocket
-   fan-out at expected peak concurrency and the message-send path under
-   simultaneous senders in one chat (that path deadlocks on MySQL by nature and
-   relies on `withRetry` — it is tested for correctness, not at load).
-2. **Backup + restore drill.** Restore into a scratch database and boot against
-   it. An untested backup is not a backup.
-3. **Real `serviceAccount.json`** on the server for FCM, or push stays disabled.
+Run against a **scratch MySQL instance on port 3307** restored from a production
+dump, never the live database. 8 cluster workers, `connection_limit=15`,
+200,001 posts, on a 16-core / 34 GB Windows machine where the client harness,
+both MySQL instances and the API all shared the same CPU. **Real numbers on
+dedicated hardware would be higher, not lower.**
+
+### Two defects the load test found (both fixed)
+
+Neither was visible to code review, the test suite, or single-process use. Both
+only appear under concurrency, which is exactly why this step existed.
+
+**1. Lock-upgrade deadlocks on the two hottest write paths.** Liking a post
+inserts a `post_likes` row and then increments `posts.likesCount`. Because
+`post_likes.postId` is a foreign key, the INSERT takes a **shared** lock on the
+parent `posts` row and the UPDATE immediately after needs that same row
+**exclusively** — so two concurrent likes each held S, each waited to upgrade to
+X, and InnoDB broke the tie by rolling one back. Confirmed against MySQL's own
+`LATEST DETECTED DEADLOCK` report, not inferred from the stack trace.
+
+- `POST /posts/:id/like` failed **7.5% of requests (225 of 3,000)** with HTTP
+  500 at 50 concurrent likes on one post. `setToggle` had no retry wrapper at
+  all, so every deadlock reached the user.
+- `POST /chats/:id/messages` failed 2 of 3,000. It *does* use `withRetry`, but
+  8 attempts were exhausted under sustained same-chat contention.
+
+Fixed by taking the exclusive lock up front (`SELECT … FOR UPDATE`) before the
+INSERT, in a consistent order — post, then store — which turns the deadlock into
+an ordinary queue. Applied to `setToggle`, `createPost`, `deletePostCascade`
+(`posts/service.ts`) and `sendMessage` (`chats/service.ts`); `setToggle` also
+gained the `withRetry` it was missing. Pinned by
+`server/tests/like.concurrency.test.ts`, which asserts on InnoDB's
+`Innodb_deadlocks` counter — verified to fail when the fix is reverted.
+
+**2. Connection-pool exhaustion (requirement 3 in §2, violated in practice).**
+The live `.env` had no `connection_limit`, so each worker took Prisma's default
+of `cores × 2 + 1` = 33. Eight workers wanted 264 connections against MariaDB's
+stock `max_connections=151`; `Max_used_connections` topped out at exactly 152 and
+requests failed with *"Too many database connections opened"*. Fixed in `.env`,
+and `cluster.ts` now **refuses to boot** when `workers × connection_limit + 40
+reserved` exceeds the server's actual `max_connections`, printing the three ways
+to fix it. A server that starts and then fails a fraction of requests is worse
+than one that refuses to start.
+
+### Throughput (8 workers, tuned MySQL, zero failed requests)
+
+| Scenario | conc | req/s | p50 | p95 | p99 |
+|---|---|---|---|---|---|
+| `GET /feed` page 1 | 1 | 289 | 3.1 ms | 5.7 ms | 6.8 ms |
+| `GET /feed` page 1 | 10 | 1,882 | 5.0 ms | 7.3 ms | 11.9 ms |
+| `GET /feed` page 1 | 100 | 2,270 | 39.9 ms | 71.8 ms | 160.1 ms |
+| `GET /feed` offset 500 | 50 | 1,356 | 33.3 ms | 66.0 ms | 118.3 ms |
+| `GET /reels` | 50 | 2,379 | 14.0 ms | 58.5 ms | 138.4 ms |
+| `GET /stores` | 50 | 4,220 | 10.6 ms | 18.2 ms | 26.4 ms |
+| `GET /chats` (user) | 50 | 4,396 | 10.8 ms | 18.2 ms | 20.0 ms |
+| `GET /chats/:id/messages` | 50 | 3,142 | 15.3 ms | 22.8 ms | 26.9 ms |
+| `POST` message | 50 | 1,156 | 41.9 ms | 67.2 ms | 91.4 ms |
+| `POST` interactions flush | 50 | 1,601 | 29.3 ms | 50.2 ms | 64.1 ms |
+| like/unlike, **one** post | 50 | 794 | 58.4 ms | 106.6 ms | 124.1 ms |
+| like/unlike, spread | 50 | 829 | 45.0 ms | 97.2 ms | 101.8 ms |
+
+42,000 HTTP requests, **zero non-2xx responses**.
+
+The single-post like figure is the deliberate worst case: 50 clients contending
+for one row. 794/s on one post is the floor, and it is ~250× a realistic viral
+peak.
+
+### WebSocket capacity
+
+**12,000 concurrent sessions on one machine, all live, zero dropped** — every
+socket connected, subscribed, and received its snapshot. Measured single-process
+and again in cluster mode.
+
+- Memory: **~54 KB per connection** (RSS 167.6 MB idle → 800.5 MB at 12,000).
+- Handles returned to baseline (371 → 12,370 → 369) and RSS did not grow across
+  three successive storms, so sockets and their memory are fully reclaimed —
+  **no leak**.
+- Fan-out (publish → subscriber receives) stayed at **7–13 ms** with 12,000
+  sockets connected.
+- 12,000 was the **client's** ceiling, not the server's: Windows' ephemeral port
+  range (13,977) ran out, and a repeat run failed with `EADDRINUSE ×10,221`
+  while TIME_WAIT drained. The server never refused a connection.
+
+### What this means for 100k DAU
+
+100k DAU is roughly 5–10k concurrent at peak on a consumer app. Against that:
+
+- **Sockets: comfortable.** 12,000 verified on one box against a 5–10k peak,
+  with ~54 KB each (a 10k peak ≈ 540 MB).
+- **Read throughput: comfortable.** ~2,300 feed req/s ≈ 8.3M feed loads/hour.
+- **Writes: comfortable.** ~1,150 messages/s and ~800 likes/s *on a single
+  contended row*; spread across rows there is far more headroom.
+- **The binding constraint is shared, not per-worker.** Measured on the same
+  database and dataset, going from 1 worker to 8 bought only ~1.4× throughput,
+  fairly uniformly: `/feed` at concurrency 100 went 1,533 → 2,143 req/s,
+  `/stores` 2,927 → 3,877, `/chats` 3,082 → 4,123. Eight times the CPU for 1.4×
+  the work means the ceiling is behind the workers — MySQL, and to some degree
+  the single test machine hosting everything at once. Adding workers past this
+  point will not help; a read replica, a cached first feed page, or moving MySQL
+  to its own host would.
+
+  This is a ratio measured under artificial conditions (harness, API and two
+  MySQL instances all on 16 shared cores). Treat the *shape* as the finding —
+  scaling is DB-bound — and re-measure on real hardware before sizing to it.
+
+### MySQL configuration
+
+XAMPP's stock `innodb_buffer_pool_size=16M` on a 34 GB machine was the largest
+single misconfiguration. Changed in `C:/xampp/mysql/bin/my.ini`
+(original preserved as `my.ini.bak-20260806`):
+
+| Setting | Was | Now | Why |
+|---|---|---|---|
+| `innodb_buffer_pool_size` | 16M | 4G | Caches data **and** indexes; at 16M nearly every feed query reads from disk |
+| `innodb_log_file_size` | 5M | 512M | 5M forces a checkpoint flush every few hundred writes |
+| `innodb_log_buffer_size` | 8M | 32M | Matches the larger log |
+| `max_connections` | 151 | 500 | The ceiling the cluster actually hit |
+| `innodb_io_capacity` | 200 | 2000 | Data directory is on the SSD (verified) |
+| `innodb_flush_neighbors` | 1 | 0 | A rotational-disk optimisation; only costs writes on flash |
+| `innodb_flush_log_at_trx_commit` | 1 | **1 (unchanged)** | 2 is measurably faster but risks losing a second of committed transactions. This database holds orders. Do not "optimise" this. |
+
+Measured effect at 89 MB of data: **+5% to +31%** throughput (`/stores` +31%,
+`POST` message +24%, `/feed` +7%) and materially better tails (`/feed` offset 500
+p99 158.8 ms → 71.2 ms). The gain is modest here only because 89 MB largely fits
+in cache either way; it grows with the dataset, which is the point.
+
+> **These changes are written to `my.ini` but are NOT yet active** — applying
+> them needs a MySQL restart, which needs an elevated shell. Run
+> `net stop mysql && net start mysql` as Administrator, then confirm with
+> `SELECT @@innodb_buffer_pool_size, @@max_connections;`.
+>
+> The redo-log resize was rehearsed on a scratch instance first, including a
+> **hard kill** to simulate power loss: MariaDB 10.4.32 resized the log on the
+> next start in both the clean and unclean case, with data intact. It is safe.
+
+### Reproducing
+
+```bash
+# Never point this at the live database.
+node --env-file=.env scripts/loadtest.mjs \
+  --api http://127.0.0.1:8099/api/v1 \
+  --posts 200000 --requests 3000 --sockets 12000
+```
+
+`--skip-http` isolates socket capacity; `--hold 30` keeps the pool open so RSS
+can be sampled while the connections are actually held.
+
+## 7a. Backup and restore
+
+`server/scripts/backup.mjs` (`npm run backup`, `npm run backup:verify`).
+
+- `--single-transaction`, gzipped, timestamped, keeps the last 14 (`BACKUP_KEEP`).
+- Connection details come from `DATABASE_URL`, so the backup follows the app if
+  it is ever repointed. The password goes through `MYSQL_PWD`, never argv, where
+  any other user could read it from the process list.
+- `--verify` restores the dump it just took into a scratch schema, compares
+  **every table's row count plus the foreign-key and index totals** against the
+  live database, then drops the scratch schema. Row counts alone would pass a
+  restore that silently dropped every foreign key.
+- `--verify --file <path>` verifies an existing backup without taking a new one.
+- Exit code is 1 on failure, so a scheduled task notices.
+
+Drill performed 2026-08-06: dump → restore → **25 tables, 34 foreign keys, 87
+indexes, all row counts matching**. Verified in both directions — a deliberately
+truncated dump was correctly rejected with a non-zero exit and left no scratch
+schema behind.
+
+Schedule it (Task Scheduler, daily) and keep at least one copy off this machine.
+A backup on the same disk as the database is not a backup.
+
+## 7b. Before launch (still outstanding)
+
+1. **Restart MySQL and the API**, both from an Administrator shell. The MySQL
+   tuning in §7 is written to `my.ini` but inert until a restart, and the running
+   `SeMay API` service still holds the pre-fix build in memory — the deadlock
+   fixes are compiled into `dist/` but a Node process does not reload modules.
+
+   ```bat
+   net stop mysql  && net start mysql
+   net stop "semayapi.exe" && net start "semayapi.exe"
+   ```
+
+   Then confirm both took effect:
+
+   ```bat
+   mysql -u root -e "SELECT @@innodb_buffer_pool_size, @@max_connections;"
+   curl http://127.0.0.1:8080/health/ready
+   ```
+
+   Neither is urgent at current traffic — the deadlocks need ~50 concurrent
+   writers on one row to appear — but both should be done before real load.
+2. **Real `serviceAccount.json`** on the server for FCM, or push stays disabled.
    Confirm `git check-ignore` covers it before it lands.
-4. **On-device matrix**, including the offline outbox replay loop (airplane mode →
+3. **On-device matrix**, including the offline outbox replay loop (airplane mode →
    send → restore signal → exactly one message).
-5. **Rotate `JWT_SECRET`** away from any development value. Rotating invalidates
-   all access tokens; refresh tokens survive, so clients recover on their own.
+4. **Rotate `JWT_SECRET`** away from the development value, and change the
+   superadmin password. Rotating the secret invalidates all access tokens;
+   refresh tokens survive, so clients recover on their own.
+5. **Schedule the backup** as a task, and copy backups off this machine.
+6. **The SMS gateway IP is a DHCP lease** (`192.168.100.74`). OTP delivery breaks
+   when it changes — give the phone a static reservation.
 
 ## 8. Account deletion
 
@@ -360,9 +556,15 @@ an inconvenience.
   does, through the same `createSession` — nothing downstream (claims,
   `requireFreshAuth`, revocation on account deletion) needed to change.
 
-**Before this ships to real users**: rotate the seeded password
-(`semayadmin` — set for one account, `+99363538839`, during initial setup) to
-something you wouldn't find in a breach-compilation wordlist, and consider
-whether the superadmin role needs a second factor given what a compromise here
-can do. There is currently no "change my password" self-service route — a new
-password can only be set the way this one was, directly against the database.
+**Before this ships to real users**: rotate the password seeded during initial
+setup for the single superadmin account. The seeded value is a short dictionary
+word and is **not** recorded here on purpose — a repository that documents its
+own admin credential has handed it to anyone who reads the repository. Replace
+it with something you would not find in a breach-compilation wordlist, and
+consider whether the superadmin role needs a second factor given what a
+compromise here can do.
+
+Rotate it through `POST /auth/superadmin/change-password`, which requires the
+current password (an access token alone is not enough), enforces a 12-character
+minimum, and deletes every existing session so a leaked token cannot outlive the
+change. Covered by `server/tests/superadmin.change-password.test.ts`.
