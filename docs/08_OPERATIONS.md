@@ -25,6 +25,39 @@ Everything except FCM runs on infrastructure you control, in-country. Firebase i
 used for **push notifications only**; there is no Firestore, Firebase Auth,
 Firebase Storage, or Cloud Functions anywhere in the system.
 
+## 1a. Nothing may depend on someone remembering to start it
+
+All three moving parts run as auto-starting Windows services on the current
+box. This was not always true, and the failure mode was silent: MySQL and the
+API were bare processes started by hand, so any reboot left the mobile app
+showing `REQUEST_FAILED` with nothing obviously broken to look at.
+
+| Component | Service name | Start |
+|---|---|---|
+| MySQL (XAMPP/MariaDB) | `mysql` | Automatic |
+| Redis (realtime pub-sub) | `Redis` | Automatic |
+| SeMay API | `semayapi.exe` ("SeMay API") | Automatic |
+
+The API service is defined in code, not clicked together by hand, so it can be
+rebuilt from scratch:
+
+```bash
+cd server
+npm run build            # the service runs dist/, so build first
+npm run service:install  # elevated shell required
+npm run service:uninstall
+```
+
+It passes `--env-file=.env` explicitly — the app reads config through Node's own
+env-file support rather than a dotenv dependency, so a service that forgot it
+would boot unconfigured — and restarts on crash with backoff, capped, so a
+genuinely broken build fails visibly instead of spinning forever.
+
+**Triage when the app can't reach the API:** `curl localhost:8080/health`. If
+that fails it's the API service; if it succeeds but the phone still errors it's
+the `adb reverse tcp:8080 tcp:8080` tunnel, which has to be re-run every time
+the phone reconnects over USB.
+
 ## 2. What has to be true for 100k daily active users
 
 These are ordered by what breaks first if ignored.

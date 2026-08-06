@@ -2,7 +2,7 @@
   "name": "semay-server",
   "version": "0.1.0",
   "private": true,
-  "description": "SeMay self-hosted API server (Fastify + ws + Prisma/MySQL) — replaces Firebase backend, keeps FCM for push only.",
+  "description": "SeMay self-hosted API server (Fastify + ws + Prisma/MySQL) \u2014 replaces Firebase backend, keeps FCM for push only.",
   "type": "module",
   "engines": {
     "node": ">=20.6.0"
@@ -18,7 +18,9 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "service:install": "node scripts/service.mjs install",
+    "service:uninstall": "node scripts/service.mjs uninstall"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
@@ -41,6 +43,7 @@
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.10.5",
     "@types/ws": "^8.5.13",
+    "node-windows": "^1.0.0-beta.8",
     "pino-pretty": "^13.0.0",
     "prisma": "^6.3.0",
     "tsx": "^4.19.2",
