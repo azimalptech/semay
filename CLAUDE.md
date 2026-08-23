@@ -18,6 +18,8 @@ Super Admin web panel. Full product spec, architecture, data model, API, screen 
 - `docs/08_OPERATIONS.md` — **read before touching deployment, scaling, or auth/media security.**
   Topology, the 100k-DAU requirements, the maintenance reaper, and the reasoning behind each
   hardening decision.
+- `docs/09_DEPLOYMENT.md` — step-by-step deployment/redeploy checklist (setup, env vars, Windows
+  service, backups, health checks). The *what to type*; 08 is the *why*.
 
 ## Repo layout
 ```
