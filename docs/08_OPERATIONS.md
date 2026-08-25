@@ -471,8 +471,20 @@ A backup on the same disk as the database is not a backup.
    superadmin password. Rotating the secret invalidates all access tokens;
    refresh tokens survive, so clients recover on their own.
 5. **Schedule the backup** as a task, and copy backups off this machine.
-6. **The SMS gateway IP is a DHCP lease** (`192.168.100.74`). OTP delivery breaks
-   when it changes — give the phone a static reservation.
+6. **Point the SMS gateway at the Cloud relay, not the phone's LAN IP.** An
+   earlier revision of this list said to fix OTP delivery by giving the phone a
+   static DHCP reservation for `192.168.100.74`. That advice only held while the
+   API ran on the same LAN as the phone. Now that the API runs on a hosted box,
+   `192.168.100.74` is a private address behind NAT that the server has no route
+   to at all — a static reservation would keep the address stable and still
+   unreachable. Use the gateway app's **Cloud server** mode
+   (`https://api.sms-gate.app/3rdparty/v1`): the phone holds an *outbound*
+   connection to the relay, so no inbound reachability, port-forward, or stable
+   phone IP is needed. Its credentials are separate from the Local Server ones.
+
+   The app also advertises a public IPv6 address for Local Server mode. Don't
+   use it: it exposes an SMS-sending endpoint to the whole internet behind only
+   HTTP Basic auth, and the address is not guaranteed stable either.
 
 ## 8. Account deletion
 

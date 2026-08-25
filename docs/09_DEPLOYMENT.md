@@ -81,10 +81,9 @@ retype it. The ones worth calling out specifically:
   server mints, it doesn't mint its own. Rotating it logs everyone's access
   token out; refresh tokens survive, so clients recover on their own.
 - **`SMS_GATEWAY_URL` / `_USER` / `_PASSWORD`** — required unless
-  `OTP_DEV_MODE=true`. Points at a capcom6/sms-gate.app gateway (a phone running
-  the SMS Gateway app on the LAN, in the common case). **The gateway phone's IP
-  is a DHCP lease on this deployment** — give it a static reservation, or OTP
-  delivery silently breaks when the lease changes.
+  `OTP_DEV_MODE=true`. Points at a capcom6/sms-gate.app gateway. **Which URL to
+  use depends on where the API runs** — see §5b; a remote API must use the Cloud
+  relay, not the phone's LAN address.
 - **`OTP_DEV_MODE`** — `true` echoes the OTP code in the `/auth/otp/send`
   response instead of sending a real SMS. Convenient for local dev; must be
   `false` before anyone but you can reach the server.
@@ -111,6 +110,54 @@ retype it. The ones worth calling out specifically:
   net stop mysql && net start mysql
   mysql -u root -e "SELECT @@innodb_buffer_pool_size, @@max_connections;"
   ```
+
+## 5b. SMS gateway (OTP delivery)
+
+OTP codes are sent through a phone running the
+[capcom6 / sms-gate.app](https://sms-gate.app) Android app. The server-side
+integration is already implemented (`server/src/auth/sms.ts`) — bringing it up
+is purely configuration.
+
+**Choose the mode by where the API runs.** This is a reachability constraint:
+
+| API location | Mode | Why |
+|---|---|---|
+| Same LAN as the phone | **Local Server** — `http://<phone-ip>:8090` | Lowest latency, and the OTP text never leaves your network. |
+| Hosted / remote box | **Cloud relay** — `https://api.sms-gate.app/3rdparty/v1` | The phone's LAN IP is a private address behind NAT; a remote server cannot route to it. The phone holds an *outbound* connection to the relay instead, so nothing inbound is needed. |
+
+The current production deployment is remote, so it must use the **Cloud relay**.
+
+In the gateway app, enable the **Cloud server** toggle and read the credentials
+off its "Cloud server" card — they are **separate from** the Local Server
+username/password. Then, in `server/.env`:
+
+```ini
+SMS_GATEWAY_URL="https://api.sms-gate.app/3rdparty/v1"
+SMS_GATEWAY_USER="<cloud username>"
+SMS_GATEWAY_PASSWORD="<cloud password>"
+OTP_DEV_MODE=false
+```
+
+`OTP_DEV_MODE=false` is what actually switches `sms.ts` from the dev logger to
+the real gateway. The server **refuses to boot** if it's false while any of the
+three gateway values are blank (`config.ts`), so a half-configured gateway
+fails loudly at startup instead of silently 502-ing every login.
+
+On the phone, keep **Start on boot** enabled and exclude the app from battery
+optimisation — a killed gateway means no OTP, and the only symptom users see
+is that login stops working.
+
+Verify after deploying (§12) with a real login attempt, or directly:
+
+```bash
+curl -u "<cloud user>:<cloud password>" \
+  -H "Content-Type: application/json" \
+  -d '{"phoneNumbers":["+993XXXXXXXX"],"message":"SeMay test"}' \
+  https://api.sms-gate.app/3rdparty/v1/message
+```
+
+> Do not commit real gateway credentials. `server/.env` is gitignored; keep them
+> there and nowhere else in the repo.
 
 ## 6. Build & run
 
@@ -285,6 +332,8 @@ not just real testing:
       (never by reading/writing `passwordHash` directly).
 - [ ] Backup scheduled as a recurring task, with a copy stored off this
       machine.
-- [ ] SMS gateway phone has a static IP reservation (not a DHCP lease).
+- [ ] SMS gateway configured for the right mode (§5b) — Cloud relay for a
+      remote API — with `OTP_DEV_MODE=false`, and a real OTP received on a
+      real handset to prove it end to end.
 - [ ] Reverse proxy + TLS in front of the API (§9), firewall only exposing
       *that* port to the internet (§8).
