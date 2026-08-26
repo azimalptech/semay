@@ -1,0 +1,139 @@
+// Deliberately a SEPARATE database from `semay`, on the same MySQL server.
+// The relay has its own release cadence and its own `prisma migrate` history;
+// sharing a schema would mean one service's migration can block the other's
+// deploy, and the app database has no business carrying SMS plumbing.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+/// One Android handset running the sender app.
+model Device {
+  id   String @id @default(uuid())
+  /// Human label for the admin UI, e.g. "samsung/a16nsxx". Not unique — two
+  /// identical handsets are a normal way to add capacity.
+  name String
+
+  /// SHA-256 of the bearer token issued at registration. Stored hashed for the
+  /// same reason passwords are: a dump of this table must not hand out the
+  /// ability to impersonate a sender and drain the message queue.
+  ///
+  /// SHA-256 rather than bcrypt is deliberate here — the token is 32 random
+  /// bytes we generate, so there is no guessable-password problem for a slow
+  /// KDF to defend against, and this is checked on every device reconnect.
+  tokenHash  String   @unique
+  /// Set when an operator retires a handset. Kept rather than deleted so old
+  /// messages still resolve which device sent them.
+  enabled    Boolean  @default(true)
+  lastSeenAt DateTime?
+  createdAt  DateTime @default(now())
+
+  simCards SimCard[]
+  messages Message[]
+
+  @@map("devices")
+}
+
+/// One SIM in one handset. The unit of send capacity — a dual-SIM phone is two
+/// of these, and dispatch treats them as independent senders.
+model SimCard {
+  id       String @id @default(uuid())
+  deviceId String
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// Android's slot index (0 or 1) and subscription id. The app needs subscriptionId
+  /// to pick the right SmsManager on a dual-SIM device; slotIndex is for humans.
+  slotIndex      Int
+  subscriptionId Int
+  carrierName    String  @default("")
+  /// The SIM's own MSISDN when the carrier exposes it — often blank on Turkmen
+  /// SIMs, so never rely on it for routing.
+  phoneNumber    String  @default("")
+
+  enabled Boolean @default(true)
+
+  /// Per-SIM throttling state. Carriers flag consumer SIMs that emit A2P
+  /// traffic, and a blocked SIM presents to users as "login is broken", so
+  /// these caps are a availability control, not a nicety.
+  sentThisHour Int      @default(0)
+  hourStartedAt DateTime @default(now())
+  sentToday    Int      @default(0)
+  dayStartedAt DateTime @default(now())
+  /// Drives SIM_MIN_INTERVAL_MS pacing. Two OTPs fired back-to-back down the
+  /// same SIM is the single most obvious "this is a bot" signal a carrier sees.
+  lastSentAt   DateTime?
+
+  messages Message[]
+
+  @@unique([deviceId, slotIndex])
+  @@index([enabled])
+  @@map("sim_cards")
+}
+
+/// Pending | Assigned | Sent | Delivered | Failed
+///
+/// Sent  = the handset's radio accepted the message.
+/// Delivered = a carrier delivery receipt came back. Not all carriers send one,
+/// so Sent is the practical success signal and Delivered is a bonus.
+enum MessageState {
+  Pending
+  Assigned
+  Sent
+  Delivered
+  Failed
+}
+
+model Message {
+  id   String @id @default(uuid())
+  text String @db.Text
+
+  state MessageState @default(Pending)
+
+  /// Which SIM is sending / sent it. Null while Pending.
+  deviceId  String?
+  device    Device?  @relation(fields: [deviceId], references: [id])
+  simCardId String?
+  simCard   SimCard? @relation(fields: [simCardId], references: [id])
+
+  /// Reassignment counter. A message that has bounced between SIMs
+  /// MAX_ATTEMPTS times is failed rather than retried forever — an OTP that
+  /// arrives after the server-side code has expired is worse than none.
+  attempts  Int     @default(0)
+  lastError String? @db.Text
+
+  /// One timestamp per state, rather than a separate events table: the state
+  /// set is fixed and small, and the 3rd-party API returns them as a flat
+  /// {state: timestamp} map, which this reconstructs without a join.
+  pendingAt   DateTime  @default(now())
+  assignedAt  DateTime?
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  failedAt    DateTime?
+
+  recipients Recipient[]
+
+  /// The dispatcher's hot query is "oldest Pending message" — without this it
+  /// degrades into a full scan as the table grows.
+  @@index([state, pendingAt])
+  @@index([state, assignedAt])
+  @@map("messages")
+}
+
+/// The API accepts phoneNumbers[] per message for sms-gate.app compatibility.
+/// OTP only ever uses one, but the shape has to match.
+model Recipient {
+  id        String  @id @default(uuid())
+  messageId String
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  phoneNumber String
+  state       MessageState @default(Pending)
+  error       String?      @db.Text
+
+  @@index([messageId])
+  @@map("recipients")
+}
