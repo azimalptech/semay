@@ -30,6 +30,7 @@ class MainActivity : AppCompatActivity() {
         prefs = Prefs(this)
         binding.relayUrl.setText(prefs.relayUrl)
         binding.token.setText(prefs.token)
+        binding.sendDelay.setText(prefs.sendDelayMs.toString())
 
         binding.startButton.setOnClickListener { saveAndStart() }
         binding.stopButton.setOnClickListener {
@@ -78,6 +79,17 @@ class MainActivity : AppCompatActivity() {
         }
         prefs.relayUrl = url
         prefs.token = token
+
+        // Blank or unparseable falls back to the default rather than 0: an
+        // accidental empty field should not silently turn off pacing and get
+        // the SIM blocked.
+        val typed = binding.sendDelay.text.toString().trim().toLongOrNull()
+        if (typed == null && binding.sendDelay.text.isNotBlank()) {
+            toast("Delay must be a number in milliseconds")
+            return
+        }
+        prefs.sendDelayMs = typed ?: Prefs.DEFAULT_DELAY_MS
+        binding.sendDelay.setText(prefs.sendDelayMs.toString())
 
         if (!SmsSender(this).hasPermission() || !SimEnumerator.hasPermission(this)) {
             toast("Grant SMS and phone permissions first")

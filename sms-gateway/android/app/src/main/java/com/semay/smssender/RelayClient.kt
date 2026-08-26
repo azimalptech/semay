@@ -24,9 +24,9 @@ import java.util.concurrent.TimeUnit
 class RelayClient(
     private val context: Context,
     private val prefs: Prefs,
+    private val sendQueue: SendQueue,
     private val onStatus: (String) -> Unit,
 ) {
-    private val sender = SmsSender(context)
     private val main = Handler(Looper.getMainLooper())
 
     private val client = OkHttpClient.Builder()
@@ -43,6 +43,15 @@ class RelayClient(
     private var attempt = 0
     private var fatal = false
 
+    /** Whether the socket is actually open right now. Drives the decision to
+     * fall back to polling, so it must reflect the socket rather than intent —
+     * "we asked it to connect" is exactly the optimism that hides an hour of
+     * dead connection. */
+    @Volatile
+    private var connected = false
+
+    fun isConnected(): Boolean = connected
+
     fun start() {
         if (running) return
         running = true
@@ -53,6 +62,7 @@ class RelayClient(
 
     fun stop() {
         running = false
+        connected = false
         runCatching { socket?.close(1000, "stopped") }
         socket = null
     }
@@ -77,6 +87,7 @@ class RelayClient(
         socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 attempt = 0
+                connected = true
                 val sims = SimEnumerator.list(context)
                 if (sims.isEmpty()) {
                     // Announcing zero SIMs is legitimate — the permission may
@@ -110,6 +121,7 @@ class RelayClient(
     }
 
     private fun handleDisconnect(code: Int, reason: String) {
+        connected = false
         socket = null
         if (code == 4401) {
             fatal = true
@@ -147,31 +159,36 @@ class RelayClient(
         }
 
         Log.i(TAG, "job $id -> sub $subscriptionId, ${numbers.size} recipient(s)")
-        onStatus("Sending ${numbers.size} message(s)…")
+        onStatus("Queued ${numbers.size} message(s)…")
 
-        sender.send(
-            jobId = id,
-            subscriptionId = subscriptionId,
-            phoneNumbers = numbers,
-            text = body,
-            onSent = { results ->
-                val failed = results.filter { !it.ok }
-                if (failed.size == results.size) {
-                    report(
-                        webSocket, id, "Failed",
-                        failed.firstOrNull()?.error ?: "All recipients failed",
-                        results
-                    )
-                    onStatus("Send failed")
-                } else {
-                    report(webSocket, id, "Sent", null, results)
-                    onStatus("Sent")
-                }
-            },
-            onDelivered = {
-                report(webSocket, id, "Delivered", null)
-                onStatus("Delivered")
-            },
+        // Through the shared queue, never straight to SmsManager: the polling
+        // transport feeds the same queue, and two independent senders would
+        // each keep their own "last sent" clock and defeat the pacing.
+        sendQueue.submit(
+            SendQueue.Job(
+                id = id,
+                subscriptionId = subscriptionId,
+                phoneNumbers = numbers,
+                text = body,
+                onSent = { results ->
+                    val failed = results.filter { !it.ok }
+                    if (results.isNotEmpty() && failed.size == results.size) {
+                        report(
+                            webSocket, id, "Failed",
+                            failed.firstOrNull()?.error ?: "All recipients failed",
+                            results
+                        )
+                        onStatus("Send failed")
+                    } else {
+                        report(webSocket, id, "Sent", null, results)
+                        onStatus("Sent")
+                    }
+                },
+                onDelivered = {
+                    report(webSocket, id, "Delivered", null)
+                    onStatus("Delivered")
+                },
+            )
         )
     }
 

@@ -1,11 +1,16 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import { z } from "zod";
 
 import { hashToken } from "../auth.js";
 import { prisma } from "../db.js";
-import { applyReport, dispatchPending } from "../dispatch.js";
+import { applyReport, claimForDevice, dispatchPending, waitForWork } from "../dispatch.js";
 import * as registry from "../registry.js";
+
+/** How long /poll holds an idle request before answering "nothing".
+ * Comfortably under the 60s nginx proxy_read_timeout default, so the fallback
+ * transport is not itself killed by the proxy that motivated it. */
+const POLL_HOLD_MS = 25_000;
 
 const simSchema = z.object({
   slotIndex: z.number().int().min(0).max(7),
@@ -49,6 +54,40 @@ async function authenticate(token: string | undefined) {
   return device;
 }
 
+/** Records the SIMs a handset reports. Shared by both transports so a device
+ * that falls back to HTTP registers exactly the same way it would over the
+ * socket. Anything the handset no longer lists is disabled rather than deleted,
+ * so historical messages still resolve which SIM sent them. */
+async function applyHello(
+  deviceId: string,
+  sims: { slotIndex: number; subscriptionId: number; carrierName: string; phoneNumber: string }[]
+): Promise<void> {
+  await prisma.$transaction([
+    ...sims.map((s) =>
+      prisma.simCard.upsert({
+        where: { deviceId_slotIndex: { deviceId, slotIndex: s.slotIndex } },
+        create: {
+          deviceId,
+          slotIndex: s.slotIndex,
+          subscriptionId: s.subscriptionId,
+          carrierName: s.carrierName,
+          phoneNumber: s.phoneNumber,
+        },
+        update: {
+          subscriptionId: s.subscriptionId,
+          carrierName: s.carrierName,
+          phoneNumber: s.phoneNumber,
+          enabled: true,
+        },
+      })
+    ),
+    prisma.simCard.updateMany({
+      where: { deviceId, slotIndex: { notIn: sims.map((s) => s.slotIndex) } },
+      data: { enabled: false },
+    }),
+  ]);
+}
+
 async function handleFrame(deviceId: string, raw: string): Promise<void> {
   let parsed: unknown;
   try {
@@ -65,34 +104,7 @@ async function handleFrame(deviceId: string, raw: string): Promise<void> {
   }
 
   if (msg.data.type === "hello") {
-    const sims = msg.data.sims;
-    // Upsert what the handset reports, and disable anything it no longer has.
-    // Disabled rather than deleted so historical messages still resolve which
-    // SIM sent them.
-    await prisma.$transaction([
-      ...sims.map((s) =>
-        prisma.simCard.upsert({
-          where: { deviceId_slotIndex: { deviceId, slotIndex: s.slotIndex } },
-          create: {
-            deviceId,
-            slotIndex: s.slotIndex,
-            subscriptionId: s.subscriptionId,
-            carrierName: s.carrierName,
-            phoneNumber: s.phoneNumber,
-          },
-          update: {
-            subscriptionId: s.subscriptionId,
-            carrierName: s.carrierName,
-            phoneNumber: s.phoneNumber,
-            enabled: true,
-          },
-        })
-      ),
-      prisma.simCard.updateMany({
-        where: { deviceId, slotIndex: { notIn: sims.map((s) => s.slotIndex) } },
-        data: { enabled: false },
-      }),
-    ]);
+    await applyHello(deviceId, msg.data.sims);
     void dispatchPending();
     return;
   }
@@ -103,10 +115,84 @@ async function handleFrame(deviceId: string, raw: string): Promise<void> {
   void dispatchPending();
 }
 
+/** Bearer auth for the HTTP fallback endpoints. */
+async function requireDevice(req: FastifyRequest, reply: FastifyReply) {
+  const header = req.headers.authorization ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : undefined;
+  const device = await authenticate(token);
+  if (!device) {
+    await reply.code(401).send({ error: "UNAUTHORIZED" });
+    return null;
+  }
+  return device;
+}
+
 export async function deviceRoutes(app: FastifyInstance): Promise<void> {
   // Liveness for the handset's own diagnostics screen — deliberately
   // unauthenticated and free of any device detail.
   app.get("/ping", async () => ({ ok: true }));
+
+  // ── HTTP fallback transport ──────────────────────────────────────────────
+  //
+  // A WebSocket is the better path when it holds, but it does not always hold:
+  // nginx idle timeouts, carrier NAT, Doze, and flaky upstream links all sever
+  // it, sometimes without either end noticing. A gateway with exactly one
+  // transport therefore has a single point of failure sitting between the
+  // server and every login in the system.
+  //
+  // These endpoints are that second path. They are not a lesser mode — a
+  // handset that can only ever poll works completely, just with slightly more
+  // request overhead. Claiming is atomic and shared with the socket path
+  // (dispatch.claimForDevice runs under the same lock as the push), so the two
+  // transports can be live at once without a message ever going out twice.
+
+  app.post("/hello", async (req, reply) => {
+    const device = await requireDevice(req, reply);
+    if (!device) return;
+    const parsed = helloSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "INVALID_INPUT" });
+
+    await applyHello(device.id, parsed.data.sims);
+    await prisma.device.update({ where: { id: device.id }, data: { lastSeenAt: new Date() } });
+    return reply.send({ ok: true });
+  });
+
+  app.post("/poll", async (req, reply) => {
+    const device = await requireDevice(req, reply);
+    if (!device) return;
+
+    await prisma.device.update({ where: { id: device.id }, data: { lastSeenAt: new Date() } });
+
+    let jobs = await claimForDevice(device.id);
+    if (jobs.length === 0) {
+      // Hold the request open briefly rather than answering "nothing" straight
+      // away: it turns polling from a latency floor into something close to
+      // push, without the handset hammering us every second.
+      await waitForWork(POLL_HOLD_MS);
+      jobs = await claimForDevice(device.id);
+    }
+    return reply.send({ jobs });
+  });
+
+  app.post("/report", async (req, reply) => {
+    const device = await requireDevice(req, reply);
+    if (!device) return;
+    const parsed = reportSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "INVALID_INPUT" });
+
+    const applied = await applyReport(
+      parsed.data.id,
+      device.id,
+      parsed.data.state,
+      parsed.data.error,
+      parsed.data.recipients
+    );
+    // 409, not 404: the message exists but is not this device's to report on.
+    // Worth distinguishing, because in practice it means a handset resent a
+    // report for work that was already reclaimed and given to another SIM.
+    if (!applied) return reply.code(409).send({ error: "NOT_ASSIGNED_TO_THIS_DEVICE" });
+    return reply.send({ ok: true });
+  });
 
   app.get("/ws", { websocket: true }, (socket: WebSocket, req) => {
     // The message listener is attached SYNCHRONOUSLY, before any await.

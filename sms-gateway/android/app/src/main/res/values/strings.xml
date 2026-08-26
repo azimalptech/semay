@@ -9,6 +9,12 @@
     <string name="label_token">Device token</string>
     <string name="hint_token">from: npm run device:add</string>
 
+    <string name="label_delay">Delay between sends (ms)</string>
+    <string name="hint_delay">6000</string>
+    <string name="note_delay">Minimum gap between two messages from this handset. Too fast and the
+        carrier flags the SIM as bulk traffic and blocks it — which looks to users like login being
+        broken. 6000 (6s) is a safe starting point.</string>
+
     <string name="action_start">Save &amp; start</string>
     <string name="action_stop">Stop</string>
     <string name="action_permissions">Grant SMS &amp; phone permissions</string>

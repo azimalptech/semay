@@ -23,6 +23,20 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_ENABLED, false)
         set(value) = sp.edit().putBoolean(KEY_ENABLED, value).apply()
 
+    /**
+     * Minimum gap between two consecutive sends from this handset, in
+     * milliseconds. Operator-tunable because the right value is a property of
+     * the carrier and the SIM's standing, not something that can be guessed
+     * from here: too fast and TMCELL flags the SIM as application traffic and
+     * blocks it, which presents to users as "login is broken".
+     *
+     * The server enforces its own per-SIM pacing as an outer bound. This is the
+     * local floor, and the effective gap is whichever is larger.
+     */
+    var sendDelayMs: Long
+        get() = sp.getLong(KEY_DELAY, DEFAULT_DELAY_MS)
+        set(value) = sp.edit().putLong(KEY_DELAY, value.coerceIn(0L, 600_000L)).apply()
+
     val isConfigured: Boolean
         get() = relayUrl.isNotBlank() && token.isNotBlank()
 
@@ -30,5 +44,10 @@ class Prefs(context: Context) {
         private const val KEY_URL = "relay_url"
         private const val KEY_TOKEN = "device_token"
         private const val KEY_ENABLED = "enabled"
+        private const val KEY_DELAY = "send_delay_ms"
+
+        /** Matches the pacing the Firebase-era queue used, and the server's
+         * SIM_MIN_INTERVAL_MS default. */
+        const val DEFAULT_DELAY_MS = 6_000L
     }
 }

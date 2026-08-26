@@ -37,16 +37,31 @@ function effectiveCounts(sim: SimCard, now: Date) {
   };
 }
 
-/** The least-recently-used online SIM that is under both caps and past its
- * minimum gap, or null when every SIM is busy, capped, or offline. */
-async function pickSim(now: Date): Promise<{ sim: SimCard; hourExpired: boolean; dayExpired: boolean } | null> {
-  const online = registry.onlineDeviceIds();
-  if (online.length === 0) return null;
+/** The least-recently-used eligible SIM that is under both caps and past its
+ * minimum gap, or null when every SIM is busy, capped, or unreachable.
+ *
+ * `onlyDeviceId` switches this between the two transports. The WebSocket path
+ * asks for any SIM on any socket-connected handset and then pushes. The
+ * polling path asks only for SIMs on the handset that is actually asking, so a
+ * device with no socket can still be given work — that is the whole point of
+ * the fallback. */
+async function pickSim(
+  now: Date,
+  onlyDeviceId?: string
+): Promise<{ sim: SimCard; hourExpired: boolean; dayExpired: boolean } | null> {
+  let deviceFilter: { in: string[] } | string;
+  if (onlyDeviceId) {
+    deviceFilter = onlyDeviceId;
+  } else {
+    const online = registry.onlineDeviceIds();
+    if (online.length === 0) return null;
+    deviceFilter = { in: online };
+  }
 
   const sims = await prisma.simCard.findMany({
     where: {
       enabled: true,
-      deviceId: { in: online },
+      deviceId: deviceFilter as never,
       device: { enabled: true },
     },
     // MySQL sorts NULLs first on ASC, so a SIM that has never sent is picked
@@ -188,6 +203,101 @@ export async function reclaimStalled(): Promise<void> {
   }
 }
 
+/// Long-poll waiters, woken when a message is enqueued so a polling handset
+/// gets work at socket-like latency instead of waiting out its poll interval.
+const waiters = new Set<() => void>();
+
+function notifyNewWork(): void {
+  for (const wake of [...waiters]) {
+    waiters.delete(wake);
+    try {
+      wake();
+    } catch {
+      // A waiter whose request already ended is not an error.
+    }
+  }
+}
+
+/** Resolves when new work arrives or `timeoutMs` elapses. */
+export function waitForWork(timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const wake = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      waiters.delete(wake);
+      resolve();
+    }, timeoutMs);
+    waiters.add(wake);
+  });
+}
+
+/**
+ * Assigns pending messages to THIS device's SIMs and returns them for the
+ * caller to send. The polling counterpart to dispatchPending's push.
+ *
+ * Runs through the same serialisation lock as the push path, which is what
+ * makes the two transports safe to run side by side: a message can be claimed
+ * by a poll or pushed over a socket, never both.
+ */
+export function claimForDevice(deviceId: string, max = 3): Promise<ClaimedJob[]> {
+  return serialised(async () => {
+    const claimed: ClaimedJob[] = [];
+    for (let i = 0; i < max; i++) {
+      const now = new Date();
+      const message = await prisma.message.findFirst({
+        where: { state: "Pending" },
+        orderBy: { pendingAt: "asc" },
+        include: { recipients: true },
+      });
+      if (!message) break;
+
+      const picked = await pickSim(now, deviceId);
+      if (!picked) break;
+      const { sim, hourExpired, dayExpired } = picked;
+
+      await prisma.$transaction([
+        prisma.message.update({
+          where: { id: message.id },
+          data: {
+            state: "Assigned",
+            assignedAt: now,
+            deviceId: sim.deviceId,
+            simCardId: sim.id,
+            attempts: { increment: 1 },
+          },
+        }),
+        prisma.simCard.update({
+          where: { id: sim.id },
+          data: {
+            lastSentAt: now,
+            sentThisHour: hourExpired ? 1 : { increment: 1 },
+            sentToday: dayExpired ? 1 : { increment: 1 },
+            ...(hourExpired ? { hourStartedAt: now } : {}),
+            ...(dayExpired ? { dayStartedAt: now } : {}),
+          },
+        }),
+      ]);
+
+      claimed.push({
+        id: message.id,
+        subscriptionId: sim.subscriptionId,
+        phoneNumbers: message.recipients.map((r) => r.phoneNumber),
+        text: message.text,
+      });
+    }
+    return claimed;
+  });
+}
+
+export interface ClaimedJob {
+  id: string;
+  subscriptionId: number;
+  phoneNumbers: string[];
+  text: string;
+}
+
 /** Creates a message and immediately tries to place it. */
 export async function enqueue(text: string, phoneNumbers: string[]) {
   const message = await prisma.message.create({
@@ -203,6 +313,10 @@ export async function enqueue(text: string, phoneNumbers: string[]) {
   // not the caller's, and holding the login request open while a handset is
   // picked would add latency to every OTP.
   void dispatchPending();
+  // Wake any handset sitting in a long poll, so the fallback transport is not
+  // materially slower than the socket for the case that matters — an OTP the
+  // user is staring at the screen waiting for.
+  notifyNewWork();
 
   return message;
 }
