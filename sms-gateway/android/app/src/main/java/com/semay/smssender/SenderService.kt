@@ -46,6 +46,10 @@ class SenderService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             prefs.enabled = false
+            lastStatus = "Stopped"
+            sendBroadcast(
+                Intent(ACTION_STATUS).putExtra(EXTRA_STATUS, "Stopped").setPackage(packageName)
+            )
             stopSelf()
             return START_NOT_STICKY
         }
@@ -53,7 +57,15 @@ class SenderService : Service() {
         if (client == null) {
             client = RelayClient(this, prefs) { s ->
                 status = s
+                lastStatus = s
                 updateNotification(s)
+                // Broadcast to whatever Activity is showing. Package-scoped:
+                // connection state is no other app's business.
+                sendBroadcast(
+                    Intent(ACTION_STATUS)
+                        .putExtra(EXTRA_STATUS, s)
+                        .setPackage(packageName)
+                )
             }
         }
         client?.start()
@@ -112,8 +124,19 @@ class SenderService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.semay.smssender.STOP"
+        const val ACTION_STATUS = "com.semay.smssender.STATUS"
+        const val EXTRA_STATUS = "status"
         private const val CHANNEL_ID = "sms_sender"
         private const val NOTIFICATION_ID = 1
+
+        /** Last status published, so an Activity that starts (or returns to the
+         * foreground) after the fact shows the truth immediately instead of
+         * waiting for the next change. This app exists to make connection state
+         * visible; a UI that says "Starting…" while the socket is live is the
+         * same class of lie it was built to eliminate. */
+        @Volatile
+        var lastStatus: String = "Stopped"
+            private set
 
         fun start(context: Context) {
             val intent = Intent(context, SenderService::class.java)

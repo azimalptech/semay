@@ -40,9 +40,33 @@ class MainActivity : AppCompatActivity() {
         binding.batteryButton.setOnClickListener { requestBatteryExemption() }
     }
 
+    private val statusReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            intent?.getStringExtra(SenderService.EXTRA_STATUS)?.let {
+                binding.statusText.text = it
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         refreshSims()
+        // Show the truth on arrival, then track changes. Reading the last known
+        // status first matters: without it the screen sits on whatever it said
+        // when it was last open, which is exactly the misleading-state problem
+        // this app is supposed to solve rather than reproduce.
+        binding.statusText.text = SenderService.lastStatus
+        androidx.core.content.ContextCompat.registerReceiver(
+            this,
+            statusReceiver,
+            android.content.IntentFilter(SenderService.ACTION_STATUS),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+    }
+
+    override fun onPause() {
+        super.onPause()
+        runCatching { unregisterReceiver(statusReceiver) }
     }
 
     private fun saveAndStart() {
@@ -62,7 +86,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         SenderService.start(this)
-        binding.statusText.text = getString(R.string.status_idle).let { "Starting…" }
+        binding.statusText.text = "Starting…"
         // The socket endpoint is derived from the base URL, so show what we
         // actually resolved — a wrong path here is otherwise invisible until
         // nothing ever connects.
