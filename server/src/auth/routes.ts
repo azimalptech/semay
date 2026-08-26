@@ -10,11 +10,13 @@ import { requireRole } from "./authz.js";
 import { requireAuth, requireFreshAuth } from "./middleware.js";
 import {
   clearOtp,
+  isTestPhone,
   OtpCooldownError,
   NameRequiredError,
   OtpInvalidError,
   OtpLockedError,
   requestOtp,
+  TestPhonePrivilegedError,
   verifyOtp,
 } from "./otpStore.js";
 import { smsProvider } from "./sms.js";
@@ -78,6 +80,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
     const { phone } = body.data;
 
+    // The demo account's code is fixed, so there is nothing to generate and
+    // nothing to send. Returning early also keeps it out of the per-phone
+    // resend cooldown, which would otherwise lock a reviewer out for a minute
+    // after their first tap, and avoids paying for an SMS nobody reads.
+    if (isTestPhone(phone)) {
+      return reply.send({ ok: true });
+    }
+
     try {
       const { code } = await requestOtp(phone);
       try {
@@ -136,6 +146,17 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         // The code was correct and is still valid — the client collects a name
         // and retries this same call with it.
         return reply.code(400).send({ error: "NAME_REQUIRED" });
+      }
+      if (err instanceof TestPhonePrivilegedError) {
+        // Someone promoted the demo account. Refuse and make it loud: this is a
+        // misconfiguration that would otherwise hand a published, permanent
+        // credential real privileges, and the only external symptom would be a
+        // demo login that quietly did more than it should.
+        req.log.error(
+          { phone, role: err.role },
+          "OTP_TEST_PHONE points at a privileged account — demo login refused"
+        );
+        return reply.code(403).send({ error: "TEST_PHONE_NOT_PERMITTED" });
       }
       throw err;
     }

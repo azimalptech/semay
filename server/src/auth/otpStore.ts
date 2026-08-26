@@ -22,6 +22,58 @@ export class OtpInvalidError extends Error {
   }
 }
 
+/** Thrown when OTP_TEST_PHONE names an account that is not a plain `user`.
+ *
+ * The fixed code is a published credential — it lives in an app-store review
+ * form and in this repository's docs — so it must never be able to
+ * authenticate anything privileged. Without this check the blast radius of the
+ * demo login would grow silently the day somebody promoted that number in the
+ * admin panel, and nothing would look wrong until it was being used. */
+export class TestPhonePrivilegedError extends Error {
+  constructor(public role: string) {
+    super(`OTP_TEST_PHONE resolves to a "${role}" account; the fixed code only works for "user"`);
+    this.name = "TestPhonePrivilegedError";
+  }
+}
+
+/** True when `phone` is the configured demo account. */
+export function isTestPhone(phone: string): boolean {
+  return config.OTP_TEST_PHONE !== "" && phone === config.OTP_TEST_PHONE;
+}
+
+/**
+ * The demo-account path: a fixed code, no SMS, no otp_codes row.
+ *
+ * Exists because app-store reviewers cannot receive an SMS on a Turkmen
+ * number, and a reviewer who cannot log in rejects the build. It is a
+ * deliberate authentication bypass and is kept as narrow as it can be: exactly
+ * one phone number, exactly one code, and only for an unprivileged account.
+ */
+async function verifyTestPhone(phone: string, code: string, name?: string): Promise<User> {
+  // Compared in constant time — the fixed code is low-entropy and permanent,
+  // so it is worth not also leaking it a character at a time.
+  const expected = config.OTP_TEST_CODE;
+  const supplied = code;
+  let mismatch = expected.length ^ supplied.length;
+  for (let i = 0; i < Math.max(expected.length, supplied.length); i++) {
+    mismatch |= (expected.charCodeAt(i) || 0) ^ (supplied.charCodeAt(i) || 0);
+  }
+  if (mismatch !== 0) throw new OtpInvalidError();
+
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.user.findUnique({ where: { phone } });
+    if (existing) {
+      if (existing.role !== "user") throw new TestPhonePrivilegedError(existing.role);
+      if (existing.deletedAt) throw new OtpInvalidError();
+      return existing;
+    }
+    // First use creates the account. A name is not demanded the way the real
+    // signup flow demands one: a reviewer typing a phone and a code should not
+    // be stopped by a form field.
+    return tx.user.create({ data: { phone, name: name?.trim() || "Demo Account" } });
+  });
+}
+
 /** Issues (or re-sends within cooldown rules) a code for `phone`. Caller is
  * responsible for actually dispatching it (dev-mode echo vs real SMS gateway). */
 export async function requestOtp(phone: string): Promise<{ code: string }> {
@@ -95,6 +147,10 @@ export async function verifyOtp(
   code: string,
   name?: string
 ): Promise<User> {
+  // Checked before touching otp_codes: the demo account never has a row there,
+  // because requestOtp never writes one for it.
+  if (isTestPhone(phone)) return verifyTestPhone(phone, code, name);
+
   return prisma.$transaction(async (tx) => {
     const rows = await tx.$queryRaw<
       {

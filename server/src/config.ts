@@ -31,6 +31,18 @@ const schema = z.object({
     .default("false")
     .transform((v) => v === "true"),
 
+  // Fixed-code login for ONE phone number — the demo account app-store
+  // reviewers use, since they cannot receive an SMS on a Turkmen number.
+  // Both empty (the default) disables it entirely.
+  //
+  // This is a deliberate authentication bypass, so it is deliberately narrow:
+  // exactly one number, and otpStore refuses to authenticate it at all if the
+  // account is anything other than role "user". Without that second rule the
+  // blast radius of a leaked demo code would grow silently the day someone
+  // promoted this number in the admin panel.
+  OTP_TEST_PHONE: z.string().default(""),
+  OTP_TEST_CODE: z.string().default(""),
+
   GOOGLE_APPLICATION_CREDENTIALS: z.string().default(""),
   FIREBASE_PROJECT_ID: z.string().default(""),
 
@@ -57,6 +69,28 @@ const schema = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
   LOG_RETENTION_DAYS: z.coerce.number().int().positive().default(14),
 }).superRefine((cfg, ctx) => {
+  // The demo-account pair is meaningless half-set, and a half-set auth bypass
+  // is the kind of thing that looks configured and silently is not.
+  const testPhoneSet = cfg.OTP_TEST_PHONE !== "";
+  const testCodeSet = cfg.OTP_TEST_CODE !== "";
+  if (testPhoneSet !== testCodeSet) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [testPhoneSet ? "OTP_TEST_CODE" : "OTP_TEST_PHONE"],
+      message: "OTP_TEST_PHONE and OTP_TEST_CODE must be set together, or both left empty",
+    });
+  }
+  // The verify route validates codes against /^\d{6}$/ before anything else, so
+  // a test code of any other shape could never be submitted — it would look
+  // configured while rejecting every attempt.
+  if (testCodeSet && !/^\d{6}$/.test(cfg.OTP_TEST_CODE)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["OTP_TEST_CODE"],
+      message: "OTP_TEST_CODE must be exactly 6 digits (the verify route rejects anything else)",
+    });
+  }
+
   // In production (OTP_DEV_MODE=false) real SMS must be deliverable — otherwise
   // every login silently 502s. Fail at boot instead, with a clear message.
   if (!cfg.OTP_DEV_MODE) {
