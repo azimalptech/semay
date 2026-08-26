@@ -220,6 +220,73 @@ recent poll, and no OTP will reach it.
 > Do not commit real gateway credentials or device tokens. `server/.env` and
 > `sms-gateway/.env` are both gitignored; keep them there and nowhere else.
 
+## 5c. Accounts
+
+A freshly migrated database has no accounts at all, and the superadmin is the
+one account that cannot bootstrap itself: every other role signs in with
+phone+OTP, which self-provisions on first verify, while the panel is
+password-only and change-password demands the *current* password. So a new
+deployment comes up with a panel nobody can log into.
+
+```bash
+cd server
+npm run superadmin -- --phone +99362936253      # prompts twice, echo off
+```
+
+Minimum 12 characters, enforced (`changePasswordSchema`). The script bumps
+`claimsVersion` and revokes existing sessions, so a role or password change
+takes effect immediately rather than when tokens happen to expire.
+
+### Roles
+
+```bash
+node --env-file=.env scripts/set-role.mjs --phone +993… --role user|admin|superadmin
+```
+
+Refuses to demote the last superadmin, since that locks everyone out of the
+panel with no way back except running `superadmin` again on the box.
+
+**A superadmin can log in with OTP alone.** The password guards only the web
+panel; OTP mints a token carrying the account's real role, so anyone holding
+that SIM has full superadmin API access. Audit periodically:
+
+```bash
+node --env-file=.env -e 'import("@prisma/client").then(async({PrismaClient})=>{const p=new PrismaClient();console.table(await p.user.findMany({where:{role:"superadmin",deletedAt:null},select:{phone:true,name:true}}));await p.$disconnect()})'
+```
+
+### Removing accounts
+
+```bash
+npm run backup
+node --env-file=.env scripts/prune-accounts.mjs --keep "+993…,+993…"   # dry run
+node --env-file=.env scripts/prune-accounts.mjs --keep "+993…,+993…" --confirm-delete
+```
+
+Two consequences that are not obvious from the schema. Deleting a store's only
+admin **orphans the store** — the store and its posts survive, because they
+belong to the Store rather than the user, but no account holds the store-admin
+role and only a superadmin can manage it. And an account with orders **cannot
+be deleted at all**: `Order.userId/adminId` carry no cascade, so MySQL refuses.
+That is deliberate; the product anonymises accounts in place so sales history
+survives (`08_OPERATIONS.md` §8).
+
+### Demo account (app-store review)
+
+Reviewers cannot receive an SMS on a Turkmen number, and a reviewer who cannot
+log in rejects the build. In `server/.env`:
+
+```ini
+OTP_TEST_PHONE="+99363538839"
+OTP_TEST_CODE="123456"
+```
+
+That number then logs in with the fixed code, sending no SMS and skipping the
+resend cooldown. It is a bypass with a permanent, published credential, so it
+**refuses unless the account's role is plain `user`** — returning 403 and
+logging at error level. Promoting that number would otherwise hand the
+published code real privileges with no outward sign. Leave both blank to
+disable.
+
 ## 6. Build & run
 
 ```bash
