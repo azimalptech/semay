@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release posture: TLS required for every host, no exceptions.
+
+  This connection carries a device token that authorises sending SMS from a
+  real SIM, so plaintext over anything but a trusted LAN is not acceptable.
+  The debug variant (src/debug/res/xml/) relaxes this so the relay can be
+  tested against a laptop on the same Wi-Fi; that override is not present in a
+  release build.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

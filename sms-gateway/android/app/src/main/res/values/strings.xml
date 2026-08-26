@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SeMay SMS Sender</string>
+
+    <string name="status_idle">Stopped</string>
+
+    <string name="label_relay_url">Relay URL</string>
+    <string name="hint_relay_url">https://semaycollection.com/sms</string>
+    <string name="label_token">Device token</string>
+    <string name="hint_token">from: npm run device:add</string>
+
+    <string name="action_start">Save &amp; start</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_permissions">Grant SMS &amp; phone permissions</string>
+    <string name="action_battery">Disable battery optimisation</string>
+
+    <string name="label_sims">SIM cards detected</string>
+    <string name="sims_unknown">Grant phone permission to list SIMs</string>
+
+    <string name="note_battery">Battery optimisation must be disabled, or Android will suspend the
+        connection while the screen is off — the app keeps showing “Connected” and silently stops
+        receiving work. Keep this handset on a charger.</string>
+</resources>
