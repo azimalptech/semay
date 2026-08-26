@@ -22,13 +22,21 @@ export class SmsSendError extends Error {
   }
 }
 
-/** capcom6 / sms-gate.app HTTP integration. Works with any of the gateway's
- * modes — set SMS_GATEWAY_URL to the base that exposes `/message` with HTTP
- * Basic auth: the phone's LAN address (Local Server), a self-hosted relay, or
- * the cloud relay `https://api.sms-gate.app/3rdparty/v1` (Cloud "Connect"). SMS
- * here is OTP-only (one message at a time), so it sends directly — no queue or
- * pacing cursor is involved (the vestigial Firebase-era tables for that have
- * been dropped from the schema). */
+/** Sends through our own relay in `sms-gateway/` — set SMS_GATEWAY_URL to the
+ * base that exposes `/message` with HTTP Basic auth, normally
+ * `https://semaycollection.com/sms/3rdparty/v1`.
+ *
+ * This used to point at capcom6's cloud relay, api.sms-gate.app, which turned
+ * out to be unreachable from Turkmen networks (100% packet loss from the
+ * gateway handset while google.com and our own domain answered fine on the
+ * same Wi-Fi), so every OTP sat queued at the relay and never sent. The wire
+ * protocol is deliberately unchanged and this file needed no edit for the
+ * switch — any sms-gate.app-compatible gateway still works here.
+ *
+ * SMS here is OTP-only (one message at a time), so it sends directly — no
+ * queue or pacing cursor is involved on this side. Pacing lives in the relay
+ * and the handset, where the per-SIM rate limits are (the vestigial
+ * Firebase-era tables for it have been dropped from the schema). */
 class GatewaySmsProvider implements SmsProvider {
   private static readonly timeoutMs = 15_000;
 

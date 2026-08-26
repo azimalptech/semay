@@ -1,5 +1,13 @@
 # 06 — Deployment
 
+> **SUPERSEDED by `09_DEPLOYMENT.md`. Do not follow the steps below.**
+>
+> Kept for history only. It is stale in at least two ways that will actively
+> mislead: it describes **MinIO** for media (replaced by local disk under
+> `server/media/`), and the **sms-gate.app** cloud relay for OTP (replaced by
+> our own relay in `sms-gateway/`, because that host is unreachable from
+> Turkmen networks). Assume anything here is out of date unless `09` agrees.
+
 SeMay no longer runs on Firebase. Since the migration (see `docs/07_MIGRATION.md`) the whole backend
 is **self-hosted**, meant to run on a single server physically located in Turkmenistan for data
 sovereignty. This doc is how to stand that box up and how to ship updates to it.

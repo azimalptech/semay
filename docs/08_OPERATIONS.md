@@ -471,20 +471,35 @@ A backup on the same disk as the database is not a backup.
    superadmin password. Rotating the secret invalidates all access tokens;
    refresh tokens survive, so clients recover on their own.
 5. **Schedule the backup** as a task, and copy backups off this machine.
-6. **Point the SMS gateway at the Cloud relay, not the phone's LAN IP.** An
-   earlier revision of this list said to fix OTP delivery by giving the phone a
-   static DHCP reservation for `192.168.100.74`. That advice only held while the
-   API ran on the same LAN as the phone. Now that the API runs on a hosted box,
-   `192.168.100.74` is a private address behind NAT that the server has no route
-   to at all — a static reservation would keep the address stable and still
-   unreachable. Use the gateway app's **Cloud server** mode
-   (`https://api.sms-gate.app/3rdparty/v1`): the phone holds an *outbound*
-   connection to the relay, so no inbound reachability, port-forward, or stable
-   phone IP is needed. Its credentials are separate from the Local Server ones.
+6. **Run our own SMS relay** (`sms-gateway/`, deploy steps in
+   `09_DEPLOYMENT.md` §5b). This item has now been wrong twice, and both
+   corrections are worth keeping because the reasoning generalises.
 
-   The app also advertises a public IPv6 address for Local Server mode. Don't
-   use it: it exposes an SMS-sending endpoint to the whole internet behind only
-   HTTP Basic auth, and the address is not guaranteed stable either.
+   It first said to fix OTP delivery with a static DHCP reservation for the
+   phone at `192.168.100.74`. That held only while the API shared a LAN with
+   the phone; once the API moved to a hosted box, `192.168.100.74` became a
+   private address behind NAT with no route from the server, and a reservation
+   would have kept it stable and still unreachable.
+
+   It then said to use capcom6's **Cloud server** mode
+   (`https://api.sms-gate.app/3rdparty/v1`), on the reasoning that an outbound
+   connection from the phone sidesteps NAT entirely. Sound reasoning, wrong
+   conclusion: that host is unreachable from Turkmen networks. Measured from
+   the gateway handset, on the same Wi-Fi, at the same moment — 100% packet
+   loss to `api.sms-gate.app`, 0% to `google.com`, `fcm.googleapis.com` and
+   `semaycollection.com`. Messages were accepted by the relay's API and then
+   sat at `Pending` forever, because the phone could never collect them.
+
+   The lesson under both: **reachability is a property of the specific pair of
+   endpoints**, and it has to be measured from the device that will actually
+   make the connection, not inferred from topology. Our own relay is on a host
+   the handset demonstrably reaches (13ms), and it runs two transports — a
+   WebSocket, and HTTP long-polling for when that is severed — so a proxy or
+   NAT that kills one does not take OTP down.
+
+   The old gateway app also advertised a public IPv6 address for Local Server
+   mode. Don't use that either: it exposes an SMS-sending endpoint to the whole
+   internet behind only HTTP Basic auth, and the address is not stable.
 
 ## 8. Account deletion
 

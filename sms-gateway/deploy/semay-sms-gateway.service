@@ -1,0 +1,45 @@
+# systemd unit for the SMS relay.
+#
+#   sudo cp deploy/semay-sms-gateway.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now semay-sms-gateway
+#   systemctl status semay-sms-gateway
+#
+# Adjust User/WorkingDirectory if the deployment path differs.
+
+[Unit]
+Description=SeMay self-hosted SMS relay
+# Wants= rather than Requires=: if MySQL is slow to come up the relay should
+# retry rather than refuse to start. It has no work to do until a handset
+# connects anyway.
+Wants=mysql.service network-online.target
+After=mysql.service network-online.target
+
+[Service]
+Type=simple
+User=semay
+WorkingDirectory=/opt/semay/app/sms-gateway
+# --env-file is passed explicitly so the service cannot start unconfigured.
+ExecStart=/usr/bin/node --env-file=.env dist/index.js
+Restart=always
+RestartSec=5
+# Stops a genuinely broken build from spinning forever and burying the real
+# error in a restart loop. Five failures inside a minute and it stays down,
+# visibly, in systemctl status.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# The relay holds device tokens and message bodies. It needs no more of the
+# filesystem than its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/semay/app/sms-gateway
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=semay-sms
+
+[Install]
+WantedBy=multi-user.target

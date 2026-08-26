@@ -113,51 +113,112 @@ retype it. The ones worth calling out specifically:
 
 ## 5b. SMS gateway (OTP delivery)
 
-OTP codes are sent through a phone running the
-[capcom6 / sms-gate.app](https://sms-gate.app) Android app. The server-side
-integration is already implemented (`server/src/auth/sms.ts`) — bringing it up
-is purely configuration.
+OTP codes go through **our own relay** — `sms-gateway/` in this repo — talking
+to Android handsets running `sms-gateway/android/`. Full design notes in
+`sms-gateway/README.md`.
 
-**Choose the mode by where the API runs.** This is a reachability constraint:
+**Why not sms-gate.app.** That was the original integration and it cannot work
+from here: `api.sms-gate.app` is unreachable from Turkmen networks. Measured
+from the gateway handset itself, on the same Wi-Fi, at the same moment:
 
-| API location | Mode | Why |
-|---|---|---|
-| Same LAN as the phone | **Local Server** — `http://<phone-ip>:8090` | Lowest latency, and the OTP text never leaves your network. |
-| Hosted / remote box | **Cloud relay** — `https://api.sms-gate.app/3rdparty/v1` | The phone's LAN IP is a private address behind NAT; a remote server cannot route to it. The phone holds an *outbound* connection to the relay instead, so nothing inbound is needed. |
+| Host | Result |
+|---|---|
+| `api.sms-gate.app` | **100% packet loss** |
+| `semaycollection.com` | 0% loss, 13ms |
+| `google.com`, `fcm.googleapis.com` | 0% loss |
 
-The current production deployment is remote, so it must use the **Cloud relay**.
+So it is that specific domain being filtered, not general censorship, and no
+amount of retrying or reconfiguring the cloud relay fixes it. Messages sat at
+`Pending` forever. Our relay runs on a host the handset can actually reach.
 
-In the gateway app, enable the **Cloud server** toggle and read the credentials
-off its "Cloud server" card — they are **separate from** the Local Server
-username/password. Then, in `server/.env`:
+### Deploy the relay
+
+```bash
+cd /opt/semay/app/sms-gateway
+cp .env.example .env          # fill in — see below
+npm install
+npm run prisma:generate
+npm run prisma:deploy
+npm run build
+
+sudo cp deploy/semay-sms-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now semay-sms-gateway
+curl http://127.0.0.1:8081/health          # {"ok":true,...}
+```
+
+Create its database first — it is deliberately separate from `semay`, so the
+app's migrations and the relay's never block each other:
+
+```sql
+CREATE DATABASE semay_sms CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+Then expose it through nginx (`deploy/nginx-sms.conf`, paste into the existing
+443 server block) and reload. **Note the `proxy_read_timeout`** in that file:
+it must exceed the relay's 25s long-poll hold or the HTTP fallback transport
+gets killed mid-hold.
+
+### Point the API at it
+
+In `server/.env` — no code change, `sms.ts` already speaks this protocol:
 
 ```ini
-SMS_GATEWAY_URL="https://api.sms-gate.app/3rdparty/v1"
-SMS_GATEWAY_USER="<cloud username>"
-SMS_GATEWAY_PASSWORD="<cloud password>"
+SMS_GATEWAY_URL="https://semaycollection.com/sms/3rdparty/v1"
+SMS_GATEWAY_USER="semay-api"
+SMS_GATEWAY_PASSWORD="<API_PASSWORD from sms-gateway/.env>"
 OTP_DEV_MODE=false
 ```
 
-`OTP_DEV_MODE=false` is what actually switches `sms.ts` from the dev logger to
-the real gateway. The server **refuses to boot** if it's false while any of the
-three gateway values are blank (`config.ts`), so a half-configured gateway
-fails loudly at startup instead of silently 502-ing every login.
+`OTP_DEV_MODE=false` is what switches `sms.ts` from the dev logger to the real
+gateway. **Leaving it true is an account-takeover hole, not a nuisance**:
+`/auth/otp/send` returns the code in its own response body, so anyone who can
+reach the API can log in as anyone. The server refuses to boot if it is false
+while any gateway value is blank, so a half-configured gateway fails loudly at
+startup instead of silently failing every login.
 
-On the phone, keep **Start on boot** enabled and exclude the app from battery
-optimisation — a killed gateway means no OTP, and the only symptom users see
-is that login stops working.
+Restart the API afterwards — env vars are read once, at boot. A `.env` edit
+with no restart changes nothing, and looks exactly like the edit not working.
 
-Verify after deploying (§12) with a real login attempt, or directly:
+### Register each sender handset
 
 ```bash
-curl -u "<cloud user>:<cloud password>" \
-  -H "Content-Type: application/json" \
-  -d '{"phoneNumbers":["+993XXXXXXXX"],"message":"SeMay test"}' \
-  https://api.sms-gate.app/3rdparty/v1/message
+cd /opt/semay/app/sms-gateway
+npm run device:add -- --name "samsung-a16-sim1"      # prints a token ONCE
 ```
 
-> Do not commit real gateway credentials. `server/.env` is gitignored; keep them
-> there and nowhere else in the repo.
+Install `sms-gateway/android` on the phone, enter `https://semaycollection.com/sms`
+plus that token, grant SMS + phone permissions, and press Save & start.
+
+**Then disable battery optimisation for it.** This is not optional. A partial
+wake lock keeps the CPU alive but Android still suspends *network* for apps
+that are not exempt, so the app keeps showing "Connected" while its socket has
+been dead for an hour — which is precisely how the previous gateway hid an
+outage. The app appends a warning to its own status until the exemption is
+granted.
+
+Capacity scales by SIM: one dual-SIM handset is two senders, N handsets are 2N.
+The relay round-robins across every SIM that is reachable and under its rate
+caps.
+
+### Verify
+
+```bash
+# who is reachable, and over which transport
+curl -u "semay-api:<API_PASSWORD>" https://semaycollection.com/sms/3rdparty/v1/device
+
+# send a real one (goes to a real phone — use your own number)
+curl -u "semay-api:<API_PASSWORD>" -H "Content-Type: application/json" \
+  -d '{"phoneNumbers":["+993XXXXXXXX"],"message":"SeMay test"}' \
+  https://semaycollection.com/sms/3rdparty/v1/message
+```
+
+A handset should show `online: true` with `transport: "websocket"` or
+`"polling"` — both are healthy. `"offline"` means it has neither a socket nor a
+recent poll, and no OTP will reach it.
+
+> Do not commit real gateway credentials or device tokens. `server/.env` and
+> `sms-gateway/.env` are both gitignored; keep them there and nowhere else.
 
 ## 6. Build & run
 
