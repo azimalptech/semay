@@ -10,6 +10,15 @@ const schema = z.object({
   API_USER: z.string().min(1),
   API_PASSWORD: z.string().min(16, "API_PASSWORD must be at least 16 characters"),
 
+  // Set false to serve the HTTP polling transport ONLY. Two real uses: a
+  // reverse proxy that will not upgrade connections (more common than it
+  // should be), and forcing handsets onto the fallback to prove it works
+  // before depending on it in production.
+  WEBSOCKET_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+
   ASSIGN_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(45),
   MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
 

@@ -3,6 +3,7 @@ import type { WebSocket } from "ws";
 import { z } from "zod";
 
 import { hashToken } from "../auth.js";
+import { config } from "../config.js";
 import { prisma } from "../db.js";
 import { applyReport, claimForDevice, dispatchPending, waitForWork } from "../dispatch.js";
 import * as registry from "../registry.js";
@@ -193,6 +194,11 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     if (!applied) return reply.code(409).send({ error: "NOT_ASSIGNED_TO_THIS_DEVICE" });
     return reply.send({ ok: true });
   });
+
+  if (!config.WEBSOCKET_ENABLED) {
+    app.log.warn("WEBSOCKET_ENABLED=false — devices must use the HTTP polling transport");
+    return;
+  }
 
   app.get("/ws", { websocket: true }, (socket: WebSocket, req) => {
     // The message listener is attached SYNCHRONOUSLY, before any await.

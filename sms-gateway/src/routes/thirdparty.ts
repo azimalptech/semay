@@ -7,6 +7,11 @@ import { prisma } from "../db.js";
 import { enqueue } from "../dispatch.js";
 import * as registry from "../registry.js";
 
+/** A polling handset counts as reachable if it completed a poll within this
+ * window. Comfortably more than one 25s hold plus a retry, so a device that is
+ * mid-poll is never briefly reported offline. */
+const POLL_ONLINE_WINDOW_MS = 90_000;
+
 // The SeMay API's phone validation is stricter than ours deliberately: this
 // relay is a dumb pipe and should not be the thing that decides a number is
 // invalid. It only rejects what it cannot physically send.
@@ -114,25 +119,36 @@ export async function thirdPartyRoutes(app: FastifyInstance): Promise<void> {
       orderBy: { createdAt: "asc" },
     });
 
+    const now = Date.now();
     return reply.send(
-      devices.map((d) => ({
-        id: d.id,
-        name: d.name,
-        createdAt: d.createdAt.toISOString(),
-        lastSeen: d.lastSeenAt?.toISOString() ?? null,
-        // Not part of the sms-gate.app shape, but the single most useful field
-        // when triaging "why did no OTP arrive" — a device row can look healthy
-        // while its socket has been gone for an hour.
-        online: registry.isOnline(d.id),
-        enabled: d.enabled,
-        simCards: d.simCards.map((s) => ({
-          slotIndex: s.slotIndex,
-          simNumber: s.slotIndex + 1,
-          carrierName: s.carrierName,
-          sentThisHour: s.sentThisHour,
-          sentToday: s.sentToday,
-        })),
-      }))
+      devices.map((d) => {
+        // "Online" must mean reachable, not "holds a WebSocket". A handset on
+        // the polling transport is a perfectly good sender, and reporting it
+        // offline would send whoever is triaging a missing OTP chasing the
+        // wrong thing entirely.
+        const socketUp = registry.isOnline(d.id);
+        const polledRecently =
+          d.lastSeenAt !== null && now - d.lastSeenAt.getTime() < POLL_ONLINE_WINDOW_MS;
+        return {
+          id: d.id,
+          name: d.name,
+          createdAt: d.createdAt.toISOString(),
+          lastSeen: d.lastSeenAt?.toISOString() ?? null,
+          // Not part of the sms-gate.app shape, but the single most useful
+          // field when triaging "why did no OTP arrive" — a device row can look
+          // healthy while it has actually been unreachable for an hour.
+          online: socketUp || polledRecently,
+          transport: socketUp ? "websocket" : polledRecently ? "polling" : "offline",
+          enabled: d.enabled,
+          simCards: d.simCards.map((s) => ({
+            slotIndex: s.slotIndex,
+            simNumber: s.slotIndex + 1,
+            carrierName: s.carrierName,
+            sentThisHour: s.sentThisHour,
+            sentToday: s.sentToday,
+          })),
+        };
+      })
     );
   });
 }
