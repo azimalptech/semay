@@ -1,0 +1,39 @@
+# The Super Admin panel (web-admin/), a Next.js server.
+#
+#   sudo cp deploy/semay-web-admin.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now semay-web-admin
+#
+# PORT is set here rather than in .env.local so it is impossible for the panel
+# and nginx to disagree about where it listens: nginx terminates TLS on :3000
+# and proxies to this, which therefore must NOT also be 3000.
+
+[Unit]
+Description=SeMay Super Admin panel (Next.js)
+Wants=mysql.service network-online.target
+After=mysql.service network-online.target semay-api.service
+
+[Service]
+Type=simple
+User=semay
+WorkingDirectory=/opt/semay/app/web-admin
+Environment=NODE_ENV=production
+Environment=PORT=3001
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/semay/app/web-admin
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=semay-web-admin
+
+[Install]
+WantedBy=multi-user.target

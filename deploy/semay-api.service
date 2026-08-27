@@ -1,0 +1,45 @@
+# The main SeMay API (server/).
+#
+#   sudo cp deploy/semay-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now semay-api
+#
+# Was never version-controlled before, which meant rebuilding this box required
+# reconstructing it from memory. That is exactly the sort of thing you discover
+# you cannot do at the moment you most need to.
+
+[Unit]
+Description=SeMay API (Fastify + Prisma/MySQL)
+# Wants, not Requires: if MySQL is slow to start the API should retry rather
+# than refuse to boot. It fails its own readiness probe until the DB answers.
+Wants=mysql.service redis-server.service network-online.target
+After=mysql.service redis-server.service network-online.target
+
+[Service]
+Type=simple
+User=semay
+WorkingDirectory=/opt/semay/app/server
+# --env-file explicitly, so the service cannot start unconfigured. Note this
+# runs dist/, NOT src/ — `npm run build` after every code change or systemd
+# happily keeps serving the previous build.
+ExecStart=/usr/bin/node --env-file=.env dist/index.js
+Restart=always
+RestartSec=5
+# A genuinely broken build should fail visibly rather than spin forever and
+# bury the real error under restart noise.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Media uploads and rotating logs are both written at runtime.
+ReadWritePaths=/opt/semay/app/server /opt/semay/media /opt/semay/logs
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=semay-api
+
+[Install]
+WantedBy=multi-user.target
