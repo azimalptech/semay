@@ -91,6 +91,45 @@ const schema = z.object({
     });
   }
 
+  // MEDIA_PUBLIC_BASE_URL must be https for any real host.
+  //
+  // It is not just where media is served from: media/routes.ts derives the
+  // signed UPLOAD origin from it, so an http:// value hands the app an http
+  // upload URL. Behind TLS that 301-redirects, and neither Dio nor the Android
+  // client follows a redirect on a PUT — every post publish fails with an
+  // opaque "status code of 301" that says nothing about the cause. The stored
+  // publicUrl is then http too, which the app's network-security config
+  // refuses to load at all.
+  //
+  // Cost us a real debugging session, and the failure appears three layers away
+  // from the setting that caused it, so it is worth refusing to boot over.
+  // Loopback is exempt: local development has no certificate.
+  try {
+    const mediaUrl = new URL(cfg.MEDIA_PUBLIC_BASE_URL);
+    const isLoopback =
+      mediaUrl.hostname === "localhost" ||
+      mediaUrl.hostname === "127.0.0.1" ||
+      mediaUrl.hostname === "::1" ||
+      // The Android emulator's alias for the host machine.
+      mediaUrl.hostname === "10.0.2.2";
+    if (mediaUrl.protocol === "http:" && !isLoopback) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["MEDIA_PUBLIC_BASE_URL"],
+        message:
+          `must use https for a non-loopback host (got "${cfg.MEDIA_PUBLIC_BASE_URL}"). ` +
+          "The signed media UPLOAD origin is derived from this value, so http here makes " +
+          "every post publish fail on a 301 redirect the mobile client will not follow.",
+      });
+    }
+  } catch {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["MEDIA_PUBLIC_BASE_URL"],
+      message: "must be an absolute URL, e.g. https://example.com/media",
+    });
+  }
+
   // In production (OTP_DEV_MODE=false) real SMS must be deliverable — otherwise
   // every login silently 502s. Fail at boot instead, with a clear message.
   if (!cfg.OTP_DEV_MODE) {

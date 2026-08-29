@@ -2,6 +2,20 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Tests must NEVER attempt a real SMS. Set before .env is read, because the
+// loader below only fills gaps (`if (!(key in process.env))`) — so these win.
+//
+// Not hypothetical: a developer .env with OTP_DEV_MODE=false pointed at an
+// unreachable gateway made six auth tests fail with an opaque 502, which reads
+// exactly like a code regression and cost real time to trace back to ambient
+// config. Worse is the case where the gateway IS reachable: the suite would
+// then send live SMS, on a real SIM, to whatever numbers the fixtures happen
+// to use. Whether the suite passes must not depend on the machine it runs on.
+process.env.OTP_DEV_MODE = "true";
+process.env.SMS_GATEWAY_URL = "";
+process.env.SMS_GATEWAY_USER = "";
+process.env.SMS_GATEWAY_PASSWORD = "";
+
 // vitest has no built-in .env loading (we deliberately avoided a dotenv
 // dependency and use Node's --env-file for the app itself); replicate the
 // same minimal loading here so config.ts's Zod validation sees real values.
