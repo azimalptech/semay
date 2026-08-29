@@ -425,11 +425,21 @@ analyze` is clean.
 
 The two things Firestore gave for free that the plan flagged as the biggest client lift.
 
-- **Server foundation**: `messages.clientKey VARCHAR(64) UNIQUE` (migration
-  `20260725035809_add_message_client_key`). `sendMessage` now dedupes on it: a fast-path `findUnique`
-  returns the already-created message on a retry, and a concurrent same-key burst that slips past the
-  fast path is caught on the `P2002` unique-violation and re-fetches the winner — so a replayed outbox
-  can **never** double-send. Verified live (send twice + 5-way concurrent race → one row) and covered
+- **Server foundation**: `messages.clientKey VARCHAR(64)`, unique **per chat**
+  (`UNIQUE(chatId, clientKey)` — migration `20260725035809_add_message_client_key`, narrowed from a
+  global unique by `20260829160413_scope_message_clientkey_to_chat`). `sendMessage` dedupes on it: a
+  fast-path lookup scoped to `(chatId, senderId)` returns the already-created message on a retry, and
+  a concurrent same-key burst that slips past the fast path is caught on the `P2002` unique-violation
+  and re-fetches the winner — so a replayed outbox can **never** double-send.
+
+  The scoping is a security fix, not a tidy-up. While the constraint was global, the lookup was an
+  unscoped `findUnique`, so replaying any key returned **whatever row owned it** — a stranger's
+  private message, complete with text, sender and timestamps, from a chat the caller gets `403` on.
+  It was silent data loss too: the caller's own message was never written, yet they received `201`,
+  and the outbox drops an item on any 2xx. Orders mint structurally derivable keys (`order:{id}`), so
+  the keyspace was not purely random either. Per-chat uniqueness is what the idempotency needed all
+  along — a genuine retry always targets the same chat. Verified live (send twice + 5-way concurrent
+  race → one row) and covered
   by `tests/message.idempotency.test.ts` (retry + 10-way concurrent burst → exactly one row); 32/32
   server tests pass. Like/save need no key — they're already idempotent on their composite PKs.
 - **Client outbox** (`mobile/lib/core/outbox.dart`): a durable `sqflite` queue (`connectivity_plus` +

@@ -32,7 +32,14 @@ export async function notificationRequestRoutes(app: FastifyInstance): Promise<v
     }
   );
 
-  app.get("/notification-requests", { preHandler: requireAuth }, async (req, reply) => {
+  app.get(
+    "/notification-requests",
+    // requireFreshAuth, matching every other store-scoped route: this authorizes
+    // off req.auth.storeIds, which requireAuth never revalidates — so a store
+    // admin revoked mid-token kept reading their old store's requests, including
+    // requester identities and decisions, until the access token expired.
+    { preHandler: [requireAuth, requireFreshAuth] },
+    async (req, reply) => {
     const query = listQuerySchema.safeParse(req.query);
     if (!query.success) return reply.code(400).send({ error: "INVALID_INPUT" });
 

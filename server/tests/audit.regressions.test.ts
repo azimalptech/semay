@@ -259,6 +259,111 @@ describe("audit regressions", () => {
     });
   });
 
+  // clientKey was globally UNIQUE and looked up with an unscoped findUnique, so
+  // replaying a key returned whatever row owned it — a stranger's private
+  // message, from a chat the caller gets 403 on. It was also silent data loss:
+  // the caller's own message was never written, but they got a 2xx and the
+  // outbox dropped it.
+  describe("clientKey idempotency is scoped to the chat", () => {
+    it("does not return another chat's message for a replayed key", async () => {
+      const owner = await makeUser("admin");
+      const store = await prisma.store.create({
+        data: { name: "Audit Chat Store", phone: phone(), createdById: owner.id },
+      });
+      storeIds.push(store.id);
+
+      const victim = await makeUser();
+      const attacker = await makeUser();
+      const key = `shared-key-${Date.now()}`;
+
+      const victimChat = await prisma.chat.create({
+        data: { id: `${victim.id}_${store.id}`, userId: victim.id, storeId: store.id },
+      });
+      const attackerChat = await prisma.chat.create({
+        data: { id: `${attacker.id}_${store.id}`, userId: attacker.id, storeId: store.id },
+      });
+
+      const secret = await prisma.message.create({
+        data: {
+          chatId: victimChat.id,
+          senderId: victim.id,
+          senderRole: "user",
+          text: "SECRET-door-code-9931",
+          clientKey: key,
+        },
+      });
+
+      // The attacker replays the key in their OWN chat.
+      const { accessToken } = await loginAs(attacker.id);
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/v1/chats/${attackerChat.id}/messages`,
+        headers: { authorization: `Bearer ${accessToken}` },
+        payload: { text: "attacker text", clientKey: key },
+      });
+
+      expect(res.statusCode).toBe(201);
+      const body = res.json().message ?? res.json();
+      // Must be the attacker's own new message, never the victim's row.
+      expect(String(body.id)).not.toBe(String(secret.id));
+      expect(body.text).not.toContain("SECRET-door-code-9931");
+      expect(body.chatId).toBe(attackerChat.id);
+
+      // And their message must actually have been stored — the old behaviour
+      // returned 2xx while writing nothing.
+      const stored = await prisma.message.count({
+        where: { chatId: attackerChat.id, text: "attacker text" },
+      });
+      expect(stored).toBe(1);
+
+      await prisma.message.deleteMany({
+        where: { chatId: { in: [victimChat.id, attackerChat.id] } },
+      });
+      await prisma.chat.deleteMany({ where: { id: { in: [victimChat.id, attackerChat.id] } } });
+    });
+  });
+
+  // decide was read → check → update across three awaits with no transaction,
+  // so concurrent approvals each passed the guard and each broadcast to every
+  // user in the system.
+  describe("notification request approval is single-shot", () => {
+    it("lets only one of N concurrent decisions through", async () => {
+      const admin = await makeUser("admin");
+      const store = await prisma.store.create({
+        data: { name: "Audit Notif Store", phone: phone(), createdById: admin.id },
+      });
+      storeIds.push(store.id);
+      const superadmin = await makeUser("superadmin");
+      const { accessToken } = await loginAs(superadmin.id);
+
+      const request = await prisma.notificationRequest.create({
+        data: {
+          storeId: store.id,
+          storeName: store.name,
+          message: "audit concurrent approve",
+          requestedBy: admin.id,
+          status: "pending",
+        },
+      });
+
+      const results = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          app.inject({
+            method: "POST",
+            url: `/api/v1/notification-requests/${request.id}/decide`,
+            headers: { authorization: `Bearer ${accessToken}` },
+            payload: { approve: true },
+          })
+        )
+      );
+
+      const ok = results.filter((r) => r.statusCode === 200).length;
+      expect(ok).toBe(1);
+
+      await prisma.notificationRequest.deleteMany({ where: { id: request.id } });
+    });
+  });
+
   /** Mints a real access token for an existing user, via the OTP flow so the
    * claims are produced the same way production produces them. */
   async function loginAs(userId: string): Promise<{ accessToken: string }> {

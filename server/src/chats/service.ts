@@ -128,10 +128,27 @@ export async function sendMessage(
   senderId: string,
   input: SendMessageInput
 ): Promise<Message> {
-  // Idempotency fast-path: if this clientKey already produced a message,
-  // return it unchanged (no second row, no re-publish, no unread double-count).
+  // Idempotency fast-path: if this clientKey already produced a message in
+  // THIS chat, from THIS sender, return it unchanged (no second row, no
+  // re-publish, no unread double-count).
+  //
+  // The chatId/senderId predicates are load-bearing, exactly as they are on the
+  // replyToMessageId lookup below. clientKey is globally UNIQUE, so an unscoped
+  // findUnique returned whatever row owned the key — including one from a
+  // stranger's private chat, which the caller could not otherwise read (GET on
+  // that chat correctly 403s). Replaying a key was a read primitive for another
+  // user's message text, sender and timestamps.
+  //
+  // It was also silent data loss in the ordinary case: a key that collided with
+  // a foreign row returned 201 while the caller's own message was never stored,
+  // and the outbox drops an item on any 2xx.
+  //
+  // Scoping matches the documented intent — the same client retrying the same
+  // send — and a genuine retry always carries the same chat and sender.
   if (input.clientKey) {
-    const existing = await prisma.message.findUnique({ where: { clientKey: input.clientKey } });
+    const existing = await prisma.message.findFirst({
+      where: { clientKey: input.clientKey, chatId: chat.id, senderId },
+    });
     if (existing) return existing;
   }
 
@@ -248,7 +265,11 @@ export async function sendMessage(
       err instanceof Prisma.PrismaClientKnownRequestError &&
       err.code === "P2002"
     ) {
-      const winner = await prisma.message.findUnique({ where: { clientKey: input.clientKey } });
+      // Scoped to this chat, matching the compound UNIQUE — the winner of the
+      // race is by definition a message in the same chat.
+      const winner = await prisma.message.findUnique({
+        where: { chatId_clientKey: { chatId: chat.id, clientKey: input.clientKey } },
+      });
       if (winner) return winner;
     }
     throw err;

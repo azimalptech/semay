@@ -419,9 +419,17 @@ model Message {
   replyToText       String?           @db.VarChar(512)
   replyToSenderRole SenderRole?
   // Client-generated idempotency key (offline outbox, Phase 9b) — a retried
-  // send under flaky signal reuses the same key, so UNIQUE makes the second
-  // insert a no-op that returns the already-created row instead of a dupe.
-  clientKey         String?           @unique @db.VarChar(64)
+  // send under flaky signal reuses the same key, so the second insert is a
+  // no-op that returns the already-created row instead of a dupe.
+  //
+  // Scoped to the chat, NOT globally unique. A global UNIQUE made the key a
+  // cross-chat handle: sendMessage looked it up with findUnique and returned
+  // whatever row owned it, so replaying a key read back a stranger's private
+  // message — text, sender and timestamps — from a chat the caller gets 403 on.
+  // Orders mint structurally derivable keys (`order:{id}`), so the keyspace was
+  // partly guessable rather than purely random. Per-chat uniqueness is what the
+  // idempotency actually needs: a genuine retry always targets the same chat.
+  clientKey         String?           @db.VarChar(64)
   createdAt         DateTime          @default(now()) @db.DateTime(3)
   deliveredAt       DateTime?         @db.DateTime(3)
   readAt            DateTime?         @db.DateTime(3)
@@ -429,6 +437,7 @@ model Message {
   chat   Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
   sender User @relation(fields: [senderId], references: [id], onDelete: Cascade)
 
+  @@unique([chatId, clientKey])
   @@index([chatId, id])
   @@map("messages")
 }
