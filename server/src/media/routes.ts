@@ -34,7 +34,6 @@ const uploadUrlSchema = z.object({
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024; // videos are capped at 100MB client-side
 
 export async function mediaRoutes(app: FastifyInstance): Promise<void> {
-  app.addContentTypeParser("*", (_req, payload, done) => done(null, payload));
 
   // Origin the uploads are PUT to = origin media is served from (the API serves
   // /media itself). Derived once from MEDIA_PUBLIC_BASE_URL.
@@ -57,10 +56,26 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
     }
   );
 
-  // Unauthenticated but signature-gated: the mobile client PUTs bytes here with
-  // no bearer token (matches the old presigned-URL flow). The signature over
-  // (key, exp) is what authorizes it, so only a server-issued slot can write.
-  app.put("/media/blob/*", async (req, reply) => {
+  // The blob PUT lives in its own encapsulated scope so its parsers cannot
+  // affect its siblings — /media/upload-url takes an ordinary JSON body and
+  // must keep parsing it normally.
+  //
+  // Inside this scope, `application/json` is overridden to pass raw bytes
+  // through. The `*` fallback alone was not enough: Fastify's built-in JSON
+  // parser still claimed that content type and handed the handler a PARSED
+  // object, which is neither Buffer, string, nor stream — so an array or number
+  // body fell through to the stream path and threw `source.on is not a
+  // function`. That surfaced as a 500 with a 0-byte file already on disk,
+  // served publicly until the reaper collected it. The handler's own guard was
+  // written for this case but only covered Buffer and string.
+  await app.register(async (blob) => {
+    blob.removeContentTypeParser("application/json");
+    blob.addContentTypeParser("*", (_req, payload, done) => done(null, payload));
+
+    // Unauthenticated but signature-gated: the mobile client PUTs bytes here with
+    // no bearer token (matches the old presigned-URL flow). The signature over
+    // (key, exp) is what authorizes it, so only a server-issued slot can write.
+    blob.put("/media/blob/*", async (req, reply) => {
     const key = (req.params as Record<string, string>)["*"];
     const { exp, sig } = req.query as { exp?: string; sig?: string };
     if (!key || !sig || !verifyUpload(key, Number(exp), sig)) {
@@ -121,6 +136,7 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
       throw err;
     }
 
-    return reply.send({ ok: true });
+      return reply.send({ ok: true });
+    });
   });
 }

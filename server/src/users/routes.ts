@@ -48,7 +48,7 @@ const registerTokenSchema = z.object({
 
 const listQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
-  offset: z.coerce.number().int().nonnegative().default(0),
+  offset: z.coerce.number().int().nonnegative().max(1000000).default(0),
 });
 
 function toProfile(user: {

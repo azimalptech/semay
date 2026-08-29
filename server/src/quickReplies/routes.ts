@@ -8,11 +8,12 @@ import { parseBigIntId } from "../lib/ids.js";
 
 const createSchema = z.object({
   text: z.string().min(1).max(512),
-  position: z.number().int().nonnegative().default(0),
+  // See posts/routes.ts: INT_MAX, or an over-range value 500s instead of 400ing.
+  position: z.number().int().nonnegative().max(2147483647).default(0),
 });
 const updateSchema = z.object({
   text: z.string().min(1).max(512).optional(),
-  position: z.number().int().nonnegative().optional(),
+  position: z.number().int().nonnegative().max(2147483647).optional(),
 });
 
 async function assertCanManage(

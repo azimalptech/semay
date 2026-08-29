@@ -16,7 +16,10 @@ import {
 
 const mediaItemSchema = z.object({
   url: z.string().min(1).max(512),
-  position: z.number().int().nonnegative(),
+  // Bounded to INT_MAX: `position` is a 32-bit column, and an unbounded value
+  // that passes schema validation reaches Prisma and throws a validation error
+  // the error mapper does not recognise, surfacing as a 500 on client input.
+  position: z.number().int().nonnegative().max(2147483647),
   thumbnailUrl: z.string().max(512).optional(),
 });
 
@@ -31,7 +34,9 @@ const createPostSchema = z.object({
 const listQuerySchema = z.object({
   type: z.enum(["image", "carousel", "reel"]).optional(),
   limit: z.coerce.number().int().positive().max(100).default(20),
-  offset: z.coerce.number().int().nonnegative().default(0),
+  // Bounded for the same reason as `position` — a huge offset is meaningless
+  // as a page cursor and reaches the driver as an out-of-range integer.
+  offset: z.coerce.number().int().nonnegative().max(1000000).default(0),
 });
 
 const updateCaptionSchema = z.object({ caption: z.string().max(2000) });
