@@ -129,6 +129,25 @@ async function requireDevice(req: FastifyRequest, reply: FastifyReply) {
 }
 
 export async function deviceRoutes(app: FastifyInstance): Promise<void> {
+  // Treat an empty JSON body as {}. /poll takes no input at all, so demanding
+  // a body from it is a trap for any client that does not happen to send "{}"
+  // — and because Fastify parses the body before preHandlers run, the failure
+  // surfaces as a confusing 400 even when the real problem is a bad token.
+  // Scoped to this plugin; the 3rd-party API still rejects malformed input.
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string" },
+    (_req, body, done) => {
+      const raw = typeof body === "string" ? body.trim() : "";
+      if (raw === "") return done(null, {});
+      try {
+        done(null, JSON.parse(raw));
+      } catch (err) {
+        done(err as Error);
+      }
+    }
+  );
+
   // Liveness for the handset's own diagnostics screen — deliberately
   // unauthenticated and free of any device detail.
   app.get("/ping", async () => ({ ok: true }));
