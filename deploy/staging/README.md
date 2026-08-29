@@ -19,6 +19,39 @@ Docker Desktop with the WSL2 backend. If `docker info` errors and
 wsl --install
 ```
 
+If Docker still refuses with **"Virtualization support not detected"**, the CPU
+flag is off in firmware — check `(Get-CimInstance Win32_Processor).VirtualizationFirmwareEnabled`.
+`False` means Intel VT-x / AMD-V is disabled in the BIOS and no amount of
+software setup will help. Use the no-Docker path below instead.
+
+## Without Docker
+
+The whole point is exercising nginx, and nginx does not need a VM. Run it
+natively in front of the two services started from the host:
+
+1. Download nginx for Windows from <https://nginx.org/en/download.html>
+   (1.24.x, matching production) and unzip it.
+2. Start the API and the relay on **8070** and **8071**, each with its own
+   `--env-file`. `MEDIA_PUBLIC_BASE_URL` must be `https://localhost:9443/media`
+   — `config.ts` refuses to boot on an `http` value for a non-loopback host.
+3. Use `nginx.conf` from this directory with three edits: `listen 9443 ssl`,
+   upstreams pointed at `127.0.0.1:8070` / `:8071`, and the `alias` in
+   `location /media/` pointed at `server/media/`.
+4. `nginx.exe -t -p <dir>` to check, then `nginx.exe -p <dir>` to run.
+
+Everything that governs proxy behaviour — the `map`, both trailing slashes on
+`/sms/`, the upgrade headers, the timeouts — is identical, so this tests the
+same things the compose stack does. Only TLS uses a self-signed certificate and
+MySQL is the host's rather than a container's.
+
+**Verified this way on 2026-08-29** against real nginx 1.24.0: all HTTP checks
+passed, the WebSocket handshake returned 101 through the proxy, and an
+authenticated idle long-poll was held open for 25.1s and returned 200 rather
+than being severed. Both fragile directives were then negative-tested — removing
+the `proxy_pass` trailing slash produced a 404, and replacing
+`$connection_upgrade` with `""` broke the upgrade — confirming the checks fail
+when the config is wrong, rather than passing vacuously.
+
 ## Run
 
 ```bash
