@@ -40,3 +40,4 @@ graphify-out/
 # Claude Code local/runtime state — may contain live credentials in
 # permission-allow entries; nothing here is shared/team config
 .claude/
+deploy/staging/certs/

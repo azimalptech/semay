@@ -1,0 +1,21 @@
+# Builds either server/ or sms-gateway/ — they have the same shape, so one
+# file with an arg avoids two copies drifting apart.
+FROM node:22-slim
+
+ARG SERVICE_DIR
+ENV SERVICE_DIR=${SERVICE_DIR}
+
+# Prisma's engines need OpenSSL; the slim image does not carry it.
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY ${SERVICE_DIR}/package*.json ./
+RUN npm ci
+
+COPY ${SERVICE_DIR}/ ./
+
+RUN npx prisma generate && npm run build
+
+CMD ["node", "dist/index.js"]

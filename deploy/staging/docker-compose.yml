@@ -1,0 +1,108 @@
+# A local stand-in for the production box, so the edge layer can be tested
+# before it reaches it.
+#
+# Everything verified so far has talked to the API directly on localhost. The
+# one layer never exercised is the one that actually broke production: nginx,
+# TLS, the /sms/ prefix strip, the WebSocket upgrade, and the long-poll timeout.
+# Those failures are invisible from a direct-to-Node test by construction.
+#
+#   cd deploy/staging
+#   docker compose up -d --build
+#   ./verify.sh          # exercises the stack THROUGH nginx
+#
+# Deliberately mirrors the server: nginx 1.24 on Ubuntu, MySQL 8, Node 22, and
+# the same nginx site config that is deployed, so a mistake in it fails here
+# rather than there.
+name: semay-staging
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: staging_root
+      MYSQL_DATABASE: semay
+      MYSQL_USER: semay
+      MYSQL_PASSWORD: staging_pw
+    # No host port published: nothing outside the compose network should reach
+    # the database, matching the server where 3306 is firewalled.
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pstaging_root"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    tmpfs:
+      # Staging data is disposable — keeping it in RAM makes a reset instant
+      # and guarantees no test run inherits the previous one's rows.
+      - /var/lib/mysql
+
+  createdb:
+    image: mysql:8.0
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: >
+      mysql -h mysql -uroot -pstaging_root -e
+      "CREATE DATABASE IF NOT EXISTS semay_sms CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+       GRANT ALL ON semay_sms.* TO 'semay'@'%'; FLUSH PRIVILEGES;"
+    restart: "no"
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/staging/Dockerfile.node
+      args:
+        SERVICE_DIR: server
+    depends_on:
+      createdb:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "mysql://semay:staging_pw@mysql:3306/semay?connection_limit=10&pool_timeout=20"
+      PORT: "8080"
+      WEB_ADMIN_ORIGIN: "https://localhost:3000"
+      JWT_SECRET: "staging_only_secret_0123456789abcdefghijklmnop"
+      ACCESS_TOKEN_TTL_SECONDS: "3600"
+      REFRESH_TOKEN_TTL_DAYS: "30"
+      OTP_DEV_MODE: "true"
+      OTP_TEST_PHONE: "+99363538839"
+      OTP_TEST_CODE: "123456"
+      MEDIA_DIR: "/media"
+      # https, matching production — and the value config.ts now refuses to
+      # start on if it were http for a non-loopback host.
+      MEDIA_PUBLIC_BASE_URL: "https://localhost/media"
+      LOG_DIR: "/tmp/logs"
+      LOG_LEVEL: "warn"
+    volumes:
+      - media:/media
+    command: sh -c "npx prisma migrate deploy && node dist/index.js"
+
+  relay:
+    build:
+      context: ../..
+      dockerfile: deploy/staging/Dockerfile.node
+      args:
+        SERVICE_DIR: sms-gateway
+    depends_on:
+      createdb:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "mysql://semay:staging_pw@mysql:3306/semay_sms?connection_limit=10&pool_timeout=20"
+      PORT: "8081"
+      API_USER: "semay-api"
+      API_PASSWORD: "staging_relay_password_0123456789"
+      WEBSOCKET_ENABLED: "true"
+      LOG_LEVEL: "warn"
+    command: sh -c "npx prisma migrate deploy && node dist/index.js"
+
+  nginx:
+    image: nginx:1.24
+    depends_on: [api, relay]
+    ports:
+      - "8443:443"
+      - "8081:3000"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - media:/media:ro
+
+volumes:
+  media:
