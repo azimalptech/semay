@@ -3,12 +3,39 @@ import { z } from "zod";
 
 import { requireAuth, requireFreshAuth } from "../auth/middleware.js";
 import { prisma } from "../db.js";
+import { keyForPublicUrl } from "../media/storage.js";
 import { annotateWithUserFlags } from "../posts/service.js";
 import { AccountDeletionBlockedError, deleteAccount, registerFcmToken } from "./service.js";
 
+/** Same-origin media a user may point their avatar at.
+ *
+ * `avatarUrl` used to accept any string, and account deletion unlinks whatever
+ * it holds — so a user could set it to any media URL on this origin (they are
+ * trivially discoverable: GET /feed returns them), delete their own account,
+ * and take a store's post image with them. Nothing checked ownership.
+ *
+ * Plain users cannot obtain an upload slot at all (/media/upload-url is
+ * admin/superadmin only), so a user-set same-origin media URL is never
+ * legitimately theirs. Only the `avatars/` folder is accepted here, which is
+ * also the only folder deleteAccount will unlink — anything else is stored as
+ * given but never used as a delete target. */
+const AVATAR_FOLDER = "avatars/";
+
+function isDeletableAvatarUrl(url: string): boolean {
+  const key = keyForPublicUrl(url);
+  return key !== undefined && key.startsWith(AVATAR_FOLDER);
+}
+
 const updateMeSchema = z.object({
   name: z.string().max(120).optional(),
-  avatarUrl: z.string().max(512).optional(),
+  avatarUrl: z
+    .string()
+    .max(512)
+    .refine(
+      (v) => v === "" || keyForPublicUrl(v) === undefined || isDeletableAvatarUrl(v),
+      "avatarUrl may not point at media outside the avatars folder"
+    )
+    .optional(),
   language: z.enum(["tk", "ru"]).optional(),
   darkMode: z.boolean().optional(),
   activeChatId: z.string().max(80).nullable().optional(),

@@ -4,7 +4,7 @@ import { Prisma } from "@prisma/client";
 
 import { revokeUserTokens } from "../auth/revocation.js";
 import { prisma } from "../db.js";
-import { deleteMediaByUrl } from "../media/storage.js";
+import { deleteMediaByUrl, keyForPublicUrl } from "../media/storage.js";
 import { publish } from "../realtime/bus.js";
 
 /** Registers (or re-points) an FCM token to a user. UNIQUE(token) means a
@@ -142,5 +142,18 @@ export async function deleteAccount(userId: string): Promise<void> {
   publish(`user:${userId}:claims`, { type: "remove", id: userId });
   // Their profile photo is personal data — "deleted" has to mean the bytes are
   // gone, not just the column that pointed at them.
-  await deleteMediaByUrl(avatarUrl);
+  //
+  // Restricted to the avatars/ folder, because this unlinks a URL the USER
+  // supplied. Without the check, setting avatarUrl to any same-origin media URL
+  // — post images are handed out by GET /feed — and then deleting your own
+  // account destroyed that file. Ownership was never verified; the traversal
+  // guard in pathForKey does not help, since the target is a perfectly valid
+  // key belonging to somebody else.
+  //
+  // Anything outside avatars/ is left to the maintenance reaper, which deletes
+  // only genuinely unreferenced files and after a grace period.
+  const key = keyForPublicUrl(avatarUrl ?? "");
+  if (key && key.startsWith("avatars/")) {
+    await deleteMediaByUrl(avatarUrl);
+  }
 }

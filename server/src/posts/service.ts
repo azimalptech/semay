@@ -14,9 +14,20 @@ const POST_COUNTS_SELECT = {
   sharesCount: true,
 } as const;
 
+/** Publishes a post's counters on its channel.
+ *
+ * The channel is built from the id the DATABASE returned, never the caller's
+ * string. MySQL matches `posts.id` case-insensitively, so a request naming
+ * `ABC…` updates the row `abc…` — and publishing on `post:ABC…` delivered the
+ * event to nobody, because every subscriber is on the canonical spelling. The
+ * write succeeded and open clients silently kept a stale count. Selecting `id`
+ * back and using it fixes this for every caller at once. */
 async function publishPostCounts(postId: string): Promise<void> {
-  const post = await prisma.post.findUnique({ where: { id: postId }, select: POST_COUNTS_SELECT });
-  if (post) publish(`post:${postId}`, { type: "upsert", data: post });
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: POST_COUNTS_SELECT,
+  });
+  if (post) publish(`post:${post.id}`, { type: "upsert", data: post });
 }
 
 export interface CreatePostInput {
@@ -77,6 +88,9 @@ export async function deletePostCascade(postId: string): Promise<void> {
       storeId: true,
       type: true,
       thumbnailUrl: true,
+      // Needed to keep store.likesCount honest — the post's likes cascade away
+      // with it, so the store total has to shed exactly this many.
+      likesCount: true,
       media: { select: { url: true } },
     },
   });
@@ -93,6 +107,23 @@ export async function deletePostCascade(postId: string): Promise<void> {
           ? { reelsCount: { decrement: 1 } }
           : { postsCount: { decrement: 1 } },
     });
+
+    // Deleting a post silently dropped its post_likes rows while leaving
+    // store.likesCount untouched, so the store's "Halananlar" total drifted
+    // upward permanently — schema.prisma claims this counter "can't drift", and
+    // there is no reaper to repair it. Clamped at zero for the same reason
+    // setToggle clamps: the counter started at 0 with no backfill, so likes
+    // predating it would otherwise push the total negative.
+    if (post.likesCount > 0) {
+      await tx.store.updateMany({
+        where: { id: post.storeId, likesCount: { gte: post.likesCount } },
+        data: { likesCount: { decrement: post.likesCount } },
+      });
+      await tx.store.updateMany({
+        where: { id: post.storeId, likesCount: { lt: post.likesCount } },
+        data: { likesCount: 0 },
+      });
+    }
   }));
 
   // After the commit: the DB is the source of truth, so files are only removed
@@ -130,11 +161,26 @@ export async function applyInteractionBatch(items: InteractionBatchItem[]): Prom
   // post 1000 times in a single batch to multiply it back up. A real client
   // aggregates per post before sending (interaction_buffer.dart builds a map
   // keyed by postId), so duplicates only ever arrive from a crafted request.
+  //
+  // The key is CANONICALISED, and that is the whole point. A plain Map keyed on
+  // the raw string compares exactly, while MySQL matches the id column
+  // case-insensitively and ignores trailing spaces — so "abc…", "ABC…" and
+  // "abc… " were three separate map entries that all updated the SAME row,
+  // three times. The cap was bypassable by simply varying the case: 1000
+  // spellings of one uuid in a single request incremented every counter by
+  // 1000, against any post of any store, which is precisely the amplification
+  // the cap was introduced to close.
+  //
+  // Ids here are uuids, so lowercasing and trimming reproduces exactly what the
+  // collation does.
+  const canonicalKey = (postId: string): string => postId.trim().toLowerCase();
+
   const merged = new Map<string, InteractionBatchItem>();
   for (const item of items) {
-    const prev = merged.get(item.postId);
+    const key = canonicalKey(item.postId);
+    const prev = merged.get(key);
     if (!prev) {
-      merged.set(item.postId, { ...item });
+      merged.set(key, { ...item });
       continue;
     }
     prev.views = Math.max(prev.views ?? 0, item.views ?? 0);
@@ -149,8 +195,17 @@ export async function applyInteractionBatch(items: InteractionBatchItem[]): Prom
     if (item.shares && item.shares > 0) data.sharesCount = { increment: item.shares };
     if (Object.keys(data).length === 0) continue;
     try {
-      await prisma.post.update({ where: { id: item.postId }, data });
-      touched.add(item.postId);
+      // Track the id the DATABASE returns, not the one the caller sent. The
+      // realtime channel is derived from it, and a caller-supplied variant
+      // spelling published to `post:ABC…` while every real subscriber listens
+      // on `post:abc…` — the write landed and no one was told, leaving open
+      // clients showing a stale count indefinitely.
+      const updated = await prisma.post.update({
+        where: { id: item.postId },
+        data,
+        select: { id: true },
+      });
+      touched.add(updated.id);
     } catch (err) {
       // P2025 = record-to-update not found (post deleted since the tap). Skip it
       // so one stale id can't reject a whole flush; anything else is real.

@@ -151,7 +151,21 @@ export async function verifyOtp(
   // because requestOtp never writes one for it.
   if (isTestPhone(phone)) return verifyTestPhone(phone, code, name);
 
-  return prisma.$transaction(async (tx) => {
+  // A failed attempt RETURNS rather than throws, because throwing here rolls
+  // the transaction back — and that would undo the attempts increment written
+  // moments earlier, which is exactly how the lockout came to be inoperative:
+  // `attempts` never left 0, `lockedUntil` was never set, and a number could
+  // be brute-forced indefinitely at 5 tries per... nothing at all.
+  //
+  // NameRequiredError still throws inside, because there the rollback IS the
+  // point: it preserves the otp_codes row so the same code works on the retry
+  // that carries a name.
+  type Outcome =
+    | { ok: true; user: User }
+    | { ok: false; reason: "invalid"; attemptsRemaining?: number }
+    | { ok: false; reason: "locked"; lockedUntil: Date };
+
+  const outcome = await prisma.$transaction(async (tx): Promise<Outcome> => {
     const rows = await tx.$queryRaw<
       {
         phone: string;
@@ -165,11 +179,11 @@ export async function verifyOtp(
     const row = rows[0];
     const now = new Date();
 
-    if (!row) throw new OtpInvalidError();
+    if (!row) return { ok: false, reason: "invalid" };
     if (row.lockedUntil && row.lockedUntil > now) {
-      throw new OtpLockedError(row.lockedUntil);
+      return { ok: false, reason: "locked", lockedUntil: row.lockedUntil };
     }
-    if (row.expiresAt <= now) throw new OtpInvalidError();
+    if (row.expiresAt <= now) return { ok: false, reason: "invalid" };
 
     if (row.code !== code) {
       const attempts = row.attempts + 1;
@@ -178,8 +192,9 @@ export async function verifyOtp(
           ? new Date(now.getTime() + config.OTP_LOCKOUT_MINUTES * 60 * 1000)
           : null;
       await tx.otpCode.update({ where: { phone }, data: { attempts, lockedUntil } });
-      if (lockedUntil) throw new OtpLockedError(lockedUntil);
-      throw new OtpInvalidError(config.OTP_MAX_ATTEMPTS - attempts);
+      return lockedUntil
+        ? { ok: false, reason: "locked", lockedUntil }
+        : { ok: false, reason: "invalid", attemptsRemaining: config.OTP_MAX_ATTEMPTS - attempts };
     }
 
     // Code is correct from here on.
@@ -197,6 +212,15 @@ export async function verifyOtp(
     // here: this runs inside the same SELECT ... FOR UPDATE transaction that
     // holds the otp_codes row for this phone, so two concurrent verifies for
     // the same number are already serialised.
-    return existing ?? tx.user.create({ data: { phone, name: trimmed } });
+    const user = existing ?? (await tx.user.create({ data: { phone, name: trimmed } }));
+    return { ok: true, user };
   });
+
+  // Thrown out here, AFTER the transaction has committed, so the attempts
+  // increment survives the failure it describes.
+  if (!outcome.ok) {
+    if (outcome.reason === "locked") throw new OtpLockedError(outcome.lockedUntil);
+    throw new OtpInvalidError(outcome.attemptsRemaining);
+  }
+  return outcome.user;
 }
