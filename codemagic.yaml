@@ -91,19 +91,28 @@ workflows:
         submit_to_app_store: false
 
   # Signed for direct install on registered devices. NOT published anywhere —
-  # no TestFlight, no App Store review. The ipa this produces can be installed
-  # straight onto any iPhone whose UDID is in the provisioning profile, and
-  # stays valid for the life of the certificate (about a year) rather than the
-  # 7 days a free-Apple-ID sideload gives you.
+  # no TestFlight, no App Store review. The ipa this produces installs straight
+  # onto any iPhone whose UDID is in the provisioning profile, and stays valid
+  # for the life of the certificate (about a year) rather than the 7 days a
+  # free-Apple-ID sideload gives you.
   #
-  # ONE-TIME SETUP, in this order:
-  #   1. Get the iPhone's UDID. Plug it in, open iTunes/Finder (or Windows:
-  #      Devices and Printers → device properties → Hardware Ids), or visit
-  #      https://udid.tech from the phone itself.
-  #   2. Apple Developer Portal → Devices → register that UDID.
-  #   3. Team settings → Integrations → App Store Connect: add an API key named
-  #      `semay-app-store`. Codemagic then issues the ad-hoc certificate and
-  #      profile itself — no manual .p12 or .mobileprovision handling.
+  # Signing is wired up EXPLICITLY with the Codemagic CLI instead of through an
+  # `environment.ios_signing:` block. That block only *fetches* signing files
+  # that already exist, so against a bundle id whose App ID was just created it
+  # fails before a build machine is even allocated:
+  #     No matching profiles found for bundle identifier "com.semay.semay"
+  #     and distribution type "ad_hoc"
+  # `fetch-signing-files --create` creates the missing profile instead of
+  # erroring on it, which is what makes this reachable from a Windows machine
+  # with no Mac to export a .p12 from.
+  #
+  # ONE-TIME APPLE SETUP (done 2026-09-02):
+  #   1. Devices → register the iPhone UDID. A device registered *after* a
+  #      profile is created is not in it — delete the profile and let this
+  #      recreate it.
+  #   2. Identifiers → register com.semay.semay.
+  #   3. Codemagic team settings → Integrations → Developer Portal → add an
+  #      App Store Connect API key named `semay-app-store`, Admin access.
   ios-adhoc:
     name: iOS ad-hoc (installable, not published)
     instance_type: mac_mini_m2
@@ -114,12 +123,8 @@ workflows:
       flutter: stable
       xcode: latest
       cocoapods: default
-      ios_signing:
-        # ad_hoc, not app_store: app_store-signed builds can only be installed
-        # via TestFlight, which is exactly the publishing step being avoided.
-        distribution_type: ad_hoc
-        bundle_identifier: com.semay.semay
       vars:
+        BUNDLE_ID: "com.semay.semay"
         API_BASE_URL: "https://semaycollection.com/api/v1"
     scripts:
       - name: Reject a non-https API URL
@@ -128,15 +133,44 @@ workflows:
             https://*) echo "API base URL: $API_BASE_URL" ;;
             *) echo "API_BASE_URL must be https (got '$API_BASE_URL')"; exit 1 ;;
           esac
+
+      - name: Fail early if the iOS usage strings are missing
+        script: |
+          # iOS terminates the process when the camera or photo library is
+          # touched with no usage string, so a build without these ships an app
+          # that crashes the first time someone tries to post a picture. This
+          # is the build that goes on a real handset, so assert it here too.
+          PLIST=mobile/ios/Runner/Info.plist
+          for key in NSCameraUsageDescription NSMicrophoneUsageDescription NSPhotoLibraryUsageDescription; do
+            grep -q "$key" "$PLIST" || { echo "$PLIST is missing $key"; exit 1; }
+          done
+          echo "usage strings present"
+
+      - name: Create and install the ad-hoc signing files
+        script: |
+          keychain initialize
+          # --create is the whole point of this step: it makes the profile that
+          # does not exist yet, and enrolls every device registered on the team
+          # so the test iPhone is covered by it.
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_ADHOC \
+            --create
+          keychain add-certificates
+          # Points the Xcode project at the fetched profile and writes
+          # ~/export_options.plist, which the build step below consumes.
+          xcode-project use-profiles
+
       - name: flutter pub get
         script: flutter pub get
         working_directory: mobile
+
       - name: Build ad-hoc ipa
         script: |
           flutter build ipa --release \
             --dart-define=API_BASE_URL=$API_BASE_URL \
             --export-options-plist=/Users/builder/export_options.plist
         working_directory: mobile
+
     artifacts:
       - mobile/build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
