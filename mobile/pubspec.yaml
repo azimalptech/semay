@@ -83,19 +83,25 @@ dev_dependencies:
   flutter_launcher_icons: ^0.14.4
 
 # flutter_launcher_icons config — run `dart run flutter_launcher_icons` to
-# (re)generate every platform icon size from assets/app_icon.png.
+# (re)generate every platform icon size. The two inputs are DERIVED from
+# assets/app_icon.png (the raw logo, transparent background) because the raw
+# file is wrong for both uses: legacy launchers composite transparency onto
+# black, and the adaptive mask crops to the middle ~66% which would chop the
+# wordmark. See the sizing script in the repo history (commit message of the
+# change that added these) to regenerate after a logo update.
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: "assets/app_icon.png"
+  # White background, artwork at 78% — legacy Android launchers and iOS.
+  image_path: "assets/app_icon_full.png"
   remove_alpha_ios: true
-  # Android adaptive icon: same flat white background + centered wordmark,
-  # split into its own foreground/background layers so the OS can mask it
-  # into a circle/squircle/etc. without cropping the text (the plain PNG
-  # path above still covers pre-8.0 devices that don't support adaptive
-  # icons at all).
+  # Android adaptive icon: transparent foreground with the artwork held
+  # inside the 66% safe zone, over a flat white background layer, so the OS
+  # can mask it into a circle/squircle/etc. without cropping the text (the
+  # plain PNG path above still covers pre-8.0 devices that don't support
+  # adaptive icons at all).
   adaptive_icon_background: "#FFFFFF"
-  adaptive_icon_foreground: "assets/app_icon.png"
+  adaptive_icon_foreground: "assets/app_icon_foreground.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
