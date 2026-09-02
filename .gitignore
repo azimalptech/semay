@@ -41,3 +41,4 @@ graphify-out/
 # permission-allow entries; nothing here is shared/team config
 .claude/
 deploy/staging/certs/
+build-out/
