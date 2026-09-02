@@ -4,6 +4,24 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<!-- iOS TERMINATES the process when a restricted resource is touched with no
+	     usage string present — this is not a review-only requirement, the app
+	     crashes on device. All three are reached from normal flows:
+	       camera      add_story_flow.dart (photo + pickVideo from camera)
+	       microphone  the same pickVideo — recording captures audio
+	       photos      add_content_sheet.dart, edit_store_screen.dart (gallery)
+	     Only what is actually used is declared; App Store review asks about
+	     permissions an app requests and never exercises.
+
+	     English because that is what review reads. The strings are user-facing,
+	     so localising them for tk/ru belongs in ios/Runner/<lang>.lproj/
+	     InfoPlist.strings — not yet done. -->
+	<key>NSCameraUsageDescription</key>
+	<string>SeMay needs camera access so you can take photos and record videos for your stories and posts.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SeMay needs microphone access to record sound with the videos you capture for your stories.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SeMay needs access to your photos so you can choose pictures and videos to share in posts, stories and chats.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
