@@ -90,6 +90,59 @@ workflows:
         submit_to_testflight: true
         submit_to_app_store: false
 
+  # Signed for direct install on registered devices. NOT published anywhere —
+  # no TestFlight, no App Store review. The ipa this produces can be installed
+  # straight onto any iPhone whose UDID is in the provisioning profile, and
+  # stays valid for the life of the certificate (about a year) rather than the
+  # 7 days a free-Apple-ID sideload gives you.
+  #
+  # ONE-TIME SETUP, in this order:
+  #   1. Get the iPhone's UDID. Plug it in, open iTunes/Finder (or Windows:
+  #      Devices and Printers → device properties → Hardware Ids), or visit
+  #      https://udid.tech from the phone itself.
+  #   2. Apple Developer Portal → Devices → register that UDID.
+  #   3. Team settings → Integrations → App Store Connect: add an API key named
+  #      `semay-app-store`. Codemagic then issues the ad-hoc certificate and
+  #      profile itself — no manual .p12 or .mobileprovision handling.
+  ios-adhoc:
+    name: iOS ad-hoc (installable, not published)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: semay-app-store
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        # ad_hoc, not app_store: app_store-signed builds can only be installed
+        # via TestFlight, which is exactly the publishing step being avoided.
+        distribution_type: ad_hoc
+        bundle_identifier: com.semay.semay
+      vars:
+        API_BASE_URL: "https://semaycollection.com/api/v1"
+    scripts:
+      - name: Reject a non-https API URL
+        script: |
+          case "$API_BASE_URL" in
+            https://*) echo "API base URL: $API_BASE_URL" ;;
+            *) echo "API_BASE_URL must be https (got '$API_BASE_URL')"; exit 1 ;;
+          esac
+      - name: flutter pub get
+        script: flutter pub get
+        working_directory: mobile
+      - name: Build ad-hoc ipa
+        script: |
+          flutter build ipa --release \
+            --dart-define=API_BASE_URL=$API_BASE_URL \
+            --export-options-plist=/Users/builder/export_options.plist
+        working_directory: mobile
+    artifacts:
+      - mobile/build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    # No `publishing:` block at all — the ipa is downloaded from the build page
+    # and installed directly. Nothing leaves Codemagic.
+
   # Compiles without signing, so it can run before any Apple setup exists. Use
   # it to prove the iOS code builds; the artifact is NOT installable.
   ios-unsigned:
