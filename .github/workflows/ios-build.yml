@@ -10,6 +10,11 @@ name: iOS build (unsigned)
 
 on:
   workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: "API base URL to compile in (must be https — iOS ATS blocks cleartext)"
+        required: true
+        default: "https://semaycollection.com/api/v1"
 
 jobs:
   build-ios:
@@ -27,7 +32,22 @@ jobs:
 
       - run: flutter pub get
 
-      - run: flutter build ios --release --no-codesign
+      # Fail before the 10-minute build rather than after it. iOS App Transport
+      # Security refuses cleartext by default, so an http:// URL compiles fine
+      # and then cannot reach the server from any real device — the kind of
+      # defect that only shows up once the ipa is on a phone.
+      - name: Reject a non-https API URL
+        run: |
+          case "${{ inputs.api_base_url }}" in
+            https://*) echo "API base URL: ${{ inputs.api_base_url }}" ;;
+            *) echo "::error::api_base_url must start with https:// (got '${{ inputs.api_base_url }}')"; exit 1 ;;
+          esac
+
+      # --dart-define is REQUIRED. Without it api_client.dart falls back to
+      # http://localhost:8080/api/v1, which on a phone means the phone itself —
+      # so the build succeeds and the app can never reach the API. The Android
+      # release build passes the same flag.
+      - run: flutter build ios --release --no-codesign --dart-define=API_BASE_URL=${{ inputs.api_base_url }}
 
       - name: Package unsigned IPA
         run: |
