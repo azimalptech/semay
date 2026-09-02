@@ -182,11 +182,17 @@ workflows:
           xcode-project use-profiles
 
           # Both commands above warn rather than fail when they fetched
-          # nothing, which is exactly how the previous build got two minutes
-          # past a signing failure. Assert the profile actually landed so the
-          # build stops at the real cause.
-          ls "$HOME/Library/MobileDevice/Provisioning Profiles/"*.mobileprovision \
-            || { echo "no provisioning profile installed — signing setup failed"; exit 1; }
+          # nothing, which is exactly how build 2 got two minutes past a
+          # signing failure. Assert on the export plist rather than on a
+          # directory listing: the CLI writes profiles to
+          # ~/Library/Developer/Xcode/UserData/Provisioning Profiles/, not the
+          # ~/Library/MobileDevice/... path Xcode itself uses, so checking the
+          # wrong directory fails a build whose signing actually succeeded.
+          # The plist naming a profile for this bundle id is the condition the
+          # build genuinely depends on.
+          /usr/libexec/PlistBuddy -c "Print :provisioningProfiles:$BUNDLE_ID" \
+            "$HOME/export_options.plist" \
+            || { echo "export_options.plist names no profile for $BUNDLE_ID — signing setup failed"; exit 1; }
 
       - name: flutter pub get
         script: flutter pub get
