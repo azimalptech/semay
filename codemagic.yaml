@@ -148,17 +148,45 @@ workflows:
 
       - name: Create and install the ad-hoc signing files
         script: |
+          set -e
           keychain initialize
-          # --create is the whole point of this step: it makes the profile that
-          # does not exist yet, and enrolls every device registered on the team
-          # so the test iPhone is covered by it.
+
+          # fetch-signing-files can only CREATE a signing certificate when it
+          # has a private key to sign the request with. Given none it logs
+          #     Cannot save Signing Certificates without certificate private key
+          # and then EXITS 0, so the build carries on and dies two minutes
+          # later inside Flutter as "No valid code signing certificates were
+          # found" — an error that points at Xcode instead of at this step.
+          #
+          # The CLI reads the key from CERTIFICATE_PRIVATE_KEY. Set that as an
+          # encrypted variable in the Codemagic UI to reuse ONE certificate
+          # across builds; Apple caps an account at 2 distribution
+          # certificates, and without it every build burns a new one.
+          if [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
+            echo "CERTIFICATE_PRIVATE_KEY is unset — generating a throwaway key"
+            openssl genrsa -out /tmp/cert_key.pem 2048
+            CERTIFICATE_PRIVATE_KEY="$(cat /tmp/cert_key.pem)"
+            export CERTIFICATE_PRIVATE_KEY
+          fi
+
+          # --create makes the ad-hoc profile that does not exist yet, and
+          # enrolls every device registered on the team — that is what puts the
+          # test iPhone inside the profile.
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --type IOS_APP_ADHOC \
             --create
+
           keychain add-certificates
           # Points the Xcode project at the fetched profile and writes
           # ~/export_options.plist, which the build step below consumes.
           xcode-project use-profiles
+
+          # Both commands above warn rather than fail when they fetched
+          # nothing, which is exactly how the previous build got two minutes
+          # past a signing failure. Assert the profile actually landed so the
+          # build stops at the real cause.
+          ls "$HOME/Library/MobileDevice/Provisioning Profiles/"*.mobileprovision \
+            || { echo "no provisioning profile installed — signing setup failed"; exit 1; }
 
       - name: flutter pub get
         script: flutter pub get
