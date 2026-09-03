@@ -2,13 +2,16 @@ import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
 import 'package:flutter/foundation.dart'
     show kIsWeb, TargetPlatform, defaultTargetPlatform;
 
-// Real values for the semay-b57ee Firebase project (fetched via
-// `firebase apps:sdkconfig` after registering each platform's app —
-// `flutterfire configure` needs an interactive browser login this
-// environment can't do, so these were pulled directly instead). Debug
-// builds still route through the local emulator regardless of these values
-// (see main.dart's kDebugMode block) — only release builds actually talk to
-// this real backend.
+// The semay-b57ee Firebase project, used for FCM push ONLY — Firestore, Auth,
+// Storage and Cloud Functions are gone (docs/07_MIGRATION.md). These are the
+// console's per-platform app configs (Project settings → General; recorded in
+// docs/09_DEPLOYMENT.md §5d). They are identifiers, not secrets: a client API
+// key names the project and authorizes nothing (docs/08_OPERATIONS.md, "Checked
+// and deliberately NOT changed"), so they ship in the binary — and there is no
+// google-services.json / GoogleService-Info.plist anywhere, because
+// Firebase.initializeApp reads these directly on every platform. Regenerate
+// with `firebase apps:sdkconfig` if an app is ever re-registered
+// (`flutterfire configure` needs an interactive browser login).
 class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
     if (kIsWeb) return web;

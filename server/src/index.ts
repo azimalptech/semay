@@ -1,7 +1,7 @@
 import { buildApp } from "./app.js";
 import { config } from "./config.js";
 import { disconnectDb } from "./db.js";
-import { getFcmDisabledReason } from "./lib/firebaseAdmin.js";
+import { getFcmDisabledReason, getFcmIdentity } from "./lib/firebaseAdmin.js";
 import { startMaintenance } from "./maintenance.js";
 import { closeBus, isDistributed } from "./realtime/bus.js";
 
@@ -17,6 +17,10 @@ async function start(): Promise<void> {
   const fcmDisabled = getFcmDisabledReason();
   if (fcmDisabled) {
     app.log.warn({ reason: fcmDisabled }, "FCM push is DISABLED");
+  } else {
+    // Which project and which key is sending, so it can be matched against the
+    // project the app was built for (mobile/lib/core/firebase_options.dart).
+    app.log.info({ fcm: getFcmIdentity() }, "FCM push enabled");
   }
   // A multi-process deployment without Redis appears healthy while silently
   // dropping realtime events across processes — worth stating explicitly at boot.

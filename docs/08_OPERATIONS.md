@@ -208,8 +208,12 @@ pretty-printed outside production only. `LOG_LEVEL` controls verbosity.
 
 Boot logs two things worth alerting on:
 
-- `FCM push is DISABLED` — the service-account file is missing or unreadable, so
-  no push will be delivered. The API otherwise runs normally by design.
+- `FCM push is DISABLED` — the service-account file is missing, unreadable, not
+  a service-account key, or belongs to a different Firebase project than
+  `FIREBASE_PROJECT_ID` (the reason names both ids), so no push will be
+  delivered. The API otherwise runs normally by design. Its counterpart,
+  `FCM push enabled`, logs the project and sender email so they can be checked
+  against the app's `firebase_options.dart` (`09_DEPLOYMENT.md` §5d).
 - `realtime: in-process only` — `REDIS_URL` is unset. Fine for one process,
   **wrong for more than one** (see §2.1).
 

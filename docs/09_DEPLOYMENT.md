@@ -287,6 +287,62 @@ logging at error level. Promoting that number would otherwise hand the
 published code real privileges with no outward sign. Leave both blank to
 disable.
 
+## 5d. Firebase (FCM push)
+
+Firebase is push only (`CLAUDE.md` rule 4). Everything below is project
+`semay-b57ee`. The identifiers are not secrets (`08_OPERATIONS.md`, "Checked
+and deliberately NOT changed") and are recorded here so nobody has to open the
+console to find them.
+
+| | |
+|---|---|
+| Project ID | `semay-b57ee` |
+| Project number / FCM sender ID | `185543007684` |
+| Android app | package `com.semay.semay`, app ID `1:185543007684:android:8330f92b64b7072011d891` |
+| iOS app | bundle `com.semay.semay`, app ID `1:185543007684:ios:097de46705573a8d11d891` |
+| Web app | `1:185543007684:web:025b97f3d38e2f0511d891` — not a shipping target |
+| Server sender | `firebase-adminsdk-fbsvc@semay-b57ee.iam.gserviceaccount.com`, FCM HTTP v1 API |
+
+**App side — nothing to install.** The per-platform config lives in
+`mobile/lib/core/firebase_options.dart` and `Firebase.initializeApp` reads it
+directly, so there is no `google-services.json` or `GoogleService-Info.plist`
+in the repo and neither native project references one. If an app is ever
+re-registered in the console, regenerate that file (`firebase apps:sdkconfig`)
+rather than adding the native files.
+
+**Server side — the one credential.** Console → Project settings → Service
+accounts → *Generate new private key*; save the download as
+`server/serviceAccount.json` (git-ignored — confirm with
+`git check-ignore server/serviceAccount.json` before anything else touches it).
+Restart the API and read the boot log:
+
+- `FCM push enabled` with `{"fcm":{"projectId":"semay-b57ee","clientEmail":"firebase-adminsdk-fbsvc@…"}}` — good.
+- `FCM push is DISABLED` with a reason — fix the reason. The server checks the
+  key's `project_id` against `FIREBASE_PROJECT_ID` at boot and refuses an
+  app/web config saved under the same name; either would otherwise load fine
+  and fail every send.
+
+The Admin SDK talks to the FCM HTTP v1 API. The legacy Cloud Messaging API and
+its server key are deprecated and disabled in the project — leave them so; the
+server never needs a server key.
+
+**iOS — portal work, or no iOS push ever.** Apple Developer → Keys → create an
+APNs key and download the `.p8`; upload it in Firebase (Project settings →
+Cloud Messaging → Apple app configuration) with its Key ID and your Team ID,
+and while there set the Team ID and App Store ID on the iOS app (Project
+settings → General → iOS app). The Push Notifications capability must be on
+the `com.semay.semay` App ID (`codemagic.yaml` header, step 4). All of this
+fails silently: without it the app runs, `getToken()` has nothing to register,
+and no push arrives (`08_OPERATIONS.md` §3b).
+
+**Not needed — don't chase these.**
+
+- *Web push VAPID key pair* — web is not a shipping target. If it ever is,
+  `notification_service.dart` takes the key as `--dart-define=FCM_VAPID_KEY=…`.
+- *Android SHA-1 / SHA-256 fingerprints* — only Phone Auth, App Check and
+  Dynamic Links need them, and this app uses none (auth is the custom OTP
+  flow). FCM works without them.
+
 ## 6. Build & run
 
 ```bash
@@ -465,11 +521,12 @@ not just real testing:
 - [ ] Restart MySQL **and** the API after any MySQL tuning or code fix — a
       running service holds the old build in memory; `dist/` alone updating is
       not enough.
-- [ ] Real `serviceAccount.json` in place for FCM (push is silently disabled
-      without it — check the boot log for `FCM push is DISABLED`).
-- [ ] iOS push chain: APNs auth key uploaded to the Firebase project (Project
-      settings → Cloud Messaging → Apple app configuration) and the Push
-      Notifications capability enabled on the `com.semay.semay` App ID. The
+- [ ] Real `serviceAccount.json` in place for FCM (§5d) — the boot log must say
+      `FCM push enabled` for project `semay-b57ee`; `FCM push is DISABLED`
+      means push is silently off, and the reason next to it says why.
+- [ ] iOS push chain (§5d): APNs auth key uploaded to the Firebase project
+      (Project settings → Cloud Messaging → Apple app configuration) and the
+      Push Notifications capability enabled on the `com.semay.semay` App ID. The
       entitlement and background mode are in the repo; without the portal side
       no iOS device ever gets an APNs token, and the app runs fine otherwise —
       so this fails silently (see `docs/08_OPERATIONS.md` §3b).
