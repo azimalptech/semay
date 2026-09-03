@@ -58,6 +58,9 @@ dependencies:
   path: ^1.9.1
   uuid: ^4.6.0
   connectivity_plus: ^7.3.1
+  # App-private folder for chat media queued in the outbox (the picker's temp
+  # file can be reclaimed by the OS before a slow send completes).
+  path_provider: ^2.1.6
 
 # firebase_messaging 16.4.2 declares firebase_core_platform_interface ^7.1.0, but
 # its compiled code extends `FirebasePlugin`, which only exists from 8.0.0 onward

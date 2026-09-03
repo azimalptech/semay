@@ -512,6 +512,32 @@ change list.
 - **Not yet verified on a device** (the reason this pass stops here): the resume/network-change
   reconnect, Android heads-up + tap-to-open, and the iOS push chain end to end.
 
+## Phase 9d — chat: local cache, media through the outbox, scroll-back (done)
+
+The three things that still separated the thread from Instagram's after 9c, all client-side
+(no server or schema change; the paging endpoint already existed):
+
+- **Local cache** — `mobile/lib/core/chat_cache.dart`, a per-account SQLite store (owner uid in a
+  `meta` row; a different uid or a logout wipes it) holding the chat list and the newest 500
+  messages of every thread opened. `chat_providers.dart` paints from it first, then the REST seed,
+  then the socket snapshot supersede it row by row, and every change (upserts, receipts, pages) is
+  written through. A thread now opens instantly and reads offline; the list and thread headers
+  (store/customer docs, via `read_cache.dart`) do too.
+- **Scroll-back** — `ChatMessagesNotifier` (replaces the message StreamProvider) merges four
+  sources by message id and pages older history 50 at a time (`GET /chats/:id/messages?before=`)
+  when the reversed `ListView` nears its top. Window merges keep rows outside the server's
+  200-message window (older pages, newer racing upserts) and treat the window itself as
+  authoritative. The thread's list is `reverse: true` now — the standard chat layout, which also
+  deleted the "settle scroll to bottom" retry hack the non-reversed list needed.
+- **Media through the outbox** — a store admin's gallery photo/video is copied into app storage,
+  queued, shown immediately from the local file with a progress ring, uploaded and then posted
+  by the outbox with the same retry/idempotency as text; the upload URL is written back to the
+  queued row so a retry never re-uploads. Images are downscaled to ≤1600 px / JPEG 82 at pick
+  time (`ImagePicker.pickMedia(maxWidth, maxHeight, imageQuality)` — native, no new package), so
+  a 4 MB camera photo sends as a few hundred KB. Attachments are **store-admin only** (product
+  decision, and `/media/upload-url` refuses everyone else); customers get text.
+- Still not verified on a device; the on-device checklist in `docs/09_DEPLOYMENT.md` covers it.
+
 ## Post-migration feature changes (after Phase 9b)
 
 Product tweaks requested once the migrated stack was running — logged here so the

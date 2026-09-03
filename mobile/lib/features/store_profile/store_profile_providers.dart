@@ -14,19 +14,33 @@ final storeDocProvider = StreamProvider.family<Map<String, dynamic>?, String>((
   ref,
   storeId,
 ) async* {
-  // First emission: the current value fetched over REST (so the screen paints
-  // without waiting on the WS snapshot frame), then live updates from the WS
-  // channel's snapshot/upsert events.
+  // Emissions in order of freshness: the cached copy from the last visit (so
+  // the chat header/list shows the store's name instantly and offline), the
+  // current value over REST (paints without waiting on the WS snapshot
+  // frame), then live updates from the WS channel's snapshot/upsert events.
+  // Every fresh value is written back for next time.
   final api = ref.watch(apiClientProvider);
+  final cache = ref.read(readCacheProvider);
+  final cacheKey = 'store:$storeId:doc';
+  Map<String, dynamic>? current;
+  final cached = await cache.readList(cacheKey);
+  if (cached != null && cached.isNotEmpty) {
+    current = cached.first;
+    yield current;
+  }
   try {
     final json = await api.get('/stores/$storeId');
-    yield json['store'] as Map<String, dynamic>?;
+    current = json['store'] as Map<String, dynamic>?;
+    yield current;
+    if (current != null) await cache.writeList(cacheKey, [current]);
   } catch (_) {
-    yield null;
+    if (current == null) yield null;
   }
   await for (final event in ref.watch(realtimeClientProvider).subscribe('store:$storeId')) {
     if (event.type == RealtimeEventType.snapshot || event.type == RealtimeEventType.upsert) {
-      yield event.data as Map<String, dynamic>?;
+      current = event.data as Map<String, dynamic>?;
+      yield current;
+      if (current != null) await cache.writeList(cacheKey, [current]);
     }
   }
 }, isAutoDispose: true);

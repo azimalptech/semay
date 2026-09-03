@@ -480,6 +480,13 @@ not just real testing:
       toggle airplane mode on/off with the thread open; leave the app open 20+
       minutes (past the access-token TTL) and confirm messages still arrive;
       tap a push with the app killed and confirm it opens that thread.
+- [ ] Chat cache / scroll-back / media (docs/07 Phase 9d): open a thread,
+      kill the app, turn on airplane mode, reopen — the list and the thread's
+      recent messages must be there with "Connecting…" under the title; in a
+      thread with 200+ messages scroll to the top and confirm older pages load
+      without the view jumping; as a store admin send a gallery photo — it
+      must appear at once with a progress ring, then double-tick; a photo sent
+      in airplane mode must go out by itself when signal returns.
 - [ ] On-device matrix tested, including the offline-outbox replay loop
       (airplane mode → send → restore signal → exactly one message lands).
 - [ ] `JWT_SECRET` rotated away from the development value, **and** the

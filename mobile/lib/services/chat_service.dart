@@ -1,38 +1,62 @@
+import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../core/api_client.dart';
 import '../core/outbox.dart';
 import 'notification_service.dart';
-import 'posts_service.dart';
 
 class ChatService {
-  ChatService(this._api, this._posts, this._outbox);
+  ChatService(this._api, this._outbox);
 
   final ApiClient _api;
-  final PostsService _posts;
   final OutboxService _outbox;
 
   static const _maxVideoBytes = 100 * 1024 * 1024;
 
-  /// Uploads a gallery-picked photo/video attachment and returns its public
-  /// URL, ready to pass into sendMessage's mediaUrl.
-  Future<String> uploadChatMedia({
-    required String chatId,
+  /// Sends a gallery photo/video the way text is sent: through the outbox.
+  /// The bubble appears immediately (rendering the local file, with a
+  /// progress ring), the outbox uploads then posts — with the same retry,
+  /// idempotency and "not sent, tap to retry" as text — and the upload URL is
+  /// remembered on the queued row so a retry never re-uploads. Previously the
+  /// screen blocked on the upload with a spinner and a flaky connection lost
+  /// the attachment altogether.
+  ///
+  /// The file is copied into app storage first: the picker hands back a temp
+  /// file the OS may reclaim before a slow send completes. Images arrive
+  /// already downscaled/recompressed by the picker (see the thread screen's
+  /// pickMedia call); videos are sent as picked, capped at [_maxVideoBytes].
+  Future<String> sendMediaMessage(
+    String chatId, {
     required XFile file,
     required String mediaType, // "image" | "video"
+    required String senderRole,
   }) async {
-    final bytes = await file.readAsBytes();
-    if (mediaType == 'video' && bytes.length > _maxVideoBytes) {
+    // Store admins only (product decision; the server's /media/upload-url
+    // refuses everyone else, so a customer's attachment could never send).
+    if (senderRole != 'admin') {
+      throw StateError('Only store admins can send attachments');
+    }
+    if (mediaType == 'video' && await file.length() > _maxVideoBytes) {
       throw Exception('Video must be under 100MB');
     }
-    final isVideo = mediaType == 'video';
-    return _posts.uploadMedia(
-      folder: 'chats',
-      bytes: bytes,
-      fileExt: isVideo ? 'mp4' : 'jpg',
-      contentType: isVideo ? 'video/mp4' : 'image/jpeg',
-    );
+    final key = _outbox.newKey();
+    final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'chat_outbox'));
+    await dir.create(recursive: true);
+    final ext = mediaType == 'video' ? 'mp4' : 'jpg';
+    final copy = p.join(dir.path, '$key.$ext');
+    await file.saveTo(copy);
+    await _outbox.enqueue(OutboxKind.message, {
+      'chatId': chatId,
+      'text': '',
+      'senderRole': senderRole, // carried for the optimistic bubble only
+      'mediaType': mediaType,
+      'localMediaPath': copy,
+    }, id: key);
+    return key;
   }
 
   /// Deterministic id — one thread per user<->store pair. Kept for callers
@@ -174,7 +198,6 @@ class ChatService {
 final chatServiceProvider = Provider<ChatService>((ref) {
   return ChatService(
     ref.watch(apiClientProvider),
-    ref.watch(postsServiceProvider),
     ref.watch(outboxServiceProvider),
   );
 });

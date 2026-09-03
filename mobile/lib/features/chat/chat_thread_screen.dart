@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -46,61 +47,42 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
   DateTime _lastTypingWrite = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _staleness;
   bool _isAttaching = false;
-  // Messages load oldest-first (see chatMessagesProvider), so a plain
-  // ListView opens scrolled to the top — jump straight to the newest
-  // message on first load, then smoothly follow along as new ones arrive.
-  int _lastMessageCount = -1;
+  // Id of the newest message last seen, to notice a NEW newest one. The list
+  // is reversed (offset 0 = newest), so a thread opens at the bottom by
+  // itself and an incoming message shows without scrolling when the user is
+  // already there; the view is only pulled down for OUR OWN new message.
+  String? _lastNewestId;
   // Set by swiping a bubble (see _SwipeToReply's onReply); shown as a
   // preview strip above the composer, cleared on send/cancel.
   Map<String, String?>? _replyingTo;
 
-  void _scrollToBottom({required bool animate}) {
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _settleScrollToBottom(animate: animate, attemptsLeft: 6),
-    );
-  }
-
-  // ListView.builder only lays out/measures items actually near the current
-  // viewport on a given frame — right after opening a thread, the viewport
-  // is still sitting at its default (top/oldest) position, so
-  // maxScrollExtent is an *estimate* extrapolated from whichever few oldest
-  // items happened to get built, not the true end. If bubble heights vary
-  // (an image, a reply quote, a longer message near the end), jumping to
-  // that estimate lands short of the real bottom — which is what "opens
-  // somewhere in the middle, have to scroll down" was: a one-shot jump to a
-  // guess. Landing the jump actually builds/measures the now-visible items,
-  // which can move the true end further — so re-check next frame and jump
-  // again if it moved, until two consecutive frames agree (or attempts run
-  // out). Only the first hop honors [animate]; every retry is an instant
-  // jump so they don't stack visible animations.
-  void _settleScrollToBottom({
-    required bool animate,
-    required int attemptsLeft,
-  }) {
-    if (!mounted || !_scrollController.hasClients) return;
-    final max = _scrollController.position.maxScrollExtent;
-    if (animate) {
+  void _scrollToNewest() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
       _scrollController.animateTo(
-        max,
+        0,
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeOut,
       );
-    } else {
-      _scrollController.jumpTo(max);
-    }
-    if (attemptsLeft <= 0) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.hasClients) return;
-      if ((_scrollController.position.maxScrollExtent - max).abs() > 1) {
-        _settleScrollToBottom(animate: false, attemptsLeft: attemptsLeft - 1);
-      }
     });
+  }
+
+  // Scroll-back: in a reversed list the oldest message sits at
+  // maxScrollExtent, so nearing it means "load older" (the notifier pages 50
+  // at a time and no-ops while a page is in flight or nothing older exists).
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    if (pos.maxScrollExtent - pos.pixels < 400) {
+      ref.read(chatMessagesProvider(widget.chatId).notifier).loadOlder();
+    }
   }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _scrollController.addListener(_onScroll);
     // Suppresses the in-app banner for messages from THIS chat while it is on
     // screen (the push itself still arrives; the server no longer skips it —
     // see chat_service.dart's setActiveChat and that function's comment).
@@ -149,6 +131,7 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     ref.read(chatServiceProvider).setActiveChat(null);
     _staleness?.cancel();
     _controller.dispose();
+    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
   }
@@ -218,7 +201,16 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
 
   Future<void> _attachMedia() async {
     if (_isAttaching) return;
-    final file = await ImagePicker().pickMedia();
+    // Downscaled and recompressed by the platform at pick time (images only —
+    // videos come back as picked): a 4 MB camera photo becomes a few hundred
+    // KB, which is the difference between a chat photo that lands in a
+    // second on mobile data and one that spins. 1600 px is plenty for a
+    // bubble and for the full-screen viewer on a phone.
+    final file = await ImagePicker().pickMedia(
+      maxWidth: 1600,
+      maxHeight: 1600,
+      imageQuality: 82,
+    );
     if (file == null || !mounted) return;
 
     final mime = file.mimeType ?? '';
@@ -232,18 +224,13 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
 
     setState(() => _isAttaching = true);
     try {
-      final service = ref.read(chatServiceProvider);
-      final url = await service.uploadChatMedia(
-        chatId: widget.chatId,
+      // Queued, not awaited: the bubble shows the local file immediately and
+      // the outbox uploads + sends with retry (ChatService.sendMediaMessage).
+      await ref.read(chatServiceProvider).sendMediaMessage(
+        widget.chatId,
         file: file,
         mediaType: mediaType,
-      );
-      await service.sendMessage(
-        widget.chatId,
-        '',
         senderRole: _isAdminHere ? 'admin' : 'user',
-        mediaUrl: url,
-        mediaType: mediaType,
       );
     } catch (e) {
       if (mounted) {
@@ -440,20 +427,14 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
           Expanded(
             child: messagesAsync.when(
               data: (messages) {
-                if (messages.length != _lastMessageCount) {
-                  final isFirstLoad = _lastMessageCount == -1;
-                  if (!isFirstLoad && messages.isNotEmpty) {
-                    final newest = messages.last.data();
-                    final createdAt = parseTimestamp(newest['createdAt']);
-                    debugPrint(
-                      'chat_thread_screen: message stream emitted, count '
-                      '$_lastMessageCount->${messages.length}, newest '
-                      'createdAt=$createdAt now=${DateTime.now()} '
-                      'lagMs=${createdAt != null ? DateTime.now().difference(createdAt).inMilliseconds : "n/a"}',
-                    );
-                  }
-                  _lastMessageCount = messages.length;
-                  _scrollToBottom(animate: !isFirstLoad);
+                final newestId = messages.isEmpty ? null : messages.last.id;
+                if (newestId != _lastNewestId) {
+                  final firstPaint = _lastNewestId == null;
+                  final newestIsMine =
+                      messages.isNotEmpty &&
+                      messages.last.data()['senderId'] == myUid;
+                  _lastNewestId = newestId;
+                  if (!firstPaint && newestIsMine) _scrollToNewest();
                 }
                 _syncReadStatus(messages, isAdminHere, myUnread);
                 if (messages.isEmpty && !counterpartTyping) {
@@ -462,22 +443,37 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                     subtitle: s.typeMessageToStart,
                   );
                 }
+                final thread = ref.watch(chatMessagesProvider(widget.chatId));
+                final olderLoader = thread.loadingOlder;
                 return ListView.builder(
                   controller: _scrollController,
+                  // Newest at offset 0 — the standard chat layout: opens at
+                  // the bottom with no scroll-to-end guesswork, new messages
+                  // appear in place, and older pages append at the top
+                  // without moving what the user is looking at.
+                  reverse: true,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
                     vertical: 16,
                   ),
-                  itemCount: messages.length + (counterpartTyping ? 1 : 0),
+                  itemCount:
+                      messages.length +
+                      (counterpartTyping ? 1 : 0) +
+                      (olderLoader ? 1 : 0),
                   itemBuilder: (context, index) {
-                    if (index == messages.length) {
-                      return const _TypingBubble();
+                    var i = index;
+                    if (counterpartTyping) {
+                      if (i == 0) return const _TypingBubble();
+                      i -= 1;
                     }
+                    if (i == messages.length) return const _OlderLoader();
+                    // Reversed: item i counts back from the newest.
+                    final k = messages.length - 1 - i;
 
-                    final data = messages[index].data();
+                    final data = messages[k].data();
                     final createdAt = parseTimestamp(data['createdAt']);
-                    final previousCreatedAt = index > 0
-                        ? parseTimestamp(messages[index - 1].data()['createdAt'])
+                    final previousCreatedAt = k > 0
+                        ? parseTimestamp(messages[k - 1].data()['createdAt'])
                         : null;
                     final showDateDivider = _isNewDay(
                       createdAt,
@@ -494,13 +490,14 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                         if (showDateDivider) _DateDivider(timestamp: createdAt),
                         _SwipeToReply(
                           isMine: isMine,
-                          onReply: () => _startReply(messages[index]),
+                          onReply: () => _startReply(messages[k]),
                           child: _MessageBubble(
                             text: data['text'] as String? ?? '',
                             sharedPostId: data['sharedPostId'] as String?,
                             sharedStoryId: data['sharedStoryId'] as String?,
                             sharedMediaUrl: data['mediaUrl'] as String?,
                             attachmentType: data['mediaType'] as String?,
+                            localMediaPath: data['localMediaPath'] as String?,
                             repliedToStoryLabel: s.repliedToStory,
                             replyToText: data['replyToText'] as String?,
                             // Whoever's viewing this thread wrote the quoted
@@ -527,7 +524,7 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                                 : null,
                             // Instagram shows "Seen HH:MM" once, under the
                             // newest message, not repeated on every bubble.
-                            showSeenCaption: index == messages.length - 1,
+                            showSeenCaption: k == messages.length - 1,
                             seenLabel: s.seenAt,
                           ),
                         ),
@@ -594,6 +591,10 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                       onSend: _send,
                       onAttach: _attachMedia,
                       isAttaching: _isAttaching,
+                      // Gallery attachments are a store-admin capability
+                      // (product decision; the server only issues upload
+                      // slots to admins) — customers get text only.
+                      canAttach: isAdminHere,
                     ),
                   ),
                 ],
@@ -763,6 +764,25 @@ class _ReplyPreviewBar extends ConsumerWidget {
             onPressed: onCancel,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Spinner at the top of the thread while an older page is loading.
+class _OlderLoader extends StatelessWidget {
+  const _OlderLoader();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 12),
+      child: Center(
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
       ),
     );
   }
@@ -1013,6 +1033,7 @@ class _MessageBubble extends StatelessWidget {
     this.isFailed = false,
     this.notSentLabel = '',
     this.onRetry,
+    this.localMediaPath,
   });
 
   final String text;
@@ -1054,12 +1075,19 @@ class _MessageBubble extends StatelessWidget {
   final String notSentLabel;
   final VoidCallback? onRetry;
 
+  /// A queued photo/video not yet uploaded — rendered from the picked file so
+  /// the bubble is on screen before the upload starts (see
+  /// ChatService.sendMediaMessage).
+  final String? localMediaPath;
+
   @override
   Widget build(BuildContext context) {
     final isSharedPost = sharedPostId != null;
     final isStoryReply = sharedStoryId != null;
+    final hasUploadedMedia = sharedMediaUrl?.isNotEmpty ?? false;
     final isAttachment =
-        attachmentType != null && (sharedMediaUrl?.isNotEmpty ?? false);
+        attachmentType != null &&
+        (hasUploadedMedia || (localMediaPath?.isNotEmpty ?? false));
 
     final bubble = Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
@@ -1090,7 +1118,7 @@ class _MessageBubble extends StatelessWidget {
                 ? onRetry
                 : isSharedPost
                 ? () => context.push('/post/$sharedPostId')
-                : isAttachment
+                : isAttachment && hasUploadedMedia
                 ? () =>
                       _openAttachment(context, sharedMediaUrl!, attachmentType!)
                 : null,
@@ -1184,8 +1212,10 @@ class _MessageBubble extends StatelessWidget {
                         )
                       : isAttachment
                       ? _AttachmentThumbnail(
-                          mediaUrl: sharedMediaUrl!,
+                          mediaUrl: sharedMediaUrl ?? '',
+                          localPath: localMediaPath,
                           mediaType: attachmentType!,
+                          uploading: isPending,
                         )
                       : Text(
                           text,
@@ -1385,13 +1415,24 @@ void _openAttachment(BuildContext context, String mediaUrl, String mediaType) {
 /// _SharedPostPreview) — square thumbnail matching that same layout, tap
 /// opens the full-size viewer below.
 class _AttachmentThumbnail extends StatelessWidget {
-  const _AttachmentThumbnail({required this.mediaUrl, required this.mediaType});
+  const _AttachmentThumbnail({
+    required this.mediaUrl,
+    required this.mediaType,
+    this.localPath,
+    this.uploading = false,
+  });
 
   final String mediaUrl;
   final String mediaType;
 
+  /// A queued attachment not yet uploaded — rendered straight from the file
+  /// the user picked, with a progress ring, until the URL exists.
+  final String? localPath;
+  final bool uploading;
+
   @override
   Widget build(BuildContext context) {
+    final useLocal = mediaUrl.isEmpty && (localPath?.isNotEmpty ?? false);
     return ClipRRect(
       borderRadius: BorderRadius.circular(10),
       child: AspectRatio(
@@ -1401,18 +1442,38 @@ class _AttachmentThumbnail extends StatelessWidget {
           children: [
             if (mediaType == 'video')
               const _VideoPlaceholder()
+            else if (useLocal)
+              Image.file(
+                File(localPath!),
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stack) =>
+                    const _VideoPlaceholder(),
+              )
             else
               CachedNetworkImage(
                 imageUrl: mediaUrl,
                 fit: BoxFit.cover,
                 errorWidget: (context, url, error) => const _VideoPlaceholder(),
               ),
-            if (mediaType == 'video')
+            if (mediaType == 'video' && !uploading)
               const Center(
                 child: Icon(
                   Icons.play_circle_fill,
                   color: Colors.white,
                   size: 40,
+                ),
+              ),
+            if (uploading)
+              Container(
+                color: Colors.black.withValues(alpha: 0.25),
+                alignment: Alignment.center,
+                child: const SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: Colors.white,
+                  ),
                 ),
               ),
           ],
@@ -1540,6 +1601,7 @@ class _Composer extends StatelessWidget {
     required this.onSend,
     required this.onAttach,
     required this.isAttaching,
+    required this.canAttach,
   });
 
   final TextEditingController controller;
@@ -1548,6 +1610,9 @@ class _Composer extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback onAttach;
   final bool isAttaching;
+
+  /// Whether the gallery button is shown at all — store admins only.
+  final bool canAttach;
 
   @override
   Widget build(BuildContext context) {
@@ -1565,27 +1630,29 @@ class _Composer extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 8),
               child: Row(
                 children: [
-                  GestureDetector(
-                    onTap: isAttaching ? null : onAttach,
-                    child: isAttaching
-                        ? SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: Padding(
-                              padding: const EdgeInsets.all(2),
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: AppColors.textMuted,
+                  if (canAttach) ...[
+                    GestureDetector(
+                      onTap: isAttaching ? null : onAttach,
+                      child: isAttaching
+                          ? SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: Padding(
+                                padding: const EdgeInsets.all(2),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: AppColors.textMuted,
+                                ),
                               ),
+                            )
+                          : AppIcon(
+                              'image',
+                              size: 24,
+                              color: AppColors.textMuted,
                             ),
-                          )
-                        : AppIcon(
-                            'image',
-                            size: 24,
-                            color: AppColors.textMuted,
-                          ),
-                  ),
-                  const SizedBox(width: 8),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   Expanded(
                     child: TextField(
                       controller: controller,

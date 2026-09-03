@@ -15,6 +15,7 @@ import 'core/theme.dart';
 import 'core/theme_provider.dart';
 import 'services/auth_service.dart';
 import 'services/notification_service.dart';
+import 'services/posts_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -53,7 +54,23 @@ Future<void> main() async {
   // The offline outbox + interaction buffer each need one container living for
   // the app's lifetime so their SQLite queues start now (outbox reconnect drain,
   // buffer 30-min flush) and the SAME instances are shared with the widget tree.
-  final container = ProviderContainer();
+  final container = ProviderContainer(
+    overrides: [
+      // The outbox uploads queued chat media through the same signed-URL path
+      // posts use. Wired here, lazily, because PostsService itself depends on
+      // the outbox (like/save toggles) — see MediaUploader in outbox.dart.
+      outboxUploaderProvider.overrideWith(
+        (ref) =>
+            ({required folder, required bytes, required fileExt, required contentType}) =>
+                ref.read(postsServiceProvider).uploadMedia(
+                  folder: folder,
+                  bytes: bytes,
+                  fileExt: fileExt,
+                  contentType: contentType,
+                ),
+      ),
+    ],
+  );
   unawaited(container.read(outboxServiceProvider).start());
   unawaited(container.read(interactionBufferProvider).start());
   // Tap on a push → open that chat (both the cold-start and background cases).

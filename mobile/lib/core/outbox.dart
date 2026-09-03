@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
@@ -26,6 +28,16 @@ enum OutboxKind { message, like, unlike, save, unsave }
 /// send has clearly not gone through in ~15 s, the way Instagram flags it,
 /// rather than showing a clock forever.
 const outboxFailedAfterAttempts = 3;
+
+/// Uploads one media file and returns its public URL — PostsService.uploadMedia
+/// behind a function, because PostsService itself depends on the outbox (for
+/// like/save) and the outbox must not depend back on it at construction.
+typedef MediaUploader = Future<String> Function({
+  required String folder,
+  required Uint8List bytes,
+  required String fileExt,
+  required String contentType,
+});
 
 class OutboxItem {
   OutboxItem({
@@ -78,9 +90,21 @@ class SentMessage {
   final Map<String, dynamic> message;
 }
 
+/// An item that can never succeed (its media file is gone) — dropped rather
+/// than retried forever, like a 4xx.
+class _PermanentSendError implements Exception {
+  const _PermanentSendError(this.reason);
+  final String reason;
+}
+
 class OutboxService {
-  OutboxService(this._api, this._connectivity, {required bool Function() hasSession})
-    : _hasSession = hasSession;
+  OutboxService(
+    this._api,
+    this._connectivity, {
+    required bool Function() hasSession,
+    required MediaUploader uploader,
+  }) : _hasSession = hasSession,
+       _uploader = uploader;
 
   final ApiClient _api;
   final Connectivity _connectivity;
@@ -89,6 +113,7 @@ class OutboxService {
   // and rows queued by the previous user would have gone out under whoever
   // logged in next (see clear()).
   final bool Function() _hasSession;
+  final MediaUploader _uploader;
   final _uuid = const Uuid();
   final _random = Random();
 
@@ -191,17 +216,39 @@ class OutboxService {
   }
 
   /// Logout: whatever is queued belongs to the session that just ended and
-  /// must never go out under the next one.
+  /// must never go out under the next one. Queued media files go with it.
   Future<void> clear() async {
     _retryTimer?.cancel();
     final db = await _open();
+    final rows = await db.query('outbox', columns: ['payload']);
+    for (final r in rows) {
+      final pl = jsonDecode(r['payload'] as String) as Map<String, dynamic>;
+      await _deleteLocalMedia(pl);
+    }
     await db.delete('outbox');
     _bump();
   }
 
-  Future<void> _remove(String id) async {
+  Future<void> _remove(String id, {Map<String, dynamic>? payload}) async {
     final db = await _open();
     await db.delete('outbox', where: 'id = ?', whereArgs: [id]);
+    if (payload != null) await _deleteLocalMedia(payload);
+  }
+
+  Future<void> _updatePayload(String id, Map<String, dynamic> payload) async {
+    final db = await _open();
+    await db.update('outbox', {'payload': jsonEncode(payload)}, where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<void> _deleteLocalMedia(Map<String, dynamic> payload) async {
+    final path = payload['localMediaPath'] as String?;
+    if (path == null) return;
+    try {
+      final f = File(path);
+      if (await f.exists()) await f.delete();
+    } catch (_) {
+      /* best-effort */
+    }
   }
 
   /// Atomic `attempts + 1` on the row itself, and returns the new value —
@@ -250,14 +297,19 @@ class OutboxService {
         final item = OutboxItem.fromRow(rows.first);
         try {
           await _send(item);
-          await _remove(item.id);
+          await _remove(item.id, payload: item.payload);
           _bump();
+        } on _PermanentSendError catch (e) {
+          debugPrint('outbox: dropping ${item.id}: ${e.reason}');
+          await _remove(item.id, payload: item.payload);
+          _bump();
+          continue;
         } on ApiException catch (e) {
           final status = e.statusCode ?? 0;
           // 4xx (except 401, which the ApiClient interceptor already tried to
           // refresh) is permanent — drop it rather than retry forever.
           if (status >= 400 && status < 500 && status != 401) {
-            await _remove(item.id);
+            await _remove(item.id, payload: item.payload);
             _bump();
             continue;
           }
@@ -288,8 +340,32 @@ class OutboxService {
     final pl = item.payload;
     switch (item.kind) {
       case OutboxKind.message:
+        // A media message carries the LOCAL file until it is uploaded; the
+        // upload is a step of the send, with the same retry as the send
+        // itself. The URL is written back to the row the moment it exists,
+        // so a retry after a crash (or after the POST failed) never uploads
+        // the same bytes twice.
+        final localPath = pl['localMediaPath'] as String?;
+        if (localPath != null && pl['mediaUrl'] == null) {
+          final file = File(localPath);
+          if (!await file.exists()) {
+            throw const _PermanentSendError('media file is gone');
+          }
+          final isVideo = pl['mediaType'] == 'video';
+          final url = await _uploader(
+            folder: 'chats',
+            bytes: await file.readAsBytes(),
+            fileExt: isVideo ? 'mp4' : 'jpg',
+            contentType: isVideo ? 'video/mp4' : 'image/jpeg',
+          );
+          pl['mediaUrl'] = url;
+          await _updatePayload(item.id, pl);
+          _bump(); // the pending bubble switches from local file to URL
+        }
         final json = await _api.post('/chats/${pl['chatId']}/messages', body: {
-          ...Map<String, dynamic>.from(pl)..remove('chatId'),
+          ...Map<String, dynamic>.from(pl)
+            ..remove('chatId')
+            ..remove('localMediaPath'),
           'clientKey': item.id,
         });
         final message = json['message'];
@@ -308,11 +384,25 @@ class OutboxService {
   }
 }
 
+/// Wired in main.dart: `uploader` is PostsService.uploadMedia read lazily
+/// (PostsService depends on this service, so it cannot be a build-time
+/// dependency here — see MediaUploader).
+final outboxUploaderProvider = Provider<MediaUploader>((ref) {
+  throw UnimplementedError('outboxUploaderProvider must be overridden in main.dart');
+});
+
 final outboxServiceProvider = Provider<OutboxService>((ref) {
   final service = OutboxService(
     ref.watch(apiClientProvider),
     Connectivity(),
     hasSession: () => ref.read(sessionControllerProvider).value != null,
+    uploader: ({required folder, required bytes, required fileExt, required contentType}) =>
+        ref.read(outboxUploaderProvider)(
+          folder: folder,
+          bytes: bytes,
+          fileExt: fileExt,
+          contentType: contentType,
+        ),
   );
   // Logout empties the queue; a (re)login drains whatever was queued while
   // the session was still resolving at startup.
