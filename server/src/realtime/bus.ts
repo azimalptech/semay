@@ -7,7 +7,24 @@ import { config } from "../config.js";
 export type RealtimeEvent =
   | { type: "snapshot"; data: unknown }
   | { type: "upsert"; data: unknown }
-  | { type: "remove"; id: string };
+  | { type: "remove"; id: string }
+  // Receipt roll-up on a `chat:{id}:messages` channel: every message sent by
+  // `senderRole` with id <= `upToMessageId` that lacked the stamp now carries
+  // `at`. Replaces re-sending the whole 200-message snapshot on each
+  // delivered/read receipt — see chats/service.ts markReceipts for the cost that
+  // motivated it. `upToMessageId` is the newest row the server actually stamped
+  // (null when it stamped none): a message that reached the socket a moment
+  // before the receipt was not in that set, and the client must not show it as
+  // seen.
+  | {
+      type: "receipts";
+      data: {
+        senderRole: "user" | "admin";
+        status: "delivered" | "read";
+        at: string;
+        upToMessageId: string | null;
+      };
+    };
 
 // Pub-sub seam for the WebSocket gateway. Two backends behind one interface:
 //

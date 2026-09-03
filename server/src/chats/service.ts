@@ -5,9 +5,18 @@ import { parseBigIntId } from "../lib/ids.js";
 import type { AccessTokenPayload } from "../lib/jwt.js";
 import { publish } from "../realtime/bus.js";
 import { withRetry } from "../lib/withRetry.js";
-import { sendPushToUsers } from "../notifications/push.js";
+import {
+  isPushEnabled,
+  sendBadgeUpdate,
+  sendPushToUsers,
+  type PushOptions,
+} from "../notifications/push.js";
 
 export type ChatSide = "user" | "admin";
+
+/** Android notification channel for chat pushes — created at IMPORTANCE_HIGH
+ * by the app's MainActivity.kt, so the id here and there must match. */
+const CHAT_PUSH_CHANNEL = "chat_messages";
 
 export class ChatNotFoundError extends Error {
   constructor() {
@@ -223,26 +232,19 @@ export async function sendMessage(
       },
     });
 
-    // Recipient's unread counter — the user side is skipped if THEY currently
-    // have this chat open (activeChatId), matching the old trigger's single-
-    // recipient suppression. The admin side has no single "the admin", so it
-    // always increments (any one admin having it open doesn't speak for the
-    // whole store's admin team). The same activeChatId check also gates the
-    // push below — a user looking at the chat shouldn't also get a banner.
-    let unreadDelta: { unreadByUser?: { increment: number }; unreadByAdmin?: { increment: number } } = {};
-    let userIsViewingChat = false;
-    if (side === "user") {
-      unreadDelta = { unreadByAdmin: { increment: 1 } };
-    } else {
-      const recipient = await tx.user.findUnique({
-        where: { id: chat.userId },
-        select: { activeChatId: true },
-      });
-      userIsViewingChat = recipient?.activeChatId === chat.id;
-      if (!userIsViewingChat) {
-        unreadDelta = { unreadByUser: { increment: 1 } };
-      }
-    }
+    // Recipient's unread counter. Always incremented — even when the recipient
+    // has this exact thread open, because the thread screen answers every
+    // incoming message with a read receipt within one round-trip, which zeroes
+    // it again (markReceipts). The old design skipped the increment (and the
+    // push) when users.activeChatId matched this chat, but that flag is written
+    // by the app on enter/leave, and a killed app, a crash, or a PATCH lost to
+    // bad signal left it stuck — after which that chat never badged or
+    // notified its user again until they happened to reopen and leave it.
+    // Whether someone is looking at a thread is only knowable on their device,
+    // so that is where the suppression lives now (notification_service.dart's
+    // foreground banner check). The admin side never had it.
+    const unreadDelta =
+      side === "user" ? { unreadByAdmin: { increment: 1 } } : { unreadByUser: { increment: 1 } };
 
     const updatedChat = await tx.chat.update({
       where: { id: chat.id },
@@ -253,7 +255,7 @@ export async function sendMessage(
       },
     });
 
-      return { message, updatedChat, userIsViewingChat };
+      return { message, updatedChat };
     }));
   } catch (err) {
     // Concurrent send with the same clientKey lost the UNIQUE race — the
@@ -274,26 +276,76 @@ export async function sendMessage(
     }
     throw err;
   }
-  const { message, updatedChat, userIsViewingChat } = txResult;
+  const { message, updatedChat } = txResult;
 
   publish(`chat:${chat.id}:messages`, { type: "upsert", data: message });
   publishChatEverywhere(updatedChat);
 
-  sendChatPush(chat, side, updatedChat, preview, userIsViewingChat).catch(() => {
+  sendChatPush(chat, side, updatedChat, message, preview).catch(() => {
     /* push is best-effort — never fail the message send over it */
   });
 
   return message;
 }
 
+/** Launcher badge for a customer: unread across every conversation they have,
+ * muted ones excluded — a muted chat sends no push, so if it counted the icon
+ * number would lag and then jump UP on an unrelated read. Muted = quiet, on
+ * the icon too, the way WhatsApp treats it. */
+async function unreadBadgeForUser(userId: string): Promise<number> {
+  const agg = await prisma.chat.aggregate({
+    _sum: { unreadByUser: true },
+    where: { userId, mutedByUser: false },
+  });
+  return agg._sum.unreadByUser ?? 0;
+}
+
+/** Launcher badge per admin: unread across every store each of them manages
+ * (an admin of two stores sees both backlogs), muted chats excluded as above.
+ * Two queries however many admins. */
+async function unreadBadgeForAdmins(adminIds: string[]): Promise<Map<string, number>> {
+  const result = new Map<string, number>(adminIds.map((id) => [id, 0]));
+  if (adminIds.length === 0) return result;
+  const memberships = await prisma.storeAdmin.findMany({
+    where: { userId: { in: adminIds } },
+    select: { userId: true, storeId: true },
+  });
+  const storeIds = [...new Set(memberships.map((m) => m.storeId))];
+  if (storeIds.length === 0) return result;
+  const perStore = await prisma.chat.groupBy({
+    by: ["storeId"],
+    _sum: { unreadByAdmin: true },
+    where: { storeId: { in: storeIds }, mutedByAdmin: false },
+  });
+  const unreadByStore = new Map(perStore.map((r) => [r.storeId, r._sum.unreadByAdmin ?? 0]));
+  for (const m of memberships) {
+    result.set(m.userId, (result.get(m.userId) ?? 0) + (unreadByStore.get(m.storeId) ?? 0));
+  }
+  return result;
+}
+
 async function sendChatPush(
   chat: Chat,
   side: ChatSide,
   updatedChat: Chat,
-  preview: string,
-  userIsViewingChat: boolean
+  message: Message,
+  preview: string
 ): Promise<void> {
-  const data = { chatId: chat.id };
+  // `data` is what the app acts on — chatId routes a notification tap into the
+  // thread and drives the delivered receipt (notification_service.dart); the
+  // rest is display. Muting is honoured here and only here: the unread counter
+  // and the realtime fan-out above are unaffected by mute, exactly like a
+  // muted WhatsApp chat still counts and still updates, it just stays quiet.
+  if (!isPushEnabled()) return; // no point aggregating badges nobody will receive
+  const data = {
+    type: "chat_message",
+    chatId: chat.id,
+    messageId: message.id.toString(),
+    senderRole: side,
+  };
+  const opts: PushOptions = { channelId: CHAT_PUSH_CHANNEL, tag: chat.id, wakeApp: true };
+  const store = await prisma.store.findUnique({ where: { id: chat.storeId }, select: { name: true } });
+
   if (side === "user") {
     if (updatedChat.mutedByAdmin) return;
     const admins = await prisma.storeAdmin.findMany({
@@ -301,13 +353,35 @@ async function sendChatPush(
       select: { userId: true },
     });
     if (admins.length === 0) return;
-    const store = await prisma.store.findUnique({ where: { id: chat.storeId }, select: { name: true } });
-    await sendPushToUsers(admins.map((a) => a.userId), store?.name ?? "New message", preview, data);
+    const adminIds = admins.map((a) => a.userId);
+    // Titled by who wrote it, the way a messenger does — a store admin reading
+    // "<their own store>: hello" could not tell which customer it was from.
+    const customer = await prisma.user.findUnique({ where: { id: chat.userId }, select: { name: true } });
+    const title = customer?.name || store?.name || "New message";
+    opts.badgeByUser = await unreadBadgeForAdmins(adminIds);
+    await sendPushToUsers(adminIds, title, preview, data, opts);
   } else {
-    if (updatedChat.mutedByUser || userIsViewingChat) return;
-    const store = await prisma.store.findUnique({ where: { id: chat.storeId }, select: { name: true } });
-    await sendPushToUsers([chat.userId], store?.name ?? "New message", preview, data);
+    if (updatedChat.mutedByUser) return;
+    opts.badgeByUser = new Map([[chat.userId, await unreadBadgeForUser(chat.userId)]]);
+    await sendPushToUsers([chat.userId], store?.name ?? "New message", preview, data, opts);
   }
+}
+
+/** After a read receipt: push the corrected launcher badge to the reader's iOS
+ * devices (an app-icon number that only ever went up would be worse than none).
+ * The admin side corrects every admin of the store, since the counter it
+ * cleared is per-store, not per-admin. */
+async function syncLauncherBadges(chat: Chat, side: ChatSide): Promise<void> {
+  if (!isPushEnabled()) return;
+  if (side === "user") {
+    await sendBadgeUpdate(new Map([[chat.userId, await unreadBadgeForUser(chat.userId)]]));
+    return;
+  }
+  const admins = await prisma.storeAdmin.findMany({
+    where: { storeId: chat.storeId },
+    select: { userId: true },
+  });
+  await sendBadgeUpdate(await unreadBadgeForAdmins(admins.map((a) => a.userId)));
 }
 
 export async function listMessages(
@@ -342,7 +416,7 @@ export async function markReceipts(
   // `where` already excludes already-read/already-delivered rows, and the chat
   // unread is only touched when it's non-zero — so `changed === 0` means this
   // was a redundant receipt (the client re-syncing an already-read thread).
-  const changed = await withRetry(() =>
+  const { changed, upToMessageId } = await withRetry(() =>
     prisma.$transaction(async (tx) => {
       const msgs = await tx.message.updateMany({
         where: {
@@ -352,6 +426,24 @@ export async function markReceipts(
         },
         data: status === "read" ? { readAt: now, deliveredAt: now } : { deliveredAt: now },
       });
+      // The newest row THIS receipt stamped, for the realtime roll-up below.
+      // Read back inside the transaction (a transaction always sees its own
+      // writes, whatever the isolation level) by the exact timestamp it just
+      // wrote, so a message inserted concurrently — which the updateMany did
+      // not touch — is never reported as stamped.
+      const bound =
+        msgs.count === 0
+          ? null
+          : (
+              await tx.message.aggregate({
+                _max: { id: true },
+                where: {
+                  chatId: chat.id,
+                  senderRole: counterpartRole,
+                  ...(status === "read" ? { readAt: now } : { deliveredAt: now }),
+                },
+              })
+            )._max.id;
       // Only 'read' clears the unread badge; 'delivered' leaves it.
       let unreadCleared = 0;
       if (status === "read") {
@@ -364,7 +456,7 @@ export async function markReceipts(
         });
         unreadCleared = c.count;
       }
-      return msgs.count + unreadCleared;
+      return { changed: msgs.count + unreadCleared, upToMessageId: bound?.toString() ?? null };
     })
   );
 
@@ -375,8 +467,24 @@ export async function markReceipts(
   if (changed === 0) return;
 
   const updatedChat = await prisma.chat.findUniqueOrThrow({ where: { id: chat.id } });
-  publish(`chat:${chat.id}:messages`, { type: "snapshot", data: await listMessages(chat.id, { limit: 200 }) });
+  // A compact roll-up, not a re-snapshot. This used to re-send the whole
+  // 200-message window on every receipt; with delivered receipts now firing
+  // for each incoming message while the recipient's app is open (see
+  // chat_providers.dart), that was up to ~2×200 messages of JSON per message
+  // sent, to every subscriber of the thread. The client applies the stamp to
+  // every message of `senderRole` that lacks it — the same rows the updateMany
+  // above touched.
+  publish(`chat:${chat.id}:messages`, {
+    type: "receipts",
+    data: { senderRole: counterpartRole, status, at: now.toISOString(), upToMessageId },
+  });
   publishChatEverywhere(updatedChat);
+
+  if (status === "read") {
+    syncLauncherBadges(updatedChat, side).catch(() => {
+      /* best-effort, like push itself */
+    });
+  }
 }
 
 export async function setTyping(chat: Chat, side: ChatSide, typing: boolean): Promise<void> {

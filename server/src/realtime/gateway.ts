@@ -7,9 +7,20 @@ import { findChannelHandler, type ChannelAuthCtx } from "./channels.js";
 import { subscribe, type RealtimeEvent } from "./bus.js";
 
 interface ClientMessage {
-  type?: "subscribe" | "unsubscribe";
+  type?: "subscribe" | "unsubscribe" | "ping";
   channel?: string;
 }
+
+// Server-side liveness probe interval. A phone that loses its network (carrier
+// NAT reset, Doze, Wi-Fi→LTE handover, a tunnel dropping) does not close the
+// TCP connection — the socket simply stops answering. Without a probe the
+// server keeps the listener registered and serializes every event into a dead
+// pipe until the OS gives up on the TCP connection, which can take many
+// minutes. ws answers the CLIENT's protocol pings by itself; this is the
+// server's own probe in the other direction. A peer that misses a whole
+// interval is terminate()d, not close()d — a dead peer would never complete the
+// closing handshake, and close() would wait for it.
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 function send(socket: WebSocket, payload: unknown): void {
   if (socket.readyState === socket.OPEN) {
@@ -88,11 +99,39 @@ export async function realtimeGateway(app: FastifyInstance): Promise<void> {
       return ctxInFlight;
     }
 
-    socket.on("message", (raw: Buffer) => {
+    let alive = true;
+    socket.on("pong", () => {
+      alive = true;
+    });
+    const heartbeat = setInterval(() => {
+      if (socket.readyState !== socket.OPEN) return;
+      if (!alive) {
+        socket.terminate();
+        return;
+      }
+      alive = false;
+      socket.ping();
+    }, HEARTBEAT_INTERVAL_MS);
+
+    const handleFrame = (raw: Buffer): void => {
+      alive = true; // any traffic from the peer proves it is there
       let msg: ClientMessage;
       try {
         msg = JSON.parse(raw.toString());
       } catch {
+        return;
+      }
+      // JSON.parse happily returns null / a number / an array — the frame
+      // `null` parsed fine and the property access below then threw a
+      // TypeError synchronously inside ws's receiver, which nothing caught:
+      // any authenticated client could take the whole process down with four
+      // bytes. Only an object is a frame we know how to read.
+      if (msg === null || typeof msg !== "object" || Array.isArray(msg)) return;
+      // Application-level ping: the app sends this on resume-from-background to
+      // learn within a couple of seconds whether the socket it kept survived
+      // the suspension, instead of waiting for the next protocol ping cycle.
+      if (msg.type === "ping") {
+        send(socket, { type: "pong" });
         return;
       }
       if (!msg.channel || typeof msg.channel !== "string") return;
@@ -112,19 +151,29 @@ export async function realtimeGateway(app: FastifyInstance): Promise<void> {
         // back would otherwise pass the has() check twice and register two
         // listeners, of which only the last unsubscriber is retained — leaking a
         // listener (and a duplicate event stream) for the connection's lifetime.
-        unsubscribers.set(channel, () => {});
+        //
+        // The placeholder is a unique function, and every step below checks the
+        // map still holds THIS placeholder rather than merely "some entry": a
+        // subscribe → unsubscribe → subscribe burst for one channel while the
+        // first subscribe is still awaiting would otherwise see the second
+        // attempt's placeholder, install a second bus listener over it, and
+        // lose the first unsubscriber — double delivery for the socket's
+        // lifetime and an orphaned listener after it.
+        const placeholder = (): void => {};
+        unsubscribers.set(channel, placeholder);
+        const stillMine = (): boolean => unsubscribers.get(channel) === placeholder;
 
         void (async () => {
           try {
             const ctx = await authContext();
             if (!ctx) {
-              unsubscribers.delete(channel);
+              if (stillMine()) unsubscribers.delete(channel);
               return;
             }
 
             const allowed = await found.handler.authorize(ctx, found.match);
             if (!allowed) {
-              unsubscribers.delete(channel);
+              if (stillMine()) unsubscribers.delete(channel);
               send(socket, { channel, type: "error", error: "FORBIDDEN" });
               return;
             }
@@ -136,8 +185,9 @@ export async function realtimeGateway(app: FastifyInstance): Promise<void> {
               send(socket, { channel, ...event });
             });
 
-            // The socket (or this channel) may have gone away mid-await.
-            if (socket.readyState !== socket.OPEN || !unsubscribers.has(channel)) {
+            // The socket (or this channel, or this attempt) may have gone away
+            // mid-await.
+            if (socket.readyState !== socket.OPEN || !stillMine()) {
               unsub();
               return;
             }
@@ -146,16 +196,29 @@ export async function realtimeGateway(app: FastifyInstance): Promise<void> {
             const data = await found.handler.snapshot(found.match);
             send(socket, { channel, type: "snapshot", data });
           } catch {
-            unsubscribers.delete(channel);
+            if (stillMine()) unsubscribers.delete(channel);
           }
         })();
       } else if (msg.type === "unsubscribe") {
         unsubscribers.get(channel)?.();
         unsubscribers.delete(channel);
       }
+    };
+
+    // Belt and braces for the guard above: frames are attacker-controlled
+    // input, and ws delivers them synchronously — an exception escaping here
+    // is an uncaught exception for the whole process, not a failed request.
+    socket.on("message", (raw: Buffer) => {
+      try {
+        handleFrame(raw);
+      } catch (err) {
+        req.log.warn({ err }, "ws: frame handler threw; closing socket");
+        socket.close(1003, "BAD_FRAME");
+      }
     });
 
     socket.on("close", () => {
+      clearInterval(heartbeat);
       claimsUnsub?.();
       for (const unsub of unsubscribers.values()) unsub();
       unsubscribers.clear();

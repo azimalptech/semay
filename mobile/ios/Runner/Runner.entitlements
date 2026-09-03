@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Push Notifications capability. Without this entitlement APNs never
+	     issues the device a token, so firebase_messaging's getToken() has
+	     nothing to register and no push can ever arrive on iOS — the app
+	     otherwise runs fine, which is why it was easy to miss. Xcode/Codemagic
+	     rewrite "development" to "production" for App Store / ad-hoc
+	     distribution builds automatically; the App ID must have the Push
+	     Notifications capability enabled in the developer portal, and an APNs
+	     key uploaded to the Firebase project (Project settings → Cloud
+	     Messaging → Apple app configuration). -->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

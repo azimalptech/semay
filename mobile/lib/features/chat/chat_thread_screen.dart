@@ -12,6 +12,8 @@ import 'package:video_player/video_player.dart';
 import '../../core/app_icon.dart';
 import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
+import '../../core/outbox.dart';
+import '../../core/realtime_client.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/chat_service.dart';
@@ -99,9 +101,9 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Read by the server's sendChatPush to suppress a push notification for a
-    // chat the recipient already has open — see chat_service.dart's
-    // setActiveChat and that function's comment.
+    // Suppresses the in-app banner for messages from THIS chat while it is on
+    // screen (the push itself still arrives; the server no longer skips it —
+    // see chat_service.dart's setActiveChat and that function's comment).
     ref.read(chatServiceProvider).setActiveChat(widget.chatId);
     _controller.addListener(_onTextChanged);
     // Re-evaluates typing-indicator freshness so it disappears when the other
@@ -112,10 +114,11 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
   }
 
   // A backgrounded app still has this screen mounted in Flutter's tree, but
-  // the user obviously isn't looking at it — clear activeChatId so push
-  // notifications resume, and restore it on return (as long as this screen
-  // is still the one on top; if they navigated away first, dispose() has
-  // already cleared it and this would just needlessly reset it back).
+  // the user obviously isn't looking at it — clear activeChatId so a message
+  // arriving then isn't treated as "already on screen", and restore it on
+  // return (as long as this screen is still the one on top; if they
+  // navigated away first, dispose() has already cleared it and this would
+  // just needlessly reset it back).
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
@@ -291,6 +294,13 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
         (chat?[isAdminHere ? 'mutedByAdmin' : 'mutedByUser'] as bool?) ?? false;
 
     final messagesAsync = ref.watch(mergedChatMessagesProvider(widget.chatId));
+    // "Connecting…" under the title whenever the socket is down — a stalled
+    // thread then reads as "no network", not "the app is broken" (same cue
+    // WhatsApp/Telegram use). Typing wins when both apply: it can only be
+    // shown if events are flowing.
+    final showConnecting =
+        !counterpartTyping &&
+        realtimeNeedsAttention(ref.watch(realtimeConnectionProvider).value);
 
     final storeId = chat?['storeId'] as String?;
     // Only the customer side taps through to the store's profile — the
@@ -361,6 +371,13 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                           s.typing,
                           style: AppTypography.caption.copyWith(
                             color: AppColors.brand,
+                          ),
+                        )
+                      else if (showConnecting)
+                        Text(
+                          s.connecting,
+                          style: AppTypography.caption.copyWith(
+                            color: AppColors.textMuted,
                           ),
                         ),
                     ],
@@ -467,6 +484,9 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                       previousCreatedAt,
                     );
                     final isMine = data['senderId'] == myUid;
+                    final isPending = data['pending'] == true;
+                    final isFailed = data['failed'] == true;
+                    final clientKey = data['clientKey'] as String?;
 
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -497,6 +517,14 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                             timestamp: createdAt,
                             deliveredAt: parseTimestamp(data['deliveredAt']),
                             readAt: parseTimestamp(data['readAt']),
+                            isPending: isPending,
+                            isFailed: isFailed,
+                            notSentLabel: s.notSentTapToRetry,
+                            onRetry: isFailed && clientKey != null
+                                ? () => ref
+                                      .read(outboxServiceProvider)
+                                      .retry(clientKey)
+                                : null,
                             // Instagram shows "Seen HH:MM" once, under the
                             // newest message, not repeated on every bubble.
                             showSeenCaption: index == messages.length - 1,
@@ -981,6 +1009,10 @@ class _MessageBubble extends StatelessWidget {
     required this.readAt,
     required this.showSeenCaption,
     required this.seenLabel,
+    this.isPending = false,
+    this.isFailed = false,
+    this.notSentLabel = '',
+    this.onRetry,
   });
 
   final String text;
@@ -1013,6 +1045,15 @@ class _MessageBubble extends StatelessWidget {
   final bool showSeenCaption;
   final String Function(String time) seenLabel;
 
+  /// Still in the outbox (no server row yet) — a clock replaces the check,
+  /// like WhatsApp's pending state. [isFailed] once the outbox has given up
+  /// a few times in a row: red mark + [notSentLabel], and the bubble's tap
+  /// becomes [onRetry] (see outboxFailedAfterAttempts).
+  final bool isPending;
+  final bool isFailed;
+  final String notSentLabel;
+  final VoidCallback? onRetry;
+
   @override
   Widget build(BuildContext context) {
     final isSharedPost = sharedPostId != null;
@@ -1020,7 +1061,7 @@ class _MessageBubble extends StatelessWidget {
     final isAttachment =
         attachmentType != null && (sharedMediaUrl?.isNotEmpty ?? false);
 
-    return Padding(
+    final bubble = Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Column(
         crossAxisAlignment: isMine
@@ -1045,7 +1086,9 @@ class _MessageBubble extends StatelessWidget {
               ),
             ),
           GestureDetector(
-            onTap: isSharedPost
+            onTap: isFailed && onRetry != null
+                ? onRetry
+                : isSharedPost
                 ? () => context.push('/post/$sharedPostId')
                 : isAttachment
                 ? () =>
@@ -1161,25 +1204,39 @@ class _MessageBubble extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (isMine) ...[
-                AppIcon(
-                  // Single check = sent only; double gray = delivered to
-                  // their device; double blue = they've opened the thread
-                  // and read it. See chat_service.dart's
-                  // markMessagesDelivered/markMessagesRead for who sets
-                  // these and when.
-                  readAt != null || deliveredAt != null
-                      ? 'check_double'
-                      : 'check',
-                  size: 16,
-                  color: readAt != null
-                      ? AppColors.brand
-                      : AppColors.textSecondary,
-                ),
+                if (isFailed)
+                  Icon(Icons.error_outline, size: 16, color: AppColors.error)
+                else if (isPending)
+                  // Clock = accepted locally, not yet by the server.
+                  Icon(Icons.schedule, size: 14, color: AppColors.textSecondary)
+                else
+                  AppIcon(
+                    // Single check = sent only; double gray = delivered to
+                    // their device; double blue = they've opened the thread
+                    // and read it. See chat_service.dart's
+                    // markDelivered/markMessagesRead for who sets these and
+                    // when.
+                    readAt != null || deliveredAt != null
+                        ? 'check_double'
+                        : 'check',
+                    size: 16,
+                    color: readAt != null
+                        ? AppColors.brand
+                        : AppColors.textSecondary,
+                  ),
                 const SizedBox(width: 2),
               ],
               Text(_formatTime(timestamp), style: AppTypography.caption),
             ],
           ),
+          if (isMine && isFailed && notSentLabel.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                notSentLabel,
+                style: AppTypography.caption.copyWith(color: AppColors.error),
+              ),
+            ),
           if (isMine && showSeenCaption && readAt != null)
             Padding(
               padding: const EdgeInsets.only(top: 2),
@@ -1193,6 +1250,17 @@ class _MessageBubble extends StatelessWidget {
         ],
       ),
     );
+    // A failed bubble retries from ANY part of it — the red mark and the
+    // "not sent" caption sit outside the bubble body's own tap target, and
+    // they are exactly what a user taps.
+    if (isFailed && onRetry != null) {
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onRetry,
+        child: bubble,
+      );
+    }
+    return bubble;
   }
 
   static String _formatTime(DateTime? timestamp) {

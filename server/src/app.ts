@@ -32,6 +32,21 @@ export async function buildApp(): Promise<FastifyInstance> {
     logger: {
       level: process.env.NODE_ENV === "test" ? "silent" : config.LOG_LEVEL,
       transport: process.env.NODE_ENV === "test" ? undefined : { targets: logTargets() },
+      serializers: {
+        // The WebSocket handshake carries the access token in its query string
+        // (a client cannot set headers on a browser-style upgrade), and the
+        // default serializer wrote the full URL — token included — to the
+        // rotating disk log on every connect. Everything else the default
+        // serializer logs is kept.
+        req(request: { method?: string; url?: string; hostname?: string; ip?: string }) {
+          return {
+            method: request.method,
+            url: request.url?.replace(/([?&]token=)[^&]+/, "$1[redacted]"),
+            hostname: request.hostname,
+            remoteAddress: request.ip,
+          };
+        },
+      },
     },
   });
 
@@ -93,7 +108,12 @@ export async function buildApp(): Promise<FastifyInstance> {
     },
   });
 
-  await app.register(websocketPlugin);
+  // maxPayload: the largest legitimate client frame is a subscribe carrying a
+  // channel name (< 200 bytes). ws's default is 100 MiB, and the gateway
+  // buffers + JSON.parses every frame synchronously for any authenticated
+  // client — without a cap one user could stall the event loop or drive the
+  // worker to OOM. ws closes an oversized sender with 1009 before buffering.
+  await app.register(websocketPlugin, { options: { maxPayload: 4 * 1024 } });
 
   await app.register(authRoutes, { prefix: "/api/v1" });
   await app.register(userRoutes, { prefix: "/api/v1" });

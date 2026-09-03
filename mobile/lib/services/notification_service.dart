@@ -11,6 +11,7 @@ import 'package:go_router/go_router.dart';
 import '../core/api_client.dart';
 import '../core/firebase_options.dart';
 import '../core/theme.dart';
+import 'auth_service.dart';
 
 // Web push needs a VAPID key, which is per-project and can't be derived from
 // firebase_options.dart. Web is not a shipping target (the product is Android +
@@ -23,12 +24,14 @@ final messagingProvider = Provider<FirebaseMessaging>(
   (ref) => FirebaseMessaging.instance,
 );
 
-// Mirrors users.activeChatId (see ChatService.setActiveChat) in plain
-// synchronous memory — an API round-trip is too slow for "should the
-// foreground banner about to show right now be suppressed", and this needs
-// to be readable from main.dart's foreground handler, which runs outside
-// any BuildContext/ProviderScope. Same "simple global mutable flag, not
-// worth a Riverpod provider" convention as AppColors._isDark in theme.dart.
+// The chat thread currently on screen, in plain synchronous memory — this is
+// THE suppression for "don't banner a message from the chat I'm looking at".
+// It used to be mirrored to users.activeChatId so the server could skip the
+// push (and the unread increment) too, but a killed app left that flag stuck
+// and the chat went permanently silent; the server no longer suppresses on
+// it (see server/src/chats/service.ts sendMessage). Readable from main.dart's
+// foreground handler, which runs outside any BuildContext/ProviderScope —
+// same "simple global mutable flag" convention as AppColors._isDark.
 String? _activeChatId;
 void setLocallyActiveChatId(String? chatId) => _activeChatId = chatId;
 
@@ -47,10 +50,8 @@ final rootNavigatorKey = GlobalKey<NavigatorState>();
 // system notification for free from the FCM `notification` payload;
 // foreground FCM delivery never shows anything automatically, so this is
 // what stands in for it. Skipped entirely when the recipient is already
-// looking straight at this exact chat (both a local synchronous check here
-// and the server's own activeChatId-filtered send in server/src/chats/
-// service.ts's sendChatPush — belt and suspenders, since the local check
-// catches anything that could race the server's read of that flag).
+// looking straight at this exact chat (the local _activeChatId check — the
+// server sends the push regardless, by design; see that flag's comment).
 Future<void> showForegroundMessageBanner(RemoteMessage message) async {
   debugPrint(
     'showForegroundMessageBanner: fired data=${message.data} '
@@ -299,6 +300,47 @@ void listenForegroundMessages(void Function(RemoteMessage message) onMessage) {
     _markMessageDelivered(message);
     onMessage(message);
   });
+}
+
+/// Tapping a push opens its thread. Two entry points, because firebase_messaging
+/// reports them differently: the app was KILLED and the tap launched it
+/// (getInitialMessage — resolves once, at startup) or it was in the background
+/// (onMessageOpenedApp). Neither was handled before, so a tap only brought the
+/// app to whatever screen it was last on and left the user to hunt for the
+/// chat — the single most common way people open a messenger. Registered from
+/// main() with the app-lifetime container, like the outbox.
+void listenNotificationTaps(ProviderContainer container) {
+  FirebaseMessaging.instance.getInitialMessage().then((message) {
+    if (message != null) _openChatFromNotification(container, message);
+  });
+  FirebaseMessaging.onMessageOpenedApp.listen(
+    (message) => _openChatFromNotification(container, message),
+  );
+}
+
+Future<void> _openChatFromNotification(
+  ProviderContainer container,
+  RemoteMessage message,
+) async {
+  final chatId = message.data['chatId'] as String?;
+  if (chatId == null) return;
+  debugPrint('notification tap: opening chat $chatId');
+  // The router only lets a signed-in user with a completed profile past the
+  // splash/auth gates — wait for that before pushing, or the redirect that
+  // sends them on to the home shell would land on top of the thread. On a warm
+  // app this resolves immediately.
+  try {
+    final profile = await container.read(userProfileProvider.future);
+    if (profile == null) return;
+  } catch (_) {
+    return;
+  }
+  // One beat for the router's own redirect (splash → shell) to settle.
+  await Future<void>.delayed(const Duration(milliseconds: 300));
+  if (chatId == _activeChatId) return; // already looking at it
+  final context = rootNavigatorKey.currentContext;
+  if (context == null || !context.mounted) return;
+  GoRouter.of(context).push('/chat/$chatId');
 }
 
 class NotificationService {

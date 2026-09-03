@@ -97,12 +97,22 @@ class ChatService {
     await _api.delete('/chats/$chatId');
   }
 
-  /// This device's currently-open chat, read server-side by the FCM sender to
-  /// suppress a push for a chat the recipient is already looking at. Sets the
-  /// synchronous local flag first (for the foreground banner) then persists.
+  /// This device's currently-open chat. The synchronous local flag is what
+  /// suppresses the in-app banner for a message from the thread on screen;
+  /// the server copy (users.activeChatId) is kept up to date as a diagnostic
+  /// hint only — it no longer gates pushes or unread counts, because a killed
+  /// app left it stuck and silenced the chat (see server chats/service.ts).
   Future<void> setActiveChat(String? chatId) async {
     setLocallyActiveChatId(chatId);
     await _api.patch('/users/me', body: {'activeChatId': chatId});
+  }
+
+  /// Marks everything the other side sent in this chat as delivered — called
+  /// by the chat-list providers the moment a chat's unread count rises on
+  /// this device (see chat_providers.dart's _DeliveryMarker). Server-side a
+  /// no-op when nothing is pending, so it is safe to call generously.
+  Future<void> markDelivered(String chatId) async {
+    await _api.post('/chats/$chatId/receipts', body: {'status': 'delivered'});
   }
 
   /// Marks the counterpart's messages delivered. One receipts call regardless

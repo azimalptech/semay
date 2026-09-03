@@ -19,12 +19,13 @@
     "prisma:studio": "prisma studio",
     "superadmin": "node --env-file=.env scripts/create-superadmin.mjs",
     "test": "vitest run",
-    "test:demo-account": "cross-env OTP_TEST_PHONE=+99311100011 OTP_TEST_CODE=123456 vitest run tests/otp.test-phone.test.ts",
+    "test:demo-account": "cross-env OTP_TEST_SYNTHETIC=1 OTP_TEST_PHONE=+99311100011 OTP_TEST_CODE=123456 vitest run tests/otp.test-phone.test.ts",
     "service:install": "node scripts/service.mjs install",
     "service:uninstall": "node scripts/service.mjs uninstall",
     "backup": "node --env-file=.env scripts/backup.mjs",
     "backup:verify": "node --env-file=.env scripts/backup.mjs --verify",
-    "loadtest": "node --env-file=.env scripts/loadtest.mjs"
+    "loadtest": "node --env-file=.env scripts/loadtest.mjs",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

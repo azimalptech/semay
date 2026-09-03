@@ -16,6 +16,20 @@ process.env.SMS_GATEWAY_URL = "";
 process.env.SMS_GATEWAY_USER = "";
 process.env.SMS_GATEWAY_PASSWORD = "";
 
+// The demo account (OTP_TEST_PHONE / OTP_TEST_CODE) is likewise kept out of
+// the plain suite. otp.test-phone.test.ts creates, re-roles and deletes
+// whatever number is configured, so with the deployment's real demo number in
+// .env a routine `npm test` would either refuse to run (account exists) or
+// delete the account it was supposed to leave alone. Forced blank, not
+// `??=`: vitest has already copied .env into process.env by the time this
+// runs, so "only if unset" would keep the real number. `npm run
+// test:demo-account` opts back in with OTP_TEST_SYNTHETIC=1 alongside its
+// synthetic number.
+if (process.env.OTP_TEST_SYNTHETIC !== "1") {
+  process.env.OTP_TEST_PHONE = "";
+  process.env.OTP_TEST_CODE = "";
+}
+
 // vitest has no built-in .env loading (we deliberately avoided a dotenv
 // dependency and use Node's --env-file for the app itself); replicate the
 // same minimal loading here so config.ts's Zod validation sees real values.

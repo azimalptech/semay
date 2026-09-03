@@ -14,6 +14,16 @@
 #      certificate and profile itself once the API key is connected.
 #   3. Set APP_STORE_APPLE_ID below to the app's numeric Apple ID from App
 #      Store Connect (App Information → General → Apple ID).
+#   4. Apple Developer Portal → Identifiers → com.semay.semay → enable the
+#      **Push Notifications** capability. ios/Runner/Runner.entitlements
+#      carries `aps-environment` (chat push cannot work on iOS without it), and
+#      xcodebuild refuses to sign an app whose profile lacks a capability the
+#      entitlements claim — so until this is enabled, BOTH signed workflows
+#      below fail at the signing step. `fetch-signing-files --create` picks the
+#      capability up automatically once it is on; if a profile already exists,
+#      delete it in the portal so it is regenerated. Then upload an APNs auth
+#      key to the Firebase project (Project settings → Cloud Messaging → Apple
+#      app configuration) or FCM has no way to reach the device.
 
 workflows:
   ios-testflight:

@@ -44,6 +44,14 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Lets a chat push (sent with content-available) wake the app briefly in
+	     the background so firebaseMessagingBackgroundHandler can post the
+	     delivered receipt — the sender's second grey check — before the user
+	     ever opens the thread. Paired with Runner.entitlements' aps-environment. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -17,10 +17,13 @@ Collection paths and document shapes. `→` marks a subcollection.
                                // language, absent/false = light.
   "activeChatId": null,       // <chatId> | null — the chat thread currently open on this device, set/
                                // cleared by ChatThreadScreen (chat_service.dart's setActiveChat) on
-                               // mount/dispose and app foreground/background. onMessageCreated reads
-                               // this to skip pushing a notification for a chat its recipient is
-                               // already looking at, instead of a push arriving for something already
-                               // on screen.
+                               // mount/dispose and app foreground/background. DIAGNOSTIC HINT ONLY
+                               // since the chat-reliability pass (docs/07_MIGRATION.md Phase 9c):
+                               // the server used to skip the push AND the unread increment when this
+                               // matched, but a killed app / crash / PATCH lost to bad signal left it
+                               // stuck and that chat then never badged or notified again. The
+                               // suppression now lives on the device (notification_service.dart's
+                               // in-app banner check); sendMessage counts and pushes regardless.
   "createdAt": "<timestamp>"
 }
 ```
@@ -205,12 +208,16 @@ read receipts (ticks + "Seen HH:MM") are tracked per-message below, not derived 
                                     // used to render "You" vs the counterpart's name above the quote.
   "createdAt": "<timestamp>",
   "deliveredAt": null,             // <timestamp> | null — set by the *recipient's* client the moment
-                                    // their device receives this message: either the FCM
-                                    // background/foreground handler (notification_service.dart —
-                                    // reached even with the app closed, via the onMessageCreated push's
-                                    // chatId/messageId data payload) or, if they already have the
-                                    // thread open, the same moment as readAt below. Single check (sent
-                                    // only) vs double gray check (delivered) in the UI.
+                                    // their device receives this message, by whichever path is first:
+                                    // the realtime chat-list channel (chat_providers.dart's
+                                    // _DeliveryMarker posts a delivered receipt when the chat's unread
+                                    // for this side rises — works with push disabled/refused/muted),
+                                    // the FCM background/foreground handler (notification_service.dart
+                                    // — reached even with the app closed, via the push's chatId data
+                                    // payload) or, if they already have the thread open, the same
+                                    // moment as readAt below. Single check (sent only) vs double gray
+                                    // check (delivered) in the UI. The stamp reaches the other side as
+                                    // a `receipts` realtime event, not a re-sent message list.
   "readAt": null                   // <timestamp> | null — set by the recipient's client when they
                                     // actually open/view the thread (chat_service.dart's
                                     // markMessagesRead). Double *blue* check + "Seen HH:MM" under the

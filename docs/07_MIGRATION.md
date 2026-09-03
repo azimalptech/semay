@@ -293,7 +293,9 @@ MySQL/MinIO installs, just for a credential-issuing tool instead of a database. 
   forget — push is best-effort and must never fail the message send). Suppression matches the old
   trigger's contract exactly: muted chat → nothing; message _to_ the user side → skipped if their
   `activeChatId` already equals this chat (reuses the same flag already computed for the unread-
-  counter decision, no extra query); message _to_ the admin side → pushed to every admin of that store
+  counter decision, no extra query) — **superseded in Phase 9c**: that suppression left a chat
+  permanently silent after a killed app, and now lives on the device only; message _to_ the admin
+  side → pushed to every admin of that store
   (no single-recipient suppression, matching the unread-counter logic's same reasoning). `orders/
 service.ts`'s superadmin notify and `notifications/service.ts`'s broadcast, both stubbed in Phase 6,
   now send for real through the same `sendPushToUsers`.
@@ -464,6 +466,51 @@ Like/Save` now route through it (messages carry a client-generated `clientKey`).
 - **Still owner-verified only**: the true airplane-mode → send-offline → restore-signal → replay-once
   loop needs a physical device with toggled connectivity, which is part of Phase 10's on-device matrix
   (I verified the server-side no-dupe guarantee and that everything compiles/links).
+
+## Phase 9c — chat reliability pass (done)
+
+The complaint: messages did not arrive or send promptly, no notification for new messages, no
+unread badges. Every one of those traced to the realtime/push plumbing, not the chat logic —
+`docs/08_OPERATIONS.md` §3a/§3b holds the full failure→fix table and the reasoning; this is the
+change list.
+
+- **`mobile/lib/core/realtime_client.dart` rewritten.** Heartbeat (dart:io `pingInterval` 20 s),
+  fresh access token before every connect (the old client reconnected with the stored token, which
+  after 15 min the server refused with 4401 — and it retried with the same dead token every 2 s
+  forever), exponential backoff with jitter, reconnect on connect failure (previously never
+  scheduled), a liveness probe on app resume and on network change (app-level `{type:"ping"}` →
+  `{type:"pong"}`, new in `gateway.ts`), a new socket on login/logout, and the connection state
+  (`realtimeConnectionProvider`) surfaced as "Connecting…" under the chat title (thread + list),
+  the way WhatsApp/Telegram do.
+- **`server/src/realtime/gateway.ts`**: answers `{type:"ping"}`; server-side ws ping every 30 s and
+  `terminate()` on a missed pong, so dead sockets stop holding listeners.
+- **`api_client.dart`**: token refresh is single-flight (`RefreshOutcome`), the interceptor logs out
+  only on a *rejected* refresh (an unreachable server used to log people out), and the shared Dio has
+  receive/send timeouts (a hung request could wedge the outbox forever). `AccessTokenSource` is the
+  "valid token, refreshing if needed" the socket asks for.
+- **Send path.** The outbox emits `SentMessage` from the POST response and `chatMessagesProvider`
+  merges it, so a sent message appears the instant the server accepts it even with the socket down
+  (it used to vanish: bubble removed, echo never came). Outbox retries on a timer with backoff, shows
+  a clock while pending and, after `outboxFailedAfterAttempts`, a red "not sent — tap to retry".
+- **Receipts.** New `receipts` realtime event (`bus.ts`) replaces the 200-message re-snapshot
+  `markReceipts` used to publish. Delivered receipts now also fire from the chat-list channels
+  (`_DeliveryMarker` in `chat_providers.dart`) when a chat's unread rises on the device — the second
+  grey check no longer depends on FCM being configured/allowed/unmuted.
+- **Push.** Server-side `activeChatId` suppression removed from both the unread increment and the
+  push (`sendMessage`); the app's in-app banner keeps the local check. `push.ts` gained
+  `PushOptions` (channel, per-chat tag, per-recipient badge, `contentAvailable`) and
+  `sendBadgeUpdate` (iOS badge-only correction after a read). Admin-side pushes are titled by the
+  customer's name. A notification tap opens the thread (`listenNotificationTaps`: cold start via
+  `getInitialMessage`, background via `onMessageOpenedApp` — neither was handled). Android:
+  `chat_messages` channel at IMPORTANCE_HIGH created in `MainActivity.kt` + manifest default. iOS:
+  `Runner.entitlements` (`aps-environment`) registered in the Xcode project and
+  `UIBackgroundModes: remote-notification` — without the entitlement no push could ever arrive on
+  iOS. Still needed outside the repo: APNs key in the Firebase project, Push capability on the App ID.
+- **Tests**: `tests/realtime.gateway.test.ts` boots a real listener and drives a real `ws` client —
+  4401 on a bad token, ping/pong, snapshot → upsert → `receipts` (and that a redundant receipt
+  publishes nothing), stranger refused, and unread counting with `activeChatId` set. Full suite green.
+- **Not yet verified on a device** (the reason this pass stops here): the resume/network-change
+  reconnect, Android heads-up + tap-to-open, and the iOS push chain end to end.
 
 ## Post-migration feature changes (after Phase 9b)
 

@@ -298,6 +298,20 @@ npm run start:cluster  # one worker per core (CLUSTER_WORKERS=0), refuses to
                         # boot if the connection-limit math (§4) doesn't fit
 ```
 
+### Smoke test against a real boot
+
+```bash
+npm run smoke          # boots src/index.ts on port 18080 with the local .env
+```
+
+Logs in as the demo account (so `OTP_TEST_PHONE`/`OTP_TEST_CODE` must be set),
+opens a WebSocket, checks ping/pong, subscribes to the chat list, sends one
+message to the first store and watches it echo over the socket, then checks a
+bad token is closed with 4401. This is the "verify by booting" check from
+`CLAUDE.md` rule 9 made repeatable — `inject()`-based tests never exercise the
+listener. It writes one message into a real chat, so use it on dev/staging
+data only.
+
 ## 7. Running as a Windows service
 
 This is how the API stays up across reboots on the current box — the
@@ -453,6 +467,19 @@ not just real testing:
       not enough.
 - [ ] Real `serviceAccount.json` in place for FCM (push is silently disabled
       without it — check the boot log for `FCM push is DISABLED`).
+- [ ] iOS push chain: APNs auth key uploaded to the Firebase project (Project
+      settings → Cloud Messaging → Apple app configuration) and the Push
+      Notifications capability enabled on the `com.semay.semay` App ID. The
+      entitlement and background mode are in the repo; without the portal side
+      no iOS device ever gets an APNs token, and the app runs fine otherwise —
+      so this fails silently (see `docs/08_OPERATIONS.md` §3b).
+- [ ] Chat liveness on a real device (see `docs/08_OPERATIONS.md` §3a): lock
+      the phone for 5+ minutes, send from the other side, unlock — the message
+      must be there within a few seconds (the resume probe waits up to 5 s for a
+      pong before it reconnects; "Connecting…" may flash under the title);
+      toggle airplane mode on/off with the thread open; leave the app open 20+
+      minutes (past the access-token TTL) and confirm messages still arrive;
+      tap a push with the app killed and confirm it opens that thread.
 - [ ] On-device matrix tested, including the offline-outbox replay loop
       (airplane mode → send → restore signal → exactly one message lands).
 - [ ] `JWT_SECRET` rotated away from the development value, **and** the

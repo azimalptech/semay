@@ -44,6 +44,12 @@
             android:name="com.yalantis.ucrop.UCropActivity"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.AppCompat.Light.NoActionBar" />
+        <!-- Channel FCM uses for a notification that names no channel (or an
+             unknown one). Created at IMPORTANCE_HIGH in MainActivity.kt so
+             chat messages pop as heads-up banners with sound — see there. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="chat_messages" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +9,7 @@ import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import 'api_client.dart';
+import 'session.dart';
 
 /// Offline write outbox (Phase 9b). A durable local SQLite queue for the two
 /// mutations users most expect to survive bad signal — chat messages and
@@ -18,6 +20,13 @@ import 'api_client.dart';
 /// immediately; drained on reconnect / app-resume with backoff.
 enum OutboxKind { message, like, unlike, save, unsave }
 
+/// Attempts after which a pending message is shown as "not sent" (red mark,
+/// tap to retry) instead of the sending clock. It keeps being retried in the
+/// background either way — this is only about being honest in the UI once a
+/// send has clearly not gone through in ~15 s, the way Instagram flags it,
+/// rather than showing a clock forever.
+const outboxFailedAfterAttempts = 3;
+
 class OutboxItem {
   OutboxItem({
     required this.id,
@@ -25,6 +34,7 @@ class OutboxItem {
     required this.payload,
     required this.createdAt,
     required this.attempts,
+    this.blockedByAttempts = 0,
   });
 
   final String id; // == clientKey for messages
@@ -33,28 +43,64 @@ class OutboxItem {
   final int createdAt;
   final int attempts;
 
+  /// Attempts accrued by the item at the HEAD of the queue. The queue drains
+  /// strictly oldest-first and stops at the first failure, so only the head
+  /// ever fails — everything queued behind it is stuck just as hard, and must
+  /// show it (otherwise only the oldest of several unsent messages turned
+  /// red while the rest showed a clock forever).
+  final int blockedByAttempts;
+
+  bool get looksFailed => max(attempts, blockedByAttempts) >= outboxFailedAfterAttempts;
+
   static OutboxKind _parseKind(String s) =>
       OutboxKind.values.firstWhere((k) => k.name == s);
 
-  factory OutboxItem.fromRow(Map<String, dynamic> row) => OutboxItem(
+  factory OutboxItem.fromRow(Map<String, dynamic> row, {int blockedByAttempts = 0}) => OutboxItem(
     id: row['id'] as String,
     kind: _parseKind(row['kind'] as String),
     payload: jsonDecode(row['payload'] as String) as Map<String, dynamic>,
     createdAt: row['created_at'] as int,
     attempts: row['attempts'] as int,
+    blockedByAttempts: blockedByAttempts,
   );
 }
 
+/// A message the server just accepted, with the row it created. Emitted so
+/// the open thread can show the real message the instant the POST returns —
+/// previously it waited for the server's echo over the WebSocket, and if the
+/// socket happened to be down the optimistic bubble was removed (the outbox
+/// item was done) while the echo never came: the user watched their own
+/// message vanish until the next snapshot.
+class SentMessage {
+  const SentMessage({required this.chatId, required this.message});
+
+  final String chatId;
+  final Map<String, dynamic> message;
+}
+
 class OutboxService {
-  OutboxService(this._api, this._connectivity);
+  OutboxService(this._api, this._connectivity, {required bool Function() hasSession})
+    : _hasSession = hasSession;
 
   final ApiClient _api;
   final Connectivity _connectivity;
+  // Whether there is a signed-in session right now. Nothing drains without
+  // one: a logged-out device used to keep POSTing every ~30 s with no token,
+  // and rows queued by the previous user would have gone out under whoever
+  // logged in next (see clear()).
+  final bool Function() _hasSession;
   final _uuid = const Uuid();
+  final _random = Random();
 
   Database? _db;
   bool _draining = false;
+  // A drain trigger (connectivity, resume, enqueue, retry) that lands while a
+  // drain is already running is remembered and honoured as soon as the
+  // current one settles, instead of being dropped — a hung POST used to
+  // swallow every trigger for its whole 15–30 s timeout.
+  bool _drainRequested = false;
   StreamSubscription<dynamic>? _connSub;
+  Timer? _retryTimer;
 
   /// Fires on every enqueue/drain so `pendingMessagesProvider` can re-query the
   /// optimistic view. Broadcast so multiple open chats can each listen.
@@ -63,6 +109,9 @@ class OutboxService {
   void _bump() {
     if (!_changes.isClosed) _changes.add(null);
   }
+
+  final StreamController<SentMessage> _sent = StreamController<SentMessage>.broadcast();
+  Stream<SentMessage> get sentMessages => _sent.stream;
 
   Future<Database> _open() async {
     if (_db != null) return _db!;
@@ -92,7 +141,9 @@ class OutboxService {
 
   void dispose() {
     _connSub?.cancel();
+    _retryTimer?.cancel();
     _changes.close();
+    _sent.close();
     _db?.close();
   }
 
@@ -115,6 +166,8 @@ class OutboxService {
   /// first. Cheap synchronous-ish read for the UI merge.
   Future<List<OutboxItem>> pendingMessages(String chatId) async {
     final db = await _open();
+    final head = await db.query('outbox', columns: ['attempts'], orderBy: 'created_at ASC', limit: 1);
+    final headAttempts = head.isEmpty ? 0 : head.first['attempts'] as int;
     final rows = await db.query(
       'outbox',
       where: 'kind = ?',
@@ -122,9 +175,28 @@ class OutboxService {
       orderBy: 'created_at ASC',
     );
     return rows
-        .map(OutboxItem.fromRow)
+        .map((r) => OutboxItem.fromRow(r, blockedByAttempts: headAttempts))
         .where((i) => i.payload['chatId'] == chatId)
         .toList();
+  }
+
+  /// User tapped a "not sent" bubble: back to the sending clock and try now,
+  /// ahead of whatever the backoff timer had planned. If a drain is mid-flight
+  /// the request is queued behind it (drain re-loops), not lost.
+  Future<void> retry(String id) async {
+    final db = await _open();
+    await db.update('outbox', {'attempts': 0}, where: 'id = ?', whereArgs: [id]);
+    _bump();
+    unawaited(drain());
+  }
+
+  /// Logout: whatever is queued belongs to the session that just ended and
+  /// must never go out under the next one.
+  Future<void> clear() async {
+    _retryTimer?.cancel();
+    final db = await _open();
+    await db.delete('outbox');
+    _bump();
   }
 
   Future<void> _remove(String id) async {
@@ -132,20 +204,47 @@ class OutboxService {
     await db.delete('outbox', where: 'id = ?', whereArgs: [id]);
   }
 
-  Future<void> _bumpAttempts(String id, int attempts) async {
+  /// Atomic `attempts + 1` on the row itself, and returns the new value —
+  /// rather than writing back a snapshot taken before the request, which
+  /// clobbered a retry()'s reset to 0 that landed while the request was in
+  /// flight.
+  Future<int> _incrementAttempts(String id) async {
     final db = await _open();
-    await db.update('outbox', {'attempts': attempts}, where: 'id = ?', whereArgs: [id]);
+    await db.rawUpdate('UPDATE outbox SET attempts = attempts + 1 WHERE id = ?', [id]);
+    final rows = await db.query('outbox', columns: ['attempts'], where: 'id = ?', whereArgs: [id]);
+    return rows.isEmpty ? 0 : rows.first['attempts'] as int;
+  }
+
+  /// A failed drain used to wait for the next connectivity change or the next
+  /// enqueue — a 5xx or a timeout while ONLINE (nothing changes, nothing new
+  /// is sent) left the message sitting there indefinitely. Now it retries on
+  /// its own: 2 s, 4 s, 8 s, 16 s, then every ~30 s, with jitter.
+  /// [failures] is how many times the head item has now failed (≥ 1).
+  void _scheduleRetry(int failures) {
+    _retryTimer?.cancel();
+    final base = min(30000, 2000 * (1 << min(max(failures - 1, 0), 4)));
+    _retryTimer = Timer(
+      Duration(milliseconds: base + _random.nextInt(1000)),
+      () => unawaited(drain()),
+    );
   }
 
   /// Drains the queue oldest-first. Stops on the first network failure (offline
   /// again — retry on next reconnect). Drops an item on a permanent 4xx
   /// (validation/authz/not-found) so a poison item can't wedge the queue.
   Future<void> drain() async {
-    if (_draining) return;
+    if (_draining) {
+      _drainRequested = true;
+      return;
+    }
+    if (!_hasSession()) return;
     _draining = true;
+    _drainRequested = false;
+    _retryTimer?.cancel();
     try {
       final db = await _open();
       while (true) {
+        if (!_hasSession()) break;
         final rows = await db.query('outbox', orderBy: 'created_at ASC', limit: 1);
         if (rows.isEmpty) break;
         final item = OutboxItem.fromRow(rows.first);
@@ -164,16 +263,24 @@ class OutboxService {
           }
           // 401 after refresh failed, or 5xx — treat as retryable; bump the
           // attempt count and stop the drain (retry on next trigger).
-          await _bumpAttempts(item.id, item.attempts + 1);
+          final failures = await _incrementAttempts(item.id);
+          _bump();
+          _scheduleRetry(failures);
           break;
         } catch (_) {
           // Network/timeout — offline again. Retry on next reconnect.
-          await _bumpAttempts(item.id, item.attempts + 1);
+          final failures = await _incrementAttempts(item.id);
+          _bump();
+          _scheduleRetry(failures);
           break;
         }
       }
     } finally {
       _draining = false;
+      if (_drainRequested) {
+        _drainRequested = false;
+        unawaited(drain());
+      }
     }
   }
 
@@ -181,10 +288,14 @@ class OutboxService {
     final pl = item.payload;
     switch (item.kind) {
       case OutboxKind.message:
-        await _api.post('/chats/${pl['chatId']}/messages', body: {
+        final json = await _api.post('/chats/${pl['chatId']}/messages', body: {
           ...Map<String, dynamic>.from(pl)..remove('chatId'),
           'clientKey': item.id,
         });
+        final message = json['message'];
+        if (message is Map<String, dynamic> && !_sent.isClosed) {
+          _sent.add(SentMessage(chatId: pl['chatId'] as String, message: message));
+        }
       case OutboxKind.like:
         await _api.post('/posts/${pl['postId']}/like');
       case OutboxKind.unlike:
@@ -198,7 +309,19 @@ class OutboxService {
 }
 
 final outboxServiceProvider = Provider<OutboxService>((ref) {
-  final service = OutboxService(ref.watch(apiClientProvider), Connectivity());
+  final service = OutboxService(
+    ref.watch(apiClientProvider),
+    Connectivity(),
+    hasSession: () => ref.read(sessionControllerProvider).value != null,
+  );
+  // Logout empties the queue; a (re)login drains whatever was queued while
+  // the session was still resolving at startup.
+  ref.listen(sessionControllerProvider, (previous, next) {
+    final had = previous?.value != null;
+    final has = next.value != null;
+    if (had && !has) unawaited(service.clear());
+    if (!had && has) unawaited(service.drain());
+  });
   ref.onDispose(service.dispose);
   return service;
 });

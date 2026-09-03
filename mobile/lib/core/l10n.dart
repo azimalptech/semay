@@ -202,6 +202,15 @@ class S {
       isRu ? 'Уведомления отключены' : 'Bildirişler öçürildi';
   String get notificationsUnmuted =>
       isRu ? 'Уведомления включены' : 'Bildirişler açyldy';
+  /// Under the chat title while the realtime socket is down/reconnecting —
+  /// the same caption WhatsApp/Telegram show, so a quiet thread reads as "no
+  /// network" rather than "broken app".
+  String get connecting => isRu ? 'Подключение…' : 'Baglanýar…';
+  /// Under a bubble the outbox has failed to send a few times; the bubble
+  /// itself is tappable to retry.
+  String get notSentTapToRetry => isRu
+      ? 'Не отправлено. Нажмите, чтобы повторить'
+      : 'Ugradylmady. Gaýtalamak üçin basyň';
 
   // Composer / story
   String get newPost => isRu ? 'Новый пост' : 'Täze post';

@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/firebase_options.dart';
 import 'core/interaction_buffer.dart';
 import 'core/outbox.dart';
+import 'core/realtime_client.dart';
 import 'core/router.dart';
 import 'core/theme.dart';
 import 'core/theme_provider.dart';
@@ -34,6 +35,14 @@ Future<void> main() async {
   // notification_service.dart's firebaseMessagingBackgroundHandler) gets
   // marked even while the app is fully backgrounded or killed.
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  // iOS: a push that arrives while the app is in the FOREGROUND is otherwise
+  // presented with nothing at all — which also discards its badge number. The
+  // in-app banner covers alert/sound; the badge has to be let through, or the
+  // badge-only correction the server sends after a read never reaches the
+  // icon and it keeps the last background-applied count. No-op on Android.
+  await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
+    badge: true,
+  );
 
   // Registered exactly once here, not inside SeMayApp.build() — a raw
   // Stream.listen (unlike Riverpod's ref.listen) creates a fresh subscription
@@ -47,13 +56,24 @@ Future<void> main() async {
   final container = ProviderContainer();
   unawaited(container.read(outboxServiceProvider).start());
   unawaited(container.read(interactionBufferProvider).start());
+  // Tap on a push → open that chat (both the cold-start and background cases).
+  listenNotificationTaps(container);
 
   // Flush buffered view/send/share counts the moment the app is backgrounded or
   // closed, not only on the 30-min tick — otherwise a session shorter than the
   // interval would lose its counts. Held in a top-level ref so it isn't GC'd.
+  //
+  // On resume: probe the realtime socket (the OS may have silently killed it
+  // while we were in the background — see realtime_client.dart) and drain the
+  // outbox, so anything typed just before the screen locked goes out now
+  // rather than on the next connectivity event.
   _lifecycleListener = AppLifecycleListener(
     onPause: () => unawaited(container.read(interactionBufferProvider).flush()),
     onDetach: () => unawaited(container.read(interactionBufferProvider).flush()),
+    onResume: () {
+      unawaited(container.read(realtimeClientProvider).checkConnection());
+      unawaited(container.read(outboxServiceProvider).drain());
+    },
   );
 
   runApp(

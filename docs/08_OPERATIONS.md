@@ -113,6 +113,93 @@ Two things were fixed here that would not have survived scale:
   cached for 5s, collapsing a burst into one lookup while staying far fresher
   than the 15-minute access token it derives from.
 
+### 3a. Liveness: why chat used to go quiet, and what keeps it alive now
+
+A phone's connection dies without saying so — carrier NAT resets, Doze, a
+Wi-Fi→LTE handover, iOS suspending the process. The first version of the
+realtime path assumed a socket that was open was working, and had four separate
+ways of silently stopping until the app was restarted. Each one is a real
+report of "messages don't arrive", and each has a specific fix:
+
+| Failure | Fix | Where |
+|---|---|---|
+| Half-open socket looks connected forever; nothing arrives | Heartbeats both ways: the app pings every 20 s (dart:io `pingInterval`, closes on a missed pong); the server pings every 30 s and `terminate()`s a peer that misses a whole interval | `realtime_client.dart`, `gateway.ts` |
+| Reconnect after 15 min reused the expired access token → server `4401` → retry every 2 s with the same dead token, forever | A fresh token is obtained *before* every connect (`AccessTokenSource.validToken`, refreshing when < 60 s remain); a `4401` close forces a refresh on the next attempt | `api_client.dart`, `realtime_client.dart` |
+| A connect that threw never scheduled a retry | Exponential backoff with ±50 % jitter (1 s → 30 s); a connection that lived ≥ 5 s resets it so the first retry after a real drop is immediate | `realtime_client.dart` |
+| Nothing reconnected on app resume, network change, or login/logout | On resume/online: an application-level `{type:"ping"}` with a 5 s deadline, reconnect on silence. On session change: new socket (the old one authenticated as the old user) | `main.dart`, `realtime_client.dart`, `gateway.ts` |
+
+Related fixes in the same pass:
+
+- **Concurrent token refresh** is single-flight. The REST interceptor and the
+  socket can both notice an expired token in the same instant; the server
+  rotates the refresh token on every call, so the second refresh presented an
+  already-revoked token and the session was killed for nothing. The interceptor
+  also no longer logs out when the refresh endpoint was merely *unreachable* —
+  only when it *rejected* the token.
+- **Receipts are a roll-up event**, not a re-snapshot. `markReceipts` published
+  the full 200-message window on every delivered/read receipt; with delivered
+  receipts now firing per incoming message, that was up to ~2×200 messages of
+  JSON per message sent, to every subscriber. It now publishes
+  `{type:"receipts", data:{senderRole,status,at}}` and the client stamps the
+  matching messages itself.
+- **Sent messages no longer depend on the socket** to appear. The outbox hands
+  the POST response straight to the open thread; the socket echo is a harmless
+  overwrite. Previously a send while the socket was down made the optimistic
+  bubble vanish (the outbox item was done) with nothing replacing it.
+- **The outbox retries on its own** (2 s, 4 s, 8 s, 16 s, then ~30 s) instead of
+  waiting for a connectivity change or the next send, and the shared Dio has
+  receive/send timeouts so one hung request cannot wedge the queue forever. A
+  trigger that lands mid-drain is remembered and honoured when the drain
+  settles; the queue is emptied on logout and never drains without a session
+  (rows from the previous user must not go out under the next one).
+- **Frames are hostile input.** A client text frame of exactly `null` parsed
+  successfully and the first property access threw synchronously inside ws's
+  receiver — an uncaught exception, i.e. any authenticated user could stop the
+  process with four bytes (pre-existing; found by the review of this pass).
+  The gateway now rejects non-object frames, wraps the handler, and caps frames
+  at 4 KiB (`maxPayload`; ws's default is 100 MiB). Subscribe bookkeeping keys
+  on a per-attempt placeholder so a subscribe/unsubscribe/subscribe burst can't
+  install two bus listeners. The access token no longer reaches the disk log
+  (request serializer redacts `token=` in URLs).
+- **A refresh is "rejected" only on 400/401/403.** A 429 from the auth rate
+  limiter (60/min per IP, and carrier NAT puts many phones behind one IP) or
+  a 5xx used to count as rejection and log the user out; now it is
+  "unreachable" — retried, session kept. A logout that completes while a
+  refresh is in flight also wins over that refresh.
+
+### 3b. Push: what the server sends and why
+
+- **No server-side suppression.** `users.activeChatId` used to skip both the
+  push and the unread increment when it matched the chat. The flag is written by
+  the app on enter/leave; a killed app, a crash, or a PATCH lost to bad signal
+  left it stuck, and that chat then never badged or notified its user again.
+  Whether someone is looking at a thread is only knowable on their device, so
+  the app suppresses its own in-app banner and the server counts and pushes
+  regardless. The thread screen answers each incoming message with a read
+  receipt within one round-trip, so the counter is back at 0 before anyone sees
+  it. The column is kept as a diagnostic hint only.
+- **Payload** (`notifications/push.ts`): `android.priority=high` (wakes a dozing
+  device), `channelId=chat_messages` (a channel the app creates at
+  IMPORTANCE_HIGH — heads-up banner + sound; FCM's default "Miscellaneous"
+  channel is silent), `tag=<chatId>` (one notification per conversation, newest
+  replaces oldest; iOS `thread-id` groups them), `contentAvailable` (iOS wakes
+  the app to post the delivered receipt), and `data:{type,chatId,messageId,
+  senderRole}` — `chatId` is what a notification tap routes to.
+- **Launcher badge** is per recipient: `SUM(unreadByUser)` across the user's
+  chats, or for an admin the sum across every store they manage (two queries
+  however many admins) — muted chats excluded, because a muted chat sends no
+  push and counting it would make the icon lag and then jump on an unrelated
+  read. `content-available` (the background wake-up for the delivered receipt)
+  is opt-in per push and only chat messages set it; a broadcast or an order
+  notice has nothing for the app to do in the background. After a read receipt an iOS-only badge-only push
+  corrects the number back down; Android launchers count the notifications
+  themselves. Badge work is skipped entirely when FCM is not configured.
+- **iOS needs three things or push never arrives**, and the app otherwise runs
+  fine so this is easy to miss: `aps-environment` in `Runner.entitlements`
+  (now in the Xcode project), `UIBackgroundModes: remote-notification` in
+  Info.plist (now set), and an APNs key uploaded to the Firebase project with
+  the App ID's Push Notifications capability enabled (portal work, not code).
+
 ## 4. Logging
 
 Newline-delimited JSON to `LOG_DIR/app.<date>.log`, rotated daily and pruned to

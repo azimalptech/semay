@@ -40,6 +40,25 @@ class SessionClaims {
   }
 }
 
+/// Expiry (`exp` claim) of an access JWT, or null when it can't be read. The
+/// realtime client checks this BEFORE opening a socket: unlike a REST call,
+/// which the interceptor in api_client.dart can retry with a refreshed header,
+/// a WebSocket handed an expired token is simply closed by the server (4401)
+/// and there is nothing to retry — the token has to be fresh going in.
+DateTime? jwtExpiresAt(String accessToken) {
+  try {
+    final parts = accessToken.split('.');
+    if (parts.length != 3) return null;
+    final payload =
+        jsonDecode(_decodeBase64Segment(parts[1])) as Map<String, dynamic>;
+    final exp = payload['exp'];
+    if (exp is! num) return null;
+    return DateTime.fromMillisecondsSinceEpoch(exp.toInt() * 1000, isUtc: true);
+  } catch (_) {
+    return null;
+  }
+}
+
 String _decodeBase64Segment(String segment) {
   var normalized = segment.replaceAll('-', '+').replaceAll('_', '/');
   switch (normalized.length % 4) {

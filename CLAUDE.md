@@ -56,6 +56,7 @@ docs/         Specs (read before coding — see above)
    passed both typecheck and all tests. Boot the server and curl the affected path.
 
 ## Current phase
-See `docs/07_MIGRATION.md` — Phases 1–9b are done, plus a hardening/scaling pass (see
+See `docs/07_MIGRATION.md` — Phases 1–9c are done (9c = the chat reliability pass), plus a
+hardening/scaling pass (see
 `docs/08_OPERATIONS.md`). Remaining: **Phase 10** — load test, backup-restore drill, on-device
 matrix, cutover.

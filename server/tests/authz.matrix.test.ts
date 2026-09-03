@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
+import { createOrGetChat } from "../src/chats/service.js";
 import { setStoreAdmin } from "../src/stores/service.js";
 import { prisma } from "../src/db.js";
 import {
@@ -265,6 +266,72 @@ describe("authz matrix", () => {
 
     it("unauthenticated -> 401", async () => {
       const res = await app.inject({ method: "GET", url: "/api/v1/stores" });
+      expect(res.statusCode).toBe(401);
+    });
+  });
+
+  // Chat routes are participant-gated, not role-gated: the chat's own customer,
+  // an admin of ITS store, or superadmin. A wrong-store admin and an unrelated
+  // customer are both outsiders. Receipts matter here because the chat
+  // reliability pass widened what a receipt does (realtime roll-up + a badge
+  // push fan-out to the store's admins), so who may post one must stay exact.
+  describe("chat routes (participants only)", () => {
+    let chatId: string;
+    let strangerToken: string;
+    let strangerId: string;
+
+    beforeAll(async () => {
+      chatId = (await createOrGetChat(plainUserId, storeAId)).id;
+      const stranger = await createUserWithToken("user");
+      strangerId = stranger.userId;
+      strangerToken = stranger.token;
+    });
+
+    afterAll(async () => {
+      // The chat itself goes with storeA's cascade in the outer afterAll.
+      await cleanupUsers([strangerId]);
+    });
+
+    const receiptCases: [string, () => string, number][] = [
+      ["participant customer", () => plainUserToken, 200],
+      ["correct-store admin", () => adminAToken, 200],
+      ["superadmin", () => superadminToken, 200],
+      ["wrong-store admin", () => adminBToken, 403],
+      ["unrelated customer", () => strangerToken, 403],
+    ];
+    it.each(receiptCases)("POST /chats/:id/receipts: %s -> %i", async (_label, getToken, expected) => {
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/v1/chats/${chatId}/receipts`,
+        headers: authHeader(getToken()),
+        payload: { status: "delivered" },
+      });
+      expect(res.statusCode).toBe(expected);
+    });
+
+    const messageCases: [string, () => string, number][] = [
+      ["participant customer", () => plainUserToken, 201],
+      ["correct-store admin", () => adminAToken, 201],
+      ["superadmin", () => superadminToken, 201],
+      ["wrong-store admin", () => adminBToken, 403],
+      ["unrelated customer", () => strangerToken, 403],
+    ];
+    it.each(messageCases)("POST /chats/:id/messages: %s -> %i", async (_label, getToken, expected) => {
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/v1/chats/${chatId}/messages`,
+        headers: authHeader(getToken()),
+        payload: { text: "matrix" },
+      });
+      expect(res.statusCode).toBe(expected);
+    });
+
+    it("unauthenticated -> 401", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/v1/chats/${chatId}/receipts`,
+        payload: { status: "read" },
+      });
       expect(res.statusCode).toBe(401);
     });
   });

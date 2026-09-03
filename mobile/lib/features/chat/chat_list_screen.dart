@@ -6,6 +6,7 @@ import 'package:visibility_detector/visibility_detector.dart';
 
 import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
+import '../../core/realtime_client.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/chat_service.dart';
@@ -97,6 +98,11 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
   Widget build(BuildContext context) {
     final role = ref.watch(appRoleProvider).value;
     final isAdmin = role == AppRole.admin || role == AppRole.superadmin;
+    final s = ref.watch(l10nProvider);
+    // "Connecting…" under the title while the realtime socket is down, so a
+    // list that isn't updating says why (same cue as the thread screen).
+    final connected =
+        !realtimeNeedsAttention(ref.watch(realtimeConnectionProvider).value);
 
     // Kept alive across bottom-nav tab switches (see router.dart's
     // _KeepAlivePage) — nothing else would ever tell an open swipe to close
@@ -117,7 +123,23 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
         behavior: HitTestBehavior.translucent,
         onTap: _swipeCoordinator.closeAll,
         child: Scaffold(
-          appBar: AppBar(title: Text(ref.watch(l10nProvider).chat)),
+          appBar: AppBar(
+            title: connected
+                ? Text(s.chat)
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(s.chat),
+                      Text(
+                        s.connecting,
+                        style: AppTypography.caption.copyWith(
+                          color: AppColors.textMuted,
+                        ),
+                      ),
+                    ],
+                  ),
+          ),
           body: isAdmin
               ? _AdminChatList(coordinator: _swipeCoordinator)
               : _UserChatList(coordinator: _swipeCoordinator),
