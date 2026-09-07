@@ -84,9 +84,16 @@ createdAt)` on `post_likes`/`post_saves` serves "My Liked/Saved" directly.
   Verified with a concurrency regression test (`tests/auth.concurrency.test.ts`, 20 parallel calls
   for one brand-new phone → exactly one `users` row) — this is the test the plan called out as
   highest-value, and it passes against real local MySQL.
-- `session.ts` — refresh tokens are opaque, stored **hashed** in `sessions`; `rotateSession` revokes
-  the old row and issues a new one on every `/refresh` call, so a replayed old token dead-ends
-  (verified live: reusing a rotated-away token returns `401 SESSION_INVALID`).
+- `session.ts` — refresh tokens are opaque, stored **hashed** in `sessions`; `rotateSession` retires
+  the presented row (compare-and-swap on `rotatedAt`) and issues a new one in the same family on every
+  `/refresh` call, so a replayed old token dead-ends (verified live: reusing a rotated-away token
+  returns `401 SESSION_INVALID`). **Amended 2026-09, "sessions until logout"**: the retired token stays
+  accepted for `REFRESH_REUSE_GRACE_SECONDS` (60 s) and is answered with a live *sibling* pair —
+  strict single-use logged a device out whenever a refresh response was lost in transit or two browser
+  tabs refreshed on one cookie, which is what "re-login every 15 minutes" was. Past the grace a replay
+  still 401s, for that token only. Expiry slides (`REFRESH_TOKEN_TTL_DAYS`, default 730, re-issued on
+  every refresh) and `/logout` revokes the whole family. Pinned by `tests/session.rotation.test.ts`;
+  the full account is `08_OPERATIONS.md` §3c.
 - `middleware.ts` — `requireAuth` (fast, local JWT verify) and `requireFreshAuth` (slow, re-derives
   claims from the DB and rejects a stale `claimsVersion` with `CLAIMS_STALE`). No route uses
   `requireFreshAuth` yet — it's consumed starting Phase 3's authz middleware.
@@ -117,7 +124,12 @@ gated by `requireFreshAuth` + `requireRole("superadmin")` from `src/auth/authz.t
 ## Phase 3 progress — posts, stories, media (done so far)
 
 `server/src/posts/`: `POST /stores/:storeId/posts` (store-admin), `GET /stores/:storeId/posts`,
-`GET /feed` (image+carousel), `GET /reels`, `GET /posts/:id`, `DELETE /posts/:id` (owner store-admin
+`GET /feed` (every type in one `createdAt DESC` stream — reels interleave with photos as inline
+playable cards; optional `?type=image|carousel|reel` narrows it. It shipped with a hard
+`type IN ('image','carousel')` that dropped reels from the home feed, a regression against the
+Firestore feed which had no type filter — fixed 2026-09. On the phone the feed keys its cards by
+post id and a reel tile fetches its file only once it first qualifies to play, never on build —
+see `docs/08_OPERATIONS.md` §6a), `GET /reels`, `GET /posts/:id`, `DELETE /posts/:id` (owner store-admin
 or superadmin — ownership resolved server-side since the route has no storeId param), and
 `POST`/`DELETE` on `/posts/:id/like` and `/save`, plus create-only `POST /posts/:id/view|sent|share`.
 
@@ -197,7 +209,8 @@ always scoped to Phase 6, not Phase 3.
 user; `?storeId=` for an admin/superadmin), `GET /chats/:id`, `GET /chats/:id/messages`
 (`?before=&limit=`, newest-first, mirrors the old `limitToLast(200)`), `POST /chats/:id/messages`,
 `POST /chats/:id/receipts` (`{status:"delivered"|"read"}`), `POST /chats/:id/typing`,
-`POST /chats/:id/mute`, `DELETE /chats/:id` (soft-hide for the caller's side only).
+`POST /chats/:id/mute`, `DELETE /chats/:id` (per-side delete: hides the chat and its history so far
+for the caller's side only).
 
 - `chats/service.ts` — `resolveChatSide`/`getChatForParticipant` is the shared authorization check
   every route runs (participant = the chat's own user, an admin of its store, or superadmin).
@@ -206,9 +219,39 @@ user; `?storeId=` for an admin/superadmin), `GET /chats/:id`, `GET /chats/:id/me
   publishes to `chat:{id}:messages`, `chat:{id}`, `user:{userId}:chats`, and `store:{storeId}:chats`
   — the last two are the **list-diff channels** the plan called out as the one piece Firestore gave
   for free that had to be hand-written.
-- `hideChat` is per-side and reversible by construction: `listUserChats`/`listStoreChats` filter a hidden
-  chat back in the instant its `lastMessageAt` moves past the hide timestamp — no explicit "unhide"
-  action needed, matching the swipe-to-delete-isn't-permanent behavior already in the mobile app.
+- `hideChat` is per-side: the caller's list drops the chat, and `listUserChats`/`listStoreChats` filter
+  it back in the instant its `lastMessageAt` moves past the hide timestamp — no explicit "unhide"
+  action, matching the swipe-to-delete behavior already in the mobile app. What comes back is only
+  the history since the delete (owner decision — the list-only hide let the deleting side read every
+  old message straight away, and see the whole thread again the moment the other side wrote):
+  `hideChat` records the newest message id at that instant as the side's cutoff
+  (`chats.hiddenBy{User,Admin}UpToId`, read under the same chats-row X lock `sendMessage` takes, so a
+  racing send lands wholly on one side of it) and zeroes the side's unread. `listMessages` (first
+  page and `?before=` paging), the `chat:{id}:messages` snapshot (which now receives the subscriber's
+  ctx and resolves their side through the same `resolveChatSide` as the routes), `markReceipts`
+  (which also sends the bound as `fromMessageId` in the receipts roll-up) and `sendMessage`'s
+  reply-to lookup all read through `id > cutoff` for that side; the other side is unaffected, and no
+  row is ever deleted. A quote is part of that history: the other side may still reply to a message
+  this side deleted, and the reply carries its text as `replyToText`, so `listMessages` projects
+  `replyTo*` to null for the reader when the quoted id is at or below their cutoff (the stored row
+  keeps the quote for the other side). Superadmin is the admin side throughout — its delete writes
+  the store's cutoff (owner decision), and a store admin's delete bounds superadmin reads of that
+  chat; there is no unfiltered participant read. Chats hidden before the column existed keep a NULL
+  cutoff (list-only hide — deliberately no backfill). The phone (`ChatMessagesNotifier`) reads the
+  cutoff from the chat doc, drops held rows at or below it, masks hidden quotes itself for the live
+  `chat:{id}:messages` upsert (one frame for both sides, so the server cannot project it per
+  subscriber), prunes its SQLite cache (and `hideChat` wipes the thread's cache outright), and
+  treats a server window shorter than 200 as the whole visible thread, so a cached row can never
+  resurrect deleted history. The chat list forgets a removed chat's unread baseline
+  (`_DeliveryMarker.forget`) because the hide zeroes unread server-side — otherwise the message
+  that brings the chat back (unread 1 against a remembered 3) would not register as a rise and no
+  delivered receipt would go out. **Rollout:** the server change is safe on its own, but the
+  "cache can never resurrect" guarantee is the app build's — an older build keeps its cached rows
+  below the server's window and paints them around the new message until it updates (its own
+  already-seen history, no cross-user exposure); ship the app with or before the server. Covered by
+  `tests/chat.hide-history.test.ts` (including a delete racing 20 sends, the other side quoting a
+  hidden row, and the superadmin rule), the `chat-delete` block of `tests/authz.matrix.test.ts`, and
+  a snapshot case in `tests/realtime.gateway.test.ts`.
 - `realtime/channels.ts` — extended the Phase 4 gateway with a **pattern + per-channel authorize**
   registry (`post:{id}` public; `chat:{id}`, `chat:{id}:messages`, `user:{uid}:chats`,
   `store:{storeId}:chats` all check real participancy against the DB before allowing subscribe —
@@ -332,7 +375,12 @@ schema fields. A superadmin is just a `users` row with `role='superadmin'`.
   so the _same_ request's Server Components already see the fresh token, not just the next one).
   `src/lib/session.ts`'s `requireSuperAdmin()` is the secure re-check every page still runs — same
   "defense in depth" shape the old Firebase session-cookie code had, just backed by a fresh Prisma
-  read of `role` instead of `verifySessionCookie(..., true)`.
+  read of `role` instead of `verifySessionCookie(..., true)`. Since 2026-09 the silent refresh is
+  single-flight (`src/lib/refresh.ts`, shared with `apiClient.ts`'s retry — every request that arrives
+  with the same expired cookie shares one `/auth/refresh` call) and the proxy ends the session, i.e.
+  clears the cookies, only on the API's own `SESSION_INVALID`; an unreachable API answers 503 with the
+  cookies untouched and the page retries itself. The refresh cookie is issued for 400 days (the
+  browser cap) on every refresh, so the panel stays signed in until the Logout button.
 - **Direct Prisma access** — `web-admin/scripts/sync-schema.mjs` copies `server/prisma/schema.prisma`
   into `web-admin/prisma/` before every `dev`/`build`/`generate` (gitignored — never hand-edited, so
   the schema can't fork into two sources of truth). Every page's data read goes straight through
@@ -393,6 +441,11 @@ analyze` is clean.
   (`parseTimestamp`), Prisma `Decimal` (`"19.99"`) → num, BigInt message ids → strings, `media[]`
   objects → `mediaUrls[]`, notification `read` bool → nullable `readAt`. The `JsonDoc` wrapper meant the
   bulk of screen code (`doc.id`, `doc.data()['field']`) never changed.
+- **Timestamps on the wire are UTC ISO-8601 with a trailing `Z`** (Prisma `DateTime` →
+  `Date.prototype.toJSON`); the app localises once, in `parseTimestamp` (`.toLocal()`), so every
+  `.hour`/`.day` read shows device time — never format a `DateTime` that did not come through it
+  (instant comparisons are zone-independent either way). The superadmin dashboard buckets orders by
+  the Asia/Ashgabat calendar day (`web-admin/src/lib/businessDay.ts`), not the UTC day.
 - **Realtime channels wired**: `post:{id}` (like/save counts on cards), `store:{id}` (live store
   profile/summary), `chat:{id}` + `chat:{id}:messages` (thread), and the two list-diff channels
   `user:{uid}:chats` / `store:{storeId}:chats` (chat lists — an admin merges one channel per managed
@@ -487,7 +540,11 @@ change list.
 - **`api_client.dart`**: token refresh is single-flight (`RefreshOutcome`), the interceptor logs out
   only on a *rejected* refresh (an unreachable server used to log people out), and the shared Dio has
   receive/send timeouts (a hung request could wedge the outbox forever). `AccessTokenSource` is the
-  "valid token, refreshing if needed" the socket asks for.
+  "valid token, refreshing if needed" the socket asks for. Since 2026-09 *rejected* means exactly a
+  `401 SESSION_INVALID` from `/auth/refresh`; a 429, 5xx, timeout or even a 400 is "unreachable",
+  retried once after 2 s and otherwise left to the next request — and `SecureSessionStore.save`
+  writes the refresh token before the access token, so a kill between the two writes cannot strand a
+  retired token (`08_OPERATIONS.md` §3c).
 - **Send path.** The outbox emits `SentMessage` from the POST response and `chatMessagesProvider`
   merges it, so a sent message appears the instant the server accepts it even with the socket down
   (it used to vanish: bubble removed, echo never came). Outbox retries on a timer with backoff, shows
@@ -497,12 +554,14 @@ change list.
   (`_DeliveryMarker` in `chat_providers.dart`) when a chat's unread rises on the device — the second
   grey check no longer depends on FCM being configured/allowed/unmuted.
 - **Push.** Server-side `activeChatId` suppression removed from both the unread increment and the
-  push (`sendMessage`); the app's in-app banner keeps the local check. `push.ts` gained
+  push (`sendMessage`); the app's own foreground system notification keeps the local check
+  (`08_OPERATIONS.md` §3b). `push.ts` gained
   `PushOptions` (channel, per-chat tag, per-recipient badge, `contentAvailable`) and
   `sendBadgeUpdate` (iOS badge-only correction after a read). Admin-side pushes are titled by the
   customer's name. A notification tap opens the thread (`listenNotificationTaps`: cold start via
   `getInitialMessage`, background via `onMessageOpenedApp` — neither was handled). Android:
-  `chat_messages` channel at IMPORTANCE_HIGH created in `MainActivity.kt` + manifest default. iOS:
+  `chat_messages` and `announcements` channels at IMPORTANCE_HIGH created in `MainActivity.kt`
+  (`chat_messages` is the manifest default). iOS:
   `Runner.entitlements` (`aps-environment`) registered in the Xcode project and
   `UIBackgroundModes: remote-notification` — without the entitlement no push could ever arrive on
   iOS. Still needed outside the repo: APNs key in the Firebase project, Push capability on the App ID.
@@ -560,7 +619,9 @@ behavior stays traceable to a decision, same as the phases above.
   `tests/interaction.batch.test.ts` (accumulation across flushes + unknown-postId skip); 34/34 server
   tests pass.
 - **Search is a shuffled discovery surface.** `searchablePostsProvider` shuffles the merged feed+reels
-  once per session (stable until pull-to-refresh). Tapping a result no longer opens the single-post
+  once per session (stable until pull-to-refresh). Since `/feed` carries reels too, the two batches are
+  merged by id first (`mergeUniquePosts`) — `/reels` is kept only so reel depth stays ~100 when the
+  recent-100 feed window is photo-heavy. Tapping a result no longer opens the single-post
   detail screen — it opens a **shuffled, continuously-scrolling pager of that media type**, seeded to the
   tapped item: `SearchPostsPagerScreen` for images/carousels, `SearchReelsPagerScreen` for reels
   ("posts and reels, separately"), both reusing the grid's shuffled order.

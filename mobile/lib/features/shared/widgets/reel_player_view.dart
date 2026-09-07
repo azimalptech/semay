@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,11 +9,13 @@ import '../../../core/format.dart';
 import '../../../core/interaction_buffer.dart';
 import '../../../core/l10n.dart';
 import '../../../core/media_cache.dart';
+import '../../../core/shell_tab.dart';
 import '../../../core/theme.dart';
 import '../../../services/auth_service.dart';
 import '../../../services/chat_service.dart';
 import '../../../services/posts_service.dart';
 import '../post_interaction_providers.dart';
+import '../view_dwell.dart';
 import 'confirm_delete_dialog.dart';
 import 'double_tap_like_overlay.dart';
 import 'edit_caption_dialog.dart';
@@ -49,13 +49,21 @@ class ReelPlayerView extends ConsumerStatefulWidget {
     required this.postId,
     required this.post,
     required this.isActive,
+    this.visible = true,
     this.onClose,
     this.initialPosition,
   });
 
   final String postId;
   final Map<String, dynamic> post;
+  // This reel is its pager's current page.
   final bool isActive;
+  // The pager itself is showing: the Reels tab settled and uncovered
+  // (reelsTabSettledProvider), a pushed pager's route on screen. Separate
+  // from [isActive] because the two come back differently — scrolling to a
+  // reel starts it from 0, a tab or route returning resumes it where it
+  // paused. True by default for a host with no such gate of its own.
+  final bool visible;
   final VoidCallback? onClose;
   // Set when opened from a reel already mid-playback elsewhere (the feed's
   // in-place autoplay tile) so this full-screen player picks up from the
@@ -80,34 +88,33 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
   // A reel has no separate "small inline card vs. full detail view" split
   // the way an image post does (Home's feed tile vs. PostDetailScreen) —
   // it's already full-screen everywhere it appears, dedicated Reels tab
-  // included — so "detail view only" for view-counting purposes means
-  // "this reel is the active/playing one", tracked via widget.isActive
-  // rather than a fixed screen. Same 2s-dwell-or-liked-or-zoomed signal as
+  // included — so "on screen" for view-counting purposes means "this reel
+  // is the active/playing one", tracked via widget.isActive rather than a
+  // fixed screen. Same dwell-or-liked-or-zoomed signal as
   // ImagePostDetailContent otherwise.
-  Timer? _viewTimer;
-  bool _viewRecorded = false;
+  late final ViewDwell _viewDwell;
+  // Set when the app left the foreground mid-playback (or a reel became
+  // active while it was away), so the resume on return is limited to reels
+  // that would otherwise be playing — one the user paused by hand stays
+  // paused. Cleared whenever the reel plays, or is found already paused on
+  // the way out, so a reel that went active while the app was away can't
+  // leave it stale and override a later hand pause.
+  bool _pausedForBackground = false;
+
+  bool get _showing => widget.isActive && widget.visible;
 
   @override
   void initState() {
     super.initState();
+    _viewDwell = ViewDwell(
+      () => ref.read(postsServiceProvider).recordView(widget.postId),
+      inForeground: ref.read(appInForegroundProvider),
+    );
     final url = (widget.post['mediaUrls'] as List<dynamic>? ?? [])
         .cast<String>()
         .firstOrNull;
     if (url != null) _loadVideo(url);
-    if (widget.isActive) _startViewTimer();
-  }
-
-  void _startViewTimer() {
-    _viewTimer?.cancel();
-    if (_viewRecorded) return;
-    _viewTimer = Timer(const Duration(seconds: 2), _recordView);
-  }
-
-  void _recordView() {
-    _viewTimer?.cancel();
-    if (_viewRecorded) return;
-    _viewRecorded = true;
-    ref.read(postsServiceProvider).recordView(widget.postId);
+    if (_showing) _viewDwell.start();
   }
 
   // Caching the file (not just streaming it via .networkUrl) makes a
@@ -136,7 +143,7 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
       );
       if (!mounted || _video != vc) return;
     }
-    if (widget.isActive) vc.play();
+    if (_showing) _playIfInForeground(vc);
     setState(() {});
   }
 
@@ -144,25 +151,44 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
     final video = _video;
     if (video == null) return;
     video.seekTo(Duration.zero);
-    video.play();
+    _playIfInForeground(video);
     setState(() {});
+  }
+
+  // Every autoplay path (initialised, scrolled to, tab settled) goes through
+  // here so none of them starts audio while the app is off screen; the
+  // foreground listener in build picks the reel up when the app returns.
+  void _playIfInForeground(VideoPlayerController video) {
+    if (ref.read(appInForegroundProvider)) {
+      _pausedForBackground = false;
+      video.play();
+    } else {
+      _pausedForBackground = true;
+    }
   }
 
   @override
   void didUpdateWidget(covariant ReelPlayerView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.isActive && !oldWidget.isActive) {
-      _startViewTimer();
-    } else if (!widget.isActive && oldWidget.isActive) {
-      _viewTimer?.cancel();
+    final wasShowing = oldWidget.isActive && oldWidget.visible;
+    if (_showing == wasShowing) return;
+    if (_showing) {
+      _viewDwell.start();
+    } else {
+      _viewDwell.cancel();
     }
     final video = _video;
     if (video == null || !video.value.isInitialized) return;
-    if (widget.isActive && !oldWidget.isActive) {
+    if (!_showing) {
+      video.pause();
+    } else if (oldWidget.isActive) {
+      // The tab settled here again, or the route over it went away: pick up
+      // where it paused.
+      _playIfInForeground(video);
+      setState(() {});
+    } else {
       // Scrolled back into view: fresh watch from the start.
       _restart();
-    } else if (!widget.isActive && oldWidget.isActive) {
-      video.pause();
     }
   }
 
@@ -170,7 +196,7 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
   void dispose() {
     _video?.dispose();
     _replyController.dispose();
-    _viewTimer?.cancel();
+    _viewDwell.cancel();
     super.dispose();
   }
 
@@ -328,9 +354,24 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
     ref.listen<bool>(reelsMutedProvider, (_, isMuted) {
       _video?.setVolume(isMuted ? 0 : 1);
     });
+    ref.listen<bool>(appInForegroundProvider, (_, inForeground) {
+      _viewDwell.inForeground = inForeground;
+      final video = _video;
+      if (video == null || !video.value.isInitialized) return;
+      if (!inForeground) {
+        _pausedForBackground = video.value.isPlaying;
+        if (!_pausedForBackground) return;
+        video.pause();
+      } else {
+        if (!_pausedForBackground) return;
+        _pausedForBackground = false;
+        if (_showing) video.play();
+      }
+      setState(() {});
+    });
     ref.listen(likeStateProvider(widget.postId), (previous, next) {
       if (next.isLiked && (previous == null || !previous.isLiked)) {
-        _recordView();
+        _viewDwell.record();
       }
     });
 
@@ -351,7 +392,7 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
               children: [
                 if (_video?.value.isInitialized ?? false)
                   PinchZoomImage(
-                    onZoomStart: _recordView,
+                    onZoomStart: _viewDwell.record,
                     child: FittedBox(
                       fit: BoxFit.cover,
                       clipBehavior: Clip.hardEdge,

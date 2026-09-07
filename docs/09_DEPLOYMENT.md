@@ -80,6 +80,22 @@ retype it. The ones worth calling out specifically:
   Must be identical in `web-admin/.env.local` — the panel verifies tokens this
   server mints, it doesn't mint its own. Rotating it logs everyone's access
   token out; refresh tokens survive, so clients recover on their own.
+- **`ACCESS_TOKEN_TTL_SECONDS` / `REFRESH_TOKEN_TTL_DAYS` / `REFRESH_REUSE_GRACE_SECONDS`** —
+  sessions last until logout (`08_OPERATIONS.md` §3c). The access JWT is
+  short-lived (900 s) and renewed silently. The refresh token expires only
+  after `REFRESH_TOKEN_TTL_DAYS` (default 730) *without use* — every refresh
+  re-issues it with a fresh window — so this bounds abandoned devices, not how
+  often anyone logs in. A refresh token already rotated away is still accepted
+  for `REFRESH_REUSE_GRACE_SECONDS` (default 60); lowering it brings back the
+  lost-response logout, and 0 disables the grace entirely. **An existing
+  `.env` that still says `REFRESH_TOKEN_TTL_DAYS=30` must be changed to 730 (or
+  the line removed) when this ships** — the file value wins over the default,
+  and 30 silently reinstates the monthly logout. Every `.env` written before
+  2026-09 says 30 (the dev box's did); it is a hard gate in §14.
+- **`RATE_LIMIT_REFRESH_MAX_PER_MIN`** — per-IP cap for `/auth/refresh` and
+  `/auth/logout` (default 600), separate from the 60/min OTP bucket: the
+  panel's single server IP and a NAT'd cell renew far more often than they
+  send OTPs.
 - **`SMS_GATEWAY_URL` / `_USER` / `_PASSWORD`** — required unless
   `OTP_DEV_MODE=true`. Points at a capcom6/sms-gate.app gateway. **Which URL to
   use depends on where the API runs** — see §5b; a remote API must use the Cloud
@@ -322,6 +338,24 @@ Restart the API and read the boot log:
   app/web config saved under the same name; either would otherwise load fine
   and fail every send.
 
+The key is read once, at boot — after placing or replacing it, restart the
+service (§12); a running process keeps whatever it had. Two more places say
+whether push is really on, without reading the boot log:
+
+- Every skipped push logs `push skipped: FCM disabled` with the same reason
+  (`08_OPERATIONS.md` §3b) — `grep "push skipped" LOG_DIR/app.*.log` on a
+  server that has been sending chat messages or broadcasts.
+- The panel's *Broadcast* page: the API answers with `pushEnabled`, and when it
+  is false the form shows an amber warning with the reason under "Sent: N".
+  "Sent" counts in-app inbox rows, not pushes — with push off, users see the
+  broadcast only in the in-app list on their next open, and nothing pops.
+
+If the boot log says enabled and a phone still gets nothing: the device must
+have a row in `user_fcm_tokens` (none = the app never registered — Android 13+
+notification permission denied, or the token sync failed), and on Android the
+app's "Messages" and "Announcements" channels must be enabled in system
+settings.
+
 The Admin SDK talks to the FCM HTTP v1 API. The legacy Cloud Messaging API and
 its server key are deprecated and disabled in the project — leave them so; the
 server never needs a server key.
@@ -485,11 +519,21 @@ The day-to-day loop once the service is already installed:
 cd server
 git pull
 npm install                    # only if dependencies changed
-npm run prisma:deploy          # only if there are new migrations
-npm run build
-net stop "semayapi.exe" && net start "semayapi.exe"   # Administrator shell
+npm run build                  # the running service keeps serving the OLD build meanwhile
+net stop "semayapi.exe"                                # Administrator shell
+npm run prisma:deploy          # only if there are new migrations — with the service STOPPED
+net start "semayapi.exe"
 curl http://localhost:8080/health/ready                # confirm it came back
 ```
+
+Build first, then stop, migrate, start: the old build must never serve on the
+new schema. It does not know the new columns, so a `NOT NULL` column without a
+database default (`sessions.familyId`, added by `sessions_until_logout`) gets
+no value from it — `''` on a non-strict MySQL, which would have merged every
+login made in that window into one cross-user family (`08_OPERATIONS.md` §3c
+has the guard that now contains it), or a failed INSERT on a strict one, i.e.
+every login and refresh 500s until the restart. Building before the stop
+keeps the gap to the few seconds the migration and the restart take.
 
 If `schema.prisma` changed, `web-admin` needs its mirrored copy refreshed too
 — its own `npm run dev` / `npm run build` calls `sync-schema.mjs`
@@ -513,6 +557,12 @@ npm run build     # runs sync-schema.mjs first, then next build
 npm start
 ```
 
+The panel's session follows the API's rules (`08_OPERATIONS.md` §3c): it lasts
+until the Logout button, refreshed silently by `src/proxy.ts` behind a 400-day
+`refresh_token` cookie. If the API is down when the access token expires, the
+protected pages show a "Reconnecting…" 503 that retries itself — that is not a
+logout, and nothing needs re-entering once the API is back.
+
 ## 14. Before this serves real users
 
 Carried over from `08_OPERATIONS.md` §7b — check these off before real launch,
@@ -523,7 +573,14 @@ not just real testing:
       not enough.
 - [ ] Real `serviceAccount.json` in place for FCM (§5d) — the boot log must say
       `FCM push enabled` for project `semay-b57ee`; `FCM push is DISABLED`
-      means push is silently off, and the reason next to it says why.
+      means push is silently off, and the reason next to it says why. Then
+      prove it end to end: send a broadcast from the panel — no amber
+      "push disabled" warning, `broadcast push done` in the log with
+      `sent > 0`, and a phone with the app OPEN on the feed shows a heads-up
+      notification with sound on the "Announcements" channel (tap opens the
+      inbox); a chat message sent to that phone while it is on another screen
+      does the same on "Messages" and opens the thread; the thread that is on
+      screen stays quiet.
 - [ ] iOS push chain (§5d): APNs auth key uploaded to the Firebase project
       (Project settings → Cloud Messaging → Apple app configuration) and the
       Push Notifications capability enabled on the `com.semay.semay` App ID. The
@@ -544,6 +601,31 @@ not just real testing:
       without the view jumping; as a store admin send a gallery photo — it
       must appear at once with a progress ring, then double-tick; a photo sent
       in airplane mode must go out by itself when signal returns.
+- [ ] **Gate — `REFRESH_TOKEN_TTL_DAYS` in the deployed `server/.env` is 730
+      or absent.** The file value wins over the code default, and the value
+      every `.env` written before 2026-09 carries (30) silently reinstates the
+      monthly logout the whole session change exists to remove. Check with
+      `findstr REFRESH_TOKEN_TTL_DAYS .env` on the server before starting the
+      new build, and again by reading `expiresAt` on a fresh login's
+      `sessions` row (≈ two years out, not one month).
+- [ ] Sessions until logout (`08_OPERATIONS.md` §3c): on a phone, use the app
+      past the access-token TTL, toggle airplane mode during a refresh, and
+      force-kill/relaunch — no login screen until Sign out, and Sign out must
+      revoke the server rows. (A kill that lands mid-refresh, after the server
+      rotated but before the phone stored the new pair, survives only a
+      relaunch inside the 60 s grace; later than that the phone is logged out
+      once, by design — the replayed token is a replay.) In the panel, open
+      three tabs, wait 15+ minutes, reload all three — all stay signed in and
+      the API log shows one `/auth/refresh` per burst; stop the API and reload
+      — "Reconnecting…", not `/login`; Logout, then a stale tab's next
+      navigation lands on `/login`.
+- [ ] Chat delete hides history (docs/07 Phase 5, `hideChat`): the API can go
+      first, but the app build carrying `ChatMessagesNotifier`'s cutoff/cache
+      handling must be in the stores before the "deleted history never comes
+      back" promise is made to users — an older build still paints its own
+      cached rows around the next reply until it updates. On a phone: delete a
+      thread with 200+ messages, have the store reply quoting an old message,
+      reopen — only the reply, without the quote excerpt, and no older page.
 - [ ] On-device matrix tested, including the offline-outbox replay loop
       (airplane mode → send → restore signal → exactly one message lands).
 - [ ] `JWT_SECRET` rotated away from the development value, **and** the

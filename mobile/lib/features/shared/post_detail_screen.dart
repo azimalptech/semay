@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,11 +9,13 @@ import '../../core/app_icon.dart';
 import '../../core/format.dart';
 import '../../core/interaction_buffer.dart';
 import '../../core/l10n.dart';
+import '../../core/shell_tab.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/posts_service.dart';
 import '../reels/reels_screen.dart' show globalReelsProvider;
 import 'post_interaction_providers.dart';
+import 'view_dwell.dart';
 import 'widgets/confirm_delete_dialog.dart';
 import 'widgets/double_tap_like_overlay.dart';
 import 'widgets/edit_caption_dialog.dart';
@@ -156,7 +156,8 @@ class _ReelPagerState extends ConsumerState<_ReelPager> {
             itemBuilder: (context, index) => ReelPlayerView(
               postId: entries[index].key,
               post: entries[index].value,
-              isActive: index == _activeIndex && _tabVisible,
+              isActive: index == _activeIndex,
+              visible: _tabVisible,
               onClose: widget.onClose,
               // Only the specific reel that was tapped mid-playback resumes
               // from that frame — swiping to any other reel from here still
@@ -200,31 +201,27 @@ class ImagePostDetailContent extends ConsumerStatefulWidget {
 
 class _ImagePostDetailContentState
     extends ConsumerState<ImagePostDetailContent> {
-  Timer? _viewTimer;
-  bool _viewRecorded = false;
+  // The dwell is the baseline signal; record() also fires early (and
+  // disarms it) the instant they like or pinch-zoom — see the isLiked listen
+  // below and PinchZoomImage's onZoomStart. The feed card runs the same
+  // dwell, so opening a post from Home usually finds it already counted for
+  // this window — InteractionBuffer dedupes that.
+  late final ViewDwell _viewDwell;
 
   @override
   void initState() {
     super.initState();
-    // 2s dwell is the baseline signal; _recordView also fires early (and
-    // cancels this) the instant they like or pinch-zoom — see the isLiked
-    // listen below and PinchZoomImage's onZoomStart. Detail-view only, by
-    // product decision — a post merely scrolling past in the main feed
-    // never counts, no matter how long it's on screen there.
-    _viewTimer = Timer(const Duration(seconds: 2), _recordView);
+    _viewDwell = ViewDwell(
+      () => ref.read(postsServiceProvider).recordView(widget.postId),
+      inForeground: ref.read(appInForegroundProvider),
+    );
+    _viewDwell.start();
   }
 
   @override
   void dispose() {
-    _viewTimer?.cancel();
+    _viewDwell.cancel();
     super.dispose();
-  }
-
-  void _recordView() {
-    _viewTimer?.cancel();
-    if (_viewRecorded) return;
-    _viewRecorded = true;
-    ref.read(postsServiceProvider).recordView(widget.postId);
   }
 
   @override
@@ -234,8 +231,11 @@ class _ImagePostDetailContentState
     final s = ref.watch(l10nProvider);
     ref.listen(likeStateProvider(postId), (previous, next) {
       if (next.isLiked && (previous == null || !previous.isLiked)) {
-        _recordView();
+        _viewDwell.record();
       }
+    });
+    ref.listen<bool>(appInForegroundProvider, (_, inForeground) {
+      _viewDwell.inForeground = inForeground;
     });
     final mediaUrls = (post['mediaUrls'] as List<dynamic>? ?? [])
         .cast<String>();
@@ -315,7 +315,7 @@ class _ImagePostDetailContentState
               children: [
                 for (final url in mediaUrls)
                   PinchZoomImage(
-                    onZoomStart: _recordView,
+                    onZoomStart: _viewDwell.record,
                     child: CachedNetworkImage(imageUrl: url, fit: BoxFit.cover),
                   ),
               ],

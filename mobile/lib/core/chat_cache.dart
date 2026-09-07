@@ -212,6 +212,39 @@ class ChatCache {
     }
   }
 
+  /// Everything cached for one thread. Called the moment this side deletes
+  /// the chat: the server will only ever return rows newer than that again,
+  /// and a cached older row would otherwise be painted on the next open —
+  /// and kept, since a merge treats rows older than the server's window as
+  /// legitimate history (ChatMessagesNotifier._mergeWindow).
+  Future<void> clearMessages(String chatId) async {
+    try {
+      final db = await _open();
+      if (db == null) return;
+      await db.delete('messages', where: 'chat_id = ?', whereArgs: [chatId]);
+    } catch (_) {
+      /* best-effort */
+    }
+  }
+
+  /// Drops rows at or below this side's history cutoff (the chat doc's
+  /// hiddenBy*UpToId). The delete may have happened on this account's other
+  /// device, so the cache learns of it from the chat doc, not from a local
+  /// action.
+  Future<void> pruneMessagesUpTo(String chatId, int cutoffId) async {
+    try {
+      final db = await _open();
+      if (db == null) return;
+      await db.delete(
+        'messages',
+        where: 'chat_id = ? AND id <= ?',
+        whereArgs: [chatId, cutoffId],
+      );
+    } catch (_) {
+      /* best-effort */
+    }
+  }
+
   /// Logout. The owner check would wipe on the next login anyway; this just
   /// does it now so nothing of the old session sits on disk in between.
   Future<void> clear() async {

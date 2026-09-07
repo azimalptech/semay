@@ -136,19 +136,27 @@ model StoreAdmin {
 
 // Opaque refresh session (hashed). Fast path = short-lived access JWT verified
 // locally; slow path = this table looked up per sensitive route (checkRevoked).
+// One row per refresh token. A login creates a family's root row; every
+// /auth/refresh adds a row to the same family and marks the presented one
+// rotated (still accepted for a short grace — auth/session.ts). Logout revokes
+// the whole family. Expiry slides: each new row gets a fresh window, so a row
+// only lapses on a device that never came back.
 model Session {
   id         String    @id @default(uuid())
   userId     String    @db.VarChar(36)
+  familyId   String    @default(uuid()) @db.VarChar(36) // the login's root row id, shared by every rotation/sibling
   tokenHash  String    @unique @db.VarChar(64) // sha256 hex of the opaque refresh token
   deviceInfo String?   @db.VarChar(255)
   createdAt  DateTime  @default(now())
   lastUsedAt DateTime  @default(now())
-  expiresAt  DateTime
-  revokedAt  DateTime?
+  expiresAt  DateTime  // issue time + REFRESH_TOKEN_TTL_DAYS; dead past this
+  rotatedAt  DateTime? // superseded by a refresh; presentable for REFRESH_REUSE_GRACE_SECONDS after
+  revokedAt  DateTime? // explicit end (logout, family-wide) — never presentable again
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([familyId])
   @@map("sessions")
 }
 
@@ -241,15 +249,18 @@ model Post {
 
   @@index([storeId, createdAt])
   @@index([type, createdAt]) // a store's posts filtered by type; /reels (single type)
-  // The global /feed — the app's home screen and hottest query — filters
-  // `type IN ('image','carousel')` and orders by createdAt. The composite index
-  // above CANNOT serve that: it orders by createdAt only *within* one type, so
-  // spanning two types made MariaDB abandon the index entirely and fall back to
-  // a full table scan plus a filesort of every matching row. Measured on 300k
-  // posts: 135ms and growing linearly, vs 0.2ms with this index (it walks
-  // createdAt DESC and filters out reels as it goes, touching ~30 rows to
-  // return 20). Posts are read constantly and written rarely, so the extra
-  // write cost is the right trade.
+  // The global /feed — the app's home screen and hottest query — is ORDER BY
+  // createdAt DESC over every type with no filter (reels interleave with
+  // photos), served directly by this index: rows=20, Using index, no filesort.
+  // It was added when /feed still filtered `type IN ('image','carousel')`,
+  // which the composite index above CANNOT serve: it orders by createdAt only
+  // *within* one type, so spanning two made MariaDB abandon the index entirely
+  // and fall back to a full table scan plus a filesort of every matching row —
+  // measured on 300k posts: 135ms and growing linearly, vs 0.2ms with this
+  // index. The filter is gone (it was the regression that hid reels from the
+  // feed) and the unfiltered walk is cheaper still; the composite index still
+  // serves /feed?type=, /reels and /stores/:id/posts?type=. Posts are read
+  // constantly and written rarely, so the extra write cost is the right trade.
   @@index([createdAt])
   @@map("posts")
 }
@@ -390,6 +401,16 @@ model Chat {
   typingAdminAt   DateTime?
   hiddenByUserAt  DateTime?
   hiddenByAdminAt DateTime?
+  // History cutoff for a per-side hide: the newest messages.id that existed
+  // when that side last deleted the chat. Rows with id <= this are invisible to
+  // that side (thread, snapshot, paging, receipts, reply quoting) although they
+  // stay in the table for the other participant. Keyed by id, not by
+  // hiddenBy*At vs createdAt: ids are the ordering/paging key everywhere else,
+  // and two `new Date()`s from different API processes can tie or cross.
+  // NULL = nothing hidden below — deliberately not backfilled, so chats deleted
+  // before this column existed keep their list-only hide.
+  hiddenByUserUpToId  BigInt?
+  hiddenByAdminUpToId BigInt?
   mutedByUser     Boolean   @default(false)
   mutedByAdmin    Boolean   @default(false)
   createdAt       DateTime  @default(now())

@@ -17,7 +17,7 @@ import {
 //   stories   — every story ever posted stayed forever, along with its image or
 //               video file, even though each one is only visible for 24h. This is
 //               the highest-churn media in the app and by far the biggest leak.
-//   sessions  — one row per login, expiring after 30 days but never deleted.
+//   sessions  — one row per refresh (rotation retires the old row), never deleted.
 //   otp_codes — one row per phone; bounded, but stale rows serve no purpose.
 //
 // The Firestore design had a scheduled Cloud Function for this (see
@@ -100,12 +100,20 @@ async function reapExpiredStories(log: FastifyBaseLogger): Promise<void> {
 }
 
 async function reapDeadSessions(log: FastifyBaseLogger): Promise<void> {
-  // Revoked rows are kept a while so a replayed old refresh token still hits an
-  // explicit "revoked" row (401) rather than silently missing.
-  const revokedCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  // A live row — not rotated, not revoked, not past its sliding expiry — is
+  // never touched, however old: sessions last until logout, and "old" only
+  // means the device has been quiet. Retired rows (rotated away or revoked)
+  // are kept 7 days, far longer than the reuse grace, so a replayed token still
+  // hits an explicit dead row (401) rather than silently missing.
+  const now = new Date();
+  const retiredCutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const { count } = await prisma.session.deleteMany({
     where: {
-      OR: [{ expiresAt: { lte: new Date() } }, { revokedAt: { lte: revokedCutoff } }],
+      OR: [
+        { expiresAt: { lte: now } },
+        { revokedAt: { lte: retiredCutoff } },
+        { rotatedAt: { lte: retiredCutoff } },
+      ],
     },
   });
   if (count > 0) log.info({ sessions: count }, "reaped dead sessions");

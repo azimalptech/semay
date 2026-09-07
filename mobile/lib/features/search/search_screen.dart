@@ -12,9 +12,11 @@ import '../shared/widgets/error_state_view.dart';
 
 /// A single batch of recent posts/reels, filtered client-side by caption as
 /// the user types — no substring/full-text query on the server, and this
-/// project's scale doesn't warrant standing up a search engine for it. The
-/// feed endpoint only returns image/carousel; /reels returns reels — merge
-/// both so captions across every post type are searchable.
+/// project's scale doesn't warrant standing up a search engine for it. /feed
+/// carries every post type (reels included, in date order); /reels is still
+/// fetched alongside it so reel depth stays ~100 even when the recent-100
+/// feed window is photo-heavy — which means a recent reel arrives from BOTH
+/// calls and has to be collapsed to one entry (see [mergeUniquePosts]).
 ///
 /// The merged list is **shuffled once** here (not newest-first): the search
 /// grid is a discovery surface, so it shows a random mix before you type, and
@@ -28,9 +30,24 @@ final searchablePostsProvider = FutureProvider<List<PostDoc>>((ref) async {
     api.get('/feed', query: {'limit': 100}),
     api.get('/reels', query: {'limit': 100}),
   ]);
-  return [...postsFromResponse(results[0]), ...postsFromResponse(results[1])]
-    ..shuffle();
+  return mergeUniquePosts([
+    postsFromResponse(results[0]),
+    postsFromResponse(results[1]),
+  ])..shuffle();
 });
+
+/// Concatenates the batches keeping the first occurrence of each post id.
+/// Without this every reel inside the feed's recent window would be a
+/// duplicate tile in the grid and a duplicate page in the reels pager.
+List<PostDoc> mergeUniquePosts(Iterable<List<PostDoc>> batches) {
+  final byId = <String, PostDoc>{};
+  for (final batch in batches) {
+    for (final doc in batch) {
+      byId.putIfAbsent(doc.id, () => doc);
+    }
+  }
+  return byId.values.toList();
+}
 
 /// Every active store, filtered client-side by name as the user types — same
 /// reasoning as searchablePostsProvider. Stores are a small, bounded set.
@@ -210,9 +227,16 @@ class _PostResultTile extends StatelessWidget {
     final thumbnailUrl = data['thumbnailUrl'] as String? ?? '';
     final mediaUrls = (data['mediaUrls'] as List<dynamic>? ?? [])
         .cast<String>();
-    final imageUrl = type == 'reel' && thumbnailUrl.isNotEmpty
+    // A reel's mediaUrls[0] is the .mp4 itself — never a poster for
+    // CachedNetworkImage, which can only paint a broken-image frame for it.
+    // Most reels have thumbnailUrl '' (the web composer generates none), so
+    // they get the same dark poster the feed card draws (post_card.dart).
+    final imageUrl = type == 'reel'
         ? thumbnailUrl
         : (mediaUrls.isNotEmpty ? mediaUrls.first : '');
+    final poster = type == 'reel'
+        ? const ColoredBox(color: Colors.black)
+        : ColoredBox(color: Colors.grey.shade300);
 
     return GestureDetector(
       // Open the shuffled pager for this media type (posts vs reels
@@ -224,9 +248,15 @@ class _PostResultTile extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           if (imageUrl.isNotEmpty)
-            CachedNetworkImage(imageUrl: imageUrl, fit: BoxFit.cover)
+            CachedNetworkImage(
+              imageUrl: imageUrl,
+              fit: BoxFit.cover,
+              // A dead thumbnail file gets the poster too, not the default
+              // broken-image icon in the middle of the grid.
+              errorWidget: (_, _, _) => poster,
+            )
           else
-            Container(color: Colors.grey.shade300),
+            poster,
           if (type == 'reel')
             const Positioned(
               top: 4,

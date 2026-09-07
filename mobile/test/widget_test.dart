@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:semay/core/l10n.dart';
 import 'package:semay/features/auth/phone_entry_screen.dart';
 
 void main() {
@@ -15,7 +16,9 @@ void main() {
       ),
     );
 
-    expect(find.textContaining('phone number'), findsOneWidget);
+    // The product ships tk/ru only (no English); with no profile loaded the
+    // l10nProvider falls back to Turkmen, so assert the copy that renders.
+    expect(find.text(const S(false).enterPhoneToStart), findsOneWidget);
     expect(find.byType(TextField), findsOneWidget);
   });
 }

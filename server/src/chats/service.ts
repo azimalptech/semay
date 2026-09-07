@@ -1,4 +1,11 @@
-import { Prisma, type Chat, type Message, type MessageMediaType, type SenderRole } from "@prisma/client";
+import {
+  Prisma,
+  type Chat,
+  type Message,
+  type MessageMediaType,
+  type Role,
+  type SenderRole,
+} from "@prisma/client";
 
 import { prisma } from "../db.js";
 import { parseBigIntId } from "../lib/ids.js";
@@ -30,14 +37,27 @@ export class ChatForbiddenError extends Error {
   }
 }
 
-/** Which side of the conversation `auth` is on for `chat` — null if neither
+/** Whoever is asking for a chat action — the access token's claims on a route,
+ * the DB-refreshed ChannelAuthCtx on a socket subscribe. One shape so both
+ * paths resolve the side through the same function and can never disagree
+ * about what a subscriber is allowed to see. */
+export interface ChatParticipant {
+  userId: string;
+  role: Role;
+  storeIds: string[];
+}
+
+/** Which side of the conversation `who` is on for `chat` — null if neither
  * (used everywhere a route needs to authorize a chat action). Superadmin
  * counts as the admin side (read/moderate any chat, same as other admin-only
  * surfaces in this codebase). */
-function resolveChatSide(chat: Chat, auth: AccessTokenPayload): ChatSide | null {
-  if (auth.sub === chat.userId) return "user";
-  if (auth.role === "superadmin") return "admin";
-  if (auth.role === "admin" && auth.storeIds.includes(chat.storeId)) return "admin";
+export function resolveChatSide(
+  chat: Pick<Chat, "userId" | "storeId">,
+  who: ChatParticipant
+): ChatSide | null {
+  if (who.userId === chat.userId) return "user";
+  if (who.role === "superadmin") return "admin";
+  if (who.role === "admin" && who.storeIds.includes(chat.storeId)) return "admin";
   return null;
 }
 
@@ -47,9 +67,48 @@ export async function getChatForParticipant(
 ): Promise<{ chat: Chat; side: ChatSide }> {
   const chat = await prisma.chat.findUnique({ where: { id: chatId } });
   if (!chat) throw new ChatNotFoundError();
-  const side = resolveChatSide(chat, auth);
+  const side = resolveChatSide(chat, { userId: auth.sub, role: auth.role, storeIds: auth.storeIds });
   if (!side) throw new ChatForbiddenError();
   return { chat, side };
+}
+
+/** Exclusive lower bound of what `side` may still see of this chat: the newest
+ * message id that existed when that side last deleted it (hideChat), or null
+ * when nothing is hidden. Every participant-facing read of messages composes
+ * with this — thread, paging, socket snapshot, receipts, reply quoting. There
+ * is no unfiltered participant read: superadmin resolves to the admin side
+ * (resolveChatSide), so its delete writes the store's cutoff and a store
+ * admin's delete bounds its reads in turn — the same "superadmin is the
+ * store's side" rule the list channels and DELETE already follow. */
+export function historyCutoff(chat: Chat, side: ChatSide): bigint | null {
+  return side === "user" ? chat.hiddenByUserUpToId : chat.hiddenByAdminUpToId;
+}
+
+/** `rows` as `side` may see them: a quote of a hidden row is blanked. The other
+ * side can still reply to a message this side deleted, and the reply carries
+ * that message's text (replyToText) and id — the hidden history, verbatim, on
+ * a row that is itself above the cutoff and therefore returned. Projected per
+ * reader, never written back: the row keeps its quote for the side that can
+ * see the original. The live upsert on chat:{id}:messages is one frame for
+ * both sides and cannot be projected here, so the phone applies the same mask
+ * when it knows the cutoff (chat_providers.dart). */
+function withoutHiddenQuotes(rows: Message[], cutoff: bigint | null): Message[] {
+  if (cutoff === null) return rows;
+  return rows.map((m) =>
+    m.replyToMessageId !== null && m.replyToMessageId <= cutoff
+      ? { ...m, replyToMessageId: null, replyToText: null, replyToSenderRole: null }
+      : m
+  );
+}
+
+/** WHERE fragment for the rows of this chat that `side` may still see. A
+ * caller that also constrains `id` (a paging cursor, a quoted message id)
+ * must combine it with AND, never spread it: two `id` keys in one object are
+ * not merged, the later one silently replaces the earlier — which turned
+ * "this exact quoted message, if visible" into "any visible message". */
+function visibleWhere(chat: Chat, side: ChatSide): Prisma.MessageWhereInput {
+  const cutoff = historyCutoff(chat, side);
+  return { chatId: chat.id, ...(cutoff !== null ? { id: { gt: cutoff } } : {}) };
 }
 
 // Deterministic id keeps createOrGetChat a plain idempotent create — no
@@ -176,9 +235,12 @@ export async function sendMessage(
     // read back the first 512 chars — and message ids are sequential BIGINTs,
     // so every private conversation in the system could be walked by simply
     // incrementing the id. Scoping the lookup to this chat makes an
-    // out-of-chat id return nothing, exactly like a deleted one.
+    // out-of-chat id return nothing, exactly like a deleted one — and
+    // visibleWhere extends "this chat" to "this chat as the sender may still
+    // see it": a message below their own hide cutoff is gone for them, so it
+    // cannot be quoted back into view either.
     const replyTo = await prisma.message.findFirst({
-      where: { id: requestedReplyTo, chatId: chat.id },
+      where: { AND: [{ id: requestedReplyTo }, visibleWhere(chat, side)] },
       select: { id: true, text: true, senderRole: true },
     });
     if (replyTo) {
@@ -336,7 +398,10 @@ async function sendChatPush(
   // rest is display. Muting is honoured here and only here: the unread counter
   // and the realtime fan-out above are unaffected by mute, exactly like a
   // muted WhatsApp chat still counts and still updates, it just stays quiet.
-  if (!isPushEnabled()) return; // no point aggregating badges nobody will receive
+  // No isPushEnabled() gate here, on purpose: a push-less server must still
+  // run this through sendPushToUsers so the drop is logged ("push skipped:
+  // FCM disabled") — an early return used to leave chat, the highest-volume
+  // push, invisible in the log. The lookups it costs are the normal ones.
   const data = {
     type: "chat_message",
     chatId: chat.id,
@@ -384,20 +449,25 @@ async function syncLauncherBadges(chat: Chat, side: ChatSide): Promise<void> {
   await sendBadgeUpdate(await unreadBadgeForAdmins(admins.map((a) => a.userId)));
 }
 
+/** Newest-first window of what `side` may see. The hide cutoff applies to the
+ * first page and to `?before=` paging alike, so scroll-back simply comes up
+ * short (or empty) at the cutoff — the client's "short page = no more" rule
+ * needs no special case. */
 export async function listMessages(
-  chatId: string,
+  chat: Chat,
+  side: ChatSide,
   opts: { before?: string; limit: number }
 ): Promise<Message[]> {
   // A malformed cursor means "first page", not a 500 — see lib/ids.ts.
   const before = parseBigIntId(opts.before);
-  return prisma.message.findMany({
-    where: {
-      chatId,
-      ...(before !== undefined ? { id: { lt: before } } : {}),
-    },
+  const rows = await prisma.message.findMany({
+    // Two bounds on the same column — the cutoff from below, the cursor from
+    // above — hence AND (see visibleWhere).
+    where: { AND: [visibleWhere(chat, side), before !== undefined ? { id: { lt: before } } : {}] },
     orderBy: { id: "desc" },
     take: opts.limit,
   });
+  return withoutHiddenQuotes(rows, historyCutoff(chat, side));
 }
 
 /** Marks every message from the OTHER side as delivered/read. `read` implies
@@ -411,6 +481,11 @@ export async function markReceipts(
 ): Promise<void> {
   const now = new Date();
   const counterpartRole: SenderRole = side === "user" ? "admin" : "user";
+  // Rows below this side's hide cutoff are not theirs to stamp: the reader
+  // cannot see them, so a "Seen" tick on the other side would be a lie. The
+  // roll-up below carries the same bound so the other side's client skips
+  // exactly the rows the server skipped.
+  const cutoff = historyCutoff(chat, side);
 
   // Count how many rows this receipt actually changes. The message updateMany's
   // `where` already excludes already-read/already-delivered rows, and the chat
@@ -420,7 +495,7 @@ export async function markReceipts(
     prisma.$transaction(async (tx) => {
       const msgs = await tx.message.updateMany({
         where: {
-          chatId: chat.id,
+          ...visibleWhere(chat, side),
           senderRole: counterpartRole,
           ...(status === "read" ? { readAt: null } : { deliveredAt: null }),
         },
@@ -438,7 +513,7 @@ export async function markReceipts(
               await tx.message.aggregate({
                 _max: { id: true },
                 where: {
-                  chatId: chat.id,
+                  ...visibleWhere(chat, side),
                   senderRole: counterpartRole,
                   ...(status === "read" ? { readAt: now } : { deliveredAt: now }),
                 },
@@ -476,7 +551,13 @@ export async function markReceipts(
   // above touched.
   publish(`chat:${chat.id}:messages`, {
     type: "receipts",
-    data: { senderRole: counterpartRole, status, at: now.toISOString(), upToMessageId },
+    data: {
+      senderRole: counterpartRole,
+      status,
+      at: now.toISOString(),
+      upToMessageId,
+      fromMessageId: cutoff?.toString() ?? null,
+    },
   });
   publishChatEverywhere(updatedChat);
 
@@ -506,18 +587,53 @@ export async function setMuted(chat: Chat, side: ChatSide, muted: boolean): Prom
   publish(`chat:${chat.id}`, { type: "upsert", data: updatedChat });
 }
 
-/** Soft-hide for the caller's side only — the other participant still sees
- * it. Reappears automatically on the recipient's next message (see
- * listUserChats/listStoreChats). */
+/** Per-side delete: removes the chat from the caller's list AND everything sent
+ * so far from their thread; the other participant is untouched. No row is ever
+ * deleted — the cutoff written here (hiddenBy*UpToId, see historyCutoff) is
+ * what makes them invisible to this side, and the chat returns to their list
+ * on the next message (listUserChats/listStoreChats) showing only what arrived
+ * after it. Also zeroes this side's unread: a dismissed chat must not keep
+ * counting on the tab badge or the launcher icon.
+ *
+ * Takes the same chats-row X lock sendMessage takes, so a send racing the hide
+ * commits wholly before it (id <= cutoff, hidden) or wholly after (id > cutoff,
+ * visible — and its createdAt is then also >= hiddenAt, so the timestamp list
+ * rule agrees with the id rule). Without the lock MAX(id) could be read while
+ * a larger id was still uncommitted, and that message would surface as "new"
+ * right after the delete. */
 export async function hideChat(chat: Chat, side: ChatSide): Promise<void> {
-  const updatedChat = await prisma.chat.update({
-    where: { id: chat.id },
-    data: side === "user" ? { hiddenByUserAt: new Date() } : { hiddenByAdminAt: new Date() },
-  });
+  const updatedChat = await withRetry(() =>
+    prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM chats WHERE id = ${chat.id} FOR UPDATE`;
+      // null on an empty chat: nothing to hide, and NULL already means that.
+      const newest = (await tx.message.aggregate({ _max: { id: true }, where: { chatId: chat.id } }))
+        ._max.id;
+      const now = new Date();
+      return tx.chat.update({
+        where: { id: chat.id },
+        data:
+          side === "user"
+            ? { hiddenByUserAt: now, hiddenByUserUpToId: newest, unreadByUser: 0 }
+            : { hiddenByAdminAt: now, hiddenByAdminUpToId: newest, unreadByAdmin: 0 },
+      });
+    })
+  );
+
   if (side === "user") {
     publish(`user:${chat.userId}:chats`, { type: "remove", id: chat.id });
   } else {
     publish(`store:${chat.storeId}:chats`, { type: "remove", id: chat.id });
   }
-  void updatedChat;
+  // The thread channel, never the hider's own list (an upsert there would put
+  // back the row just removed): a thread open on the hider's other device
+  // reads the new cutoff from this and drops its rows — see chat_providers.dart.
+  publish(`chat:${chat.id}`, { type: "upsert", data: updatedChat });
+
+  // The unread just zeroed was on the launcher badge too (iOS shows whatever
+  // number the last push carried until told otherwise).
+  if ((side === "user" ? chat.unreadByUser : chat.unreadByAdmin) > 0) {
+    syncLauncherBadges(updatedChat, side).catch(() => {
+      /* best-effort, like push itself */
+    });
+  }
 }

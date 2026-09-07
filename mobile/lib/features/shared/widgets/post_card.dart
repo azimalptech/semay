@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -13,15 +14,16 @@ import '../../../core/interaction_buffer.dart';
 import '../../../core/json_ext.dart';
 import '../../../core/l10n.dart';
 import '../../../core/media_cache.dart';
+import '../../../core/shell_tab.dart';
 import '../../../core/theme.dart';
 import '../../../services/posts_service.dart';
 import '../post_interaction_providers.dart';
+import '../view_dwell.dart';
 import 'confirm_delete_dialog.dart';
 import 'double_tap_like_overlay.dart';
 import 'edit_caption_dialog.dart';
 import 'expandable_text.dart';
 import 'pinch_zoom_image.dart';
-import 'reel_player_view.dart' show reelsMutedProvider;
 import 'send_to_chat_sheet.dart';
 
 /// Post card — Figma frame 195:4299, node 195:4325 (post block).
@@ -52,16 +54,71 @@ class _PostCardState extends ConsumerState<PostCard> {
   // here instead of restarting at 0 — no ValueListenableBuilder attached, so
   // this is just a cheap place to stash the latest position.
   final _reelPosition = ValueNotifier<Duration>(Duration.zero);
+  // True while more than 60% of the media square is on screen — the one
+  // visibility signal for this card, shared by the view dwell below and
+  // the inline reel's autoplay (_FeedReelPlayer listens to it).
+  final _mediaVisible = ValueNotifier<bool>(false);
+  // A card counts as viewed after ViewDwell.threshold on screen, in the feed
+  // just like in the detail view — scrolling past used to never count (an
+  // earlier product decision, since reversed). InteractionBuffer's
+  // 30-minute window still keeps a re-scrolled card from counting twice.
+  late ViewDwell _viewDwell;
+
+  @override
+  void initState() {
+    super.initState();
+    _viewDwell = _newViewDwell();
+  }
+
+  ViewDwell _newViewDwell() => ViewDwell(
+    () => ref.read(postsServiceProvider).recordView(widget.postId),
+    inForeground: ref.read(appInForegroundProvider),
+  );
+
+  @override
+  void didUpdateWidget(PostCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The feed keys its cards by post id; the store's and search's pagers
+    // build by index, so a refresh there can hand this State a different
+    // post. That post gets a dwell of its own — this one may already have
+    // recorded, and the detector (keyed per State) reports no change for a
+    // tile that stayed put — and no stale reel position for the tap-through.
+    if (oldWidget.postId == widget.postId) return;
+    _viewDwell.cancel();
+    _viewDwell = _newViewDwell();
+    if (_mediaVisible.value) _viewDwell.start();
+    _reelPosition.value = Duration.zero;
+  }
 
   @override
   void dispose() {
+    _viewDwell.cancel();
+    _mediaVisible.dispose();
     _reelPosition.dispose();
     super.dispose();
+  }
+
+  void _onMediaVisibilityChanged(VisibilityInfo info) {
+    // VisibilityDetector can deliver one last callback just after this
+    // widget leaves the tree (e.g. a pull-to-refresh removing this card),
+    // arriving after dispose().
+    if (!mounted) return;
+    final visible = info.visibleFraction > 0.6;
+    if (visible == _mediaVisible.value) return;
+    _mediaVisible.value = visible;
+    if (visible) {
+      _viewDwell.start();
+    } else {
+      _viewDwell.cancel();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final postId = widget.postId;
+    ref.listen<bool>(appInForegroundProvider, (_, inForeground) {
+      _viewDwell.inForeground = inForeground;
+    });
     // The feed fetches once (not a live listener — see feed_providers.dart),
     // so widget.post is frozen at load time; overlay postDocProvider's live
     // stream so likesCount (and anything else server-mutated) stays current
@@ -111,91 +168,101 @@ class _PostCardState extends ConsumerState<PostCard> {
           // image is square (393x393 on a 393pt frame), expressed as an
           // AspectRatio so it holds on any screen width rather than pinning a
           // literal 393px that would be wrong on every other device.
-          DoubleTapLikeOverlay(
-            isLiked: isLiked,
-            onLike: () => ref.read(likeStateProvider(postId).notifier).like(),
-            onSingleTap: type == 'reel'
-                ? () {
-                    debugPrint(
-                      'post_card: opening reel $postId at position '
-                      '${_reelPosition.value}',
-                    );
-                    context.push(
-                      '/post/$postId',
-                      extra: _reelPosition.value.inMilliseconds,
-                    );
-                  }
-                : null,
-            child: AspectRatio(
-              aspectRatio: 1,
-              child: Stack(
-                children: [
-                  Positioned.fill(
-                    child: _PostMedia(
-                      postId: postId,
-                      type: type,
-                      mediaUrls: mediaUrls,
-                      thumbnailUrl: thumbnailUrl,
-                      page: _page,
-                      onPageChanged: (i) => setState(() => _page = i),
-                      positionNotifier: _reelPosition,
+          // One detector per card, on the media square, feeding both the view
+          // dwell and (for a reel) the inline player. Keyed per instance, not
+          // per post: the same post can be on screen twice at once (Home feed
+          // under a pushed StorePostsPagerScreen), and visibility_detector
+          // keeps its bookkeeping per key.
+          VisibilityDetector(
+            key: ObjectKey(this),
+            onVisibilityChanged: _onMediaVisibilityChanged,
+            child: DoubleTapLikeOverlay(
+              isLiked: isLiked,
+              onLike: () => ref.read(likeStateProvider(postId).notifier).like(),
+              onSingleTap: type == 'reel'
+                  ? () {
+                      debugPrint(
+                        'post_card: opening reel $postId at position '
+                        '${_reelPosition.value}',
+                      );
+                      context.push(
+                        '/post/$postId',
+                        extra: _reelPosition.value.inMilliseconds,
+                      );
+                    }
+                  : null,
+              child: AspectRatio(
+                aspectRatio: 1,
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: _PostMedia(
+                        postId: postId,
+                        type: type,
+                        mediaUrls: mediaUrls,
+                        thumbnailUrl: thumbnailUrl,
+                        page: _page,
+                        onPageChanged: (i) => setState(() => _page = i),
+                        visible: _mediaVisible,
+                        positionNotifier: _reelPosition,
+                      ),
                     ),
-                  ),
-                  // 426:6026 — pt 12, pb 16, px 12, name pill left / counter right.
-                  Positioned(
-                    top: 12,
-                    left: 12,
-                    right: 12,
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        GestureDetector(
-                          onTap: () => context.push('/store/$storeId'),
-                          child: _StorePill(
-                            name: storeName,
-                            avatarUrl: storeAvatarUrl,
-                          ),
-                        ),
-                        const Spacer(),
-                        if (mediaUrls.length > 1)
-                          _GlassBadge(
-                            borderRadius: 16,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
+                    // 426:6026 — pt 12, pb 16, px 12, name pill left / counter right.
+                    Positioned(
+                      top: 12,
+                      left: 12,
+                      right: 12,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          GestureDetector(
+                            onTap: () => context.push('/store/$storeId'),
+                            child: _StorePill(
+                              name: storeName,
+                              avatarUrl: storeAvatarUrl,
                             ),
-                            child: Text(
-                              '${_page + 1}/${mediaUrls.length}',
-                              style: AppTypography.bodySmall.copyWith(
-                                color: AppColors.textOnPrimary,
+                          ),
+                          const Spacer(),
+                          if (mediaUrls.length > 1)
+                            _GlassBadge(
+                              borderRadius: 16,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 4,
+                              ),
+                              child: Text(
+                                '${_page + 1}/${mediaUrls.length}',
+                                style: AppTypography.bodySmall.copyWith(
+                                  color: AppColors.textOnPrimary,
+                                ),
                               ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                  // 426:6033 — dots sit at y=367 of the 393pt image, i.e. 12pt
-                  // clear of the bottom edge once the 14pt pill is accounted for.
-                  if (mediaUrls.length > 1)
-                    Positioned(
-                      bottom: 12,
-                      left: 0,
-                      right: 0,
-                      child: Center(
-                        child: _GlassBadge(
-                          borderRadius: 24,
-                          padding: const EdgeInsets.all(4),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: _buildCarouselDots(
-                              mediaUrls.length,
-                              _page,
+                    // 426:6033 — dots sit at y=367 of the 393pt image, i.e. 12pt
+                    // clear of the bottom edge once the 14pt pill is accounted for.
+                    if (mediaUrls.length > 1)
+                      Positioned(
+                        bottom: 12,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: _GlassBadge(
+                            borderRadius: 24,
+                            padding: const EdgeInsets.all(4),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: _buildCarouselDots(
+                                mediaUrls.length,
+                                _page,
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -519,6 +586,7 @@ class _PostMedia extends StatelessWidget {
     required this.thumbnailUrl,
     required this.page,
     required this.onPageChanged,
+    required this.visible,
     required this.positionNotifier,
   });
 
@@ -528,6 +596,7 @@ class _PostMedia extends StatelessWidget {
   final String thumbnailUrl;
   final int page;
   final ValueChanged<int> onPageChanged;
+  final ValueNotifier<bool> visible;
   final ValueNotifier<Duration> positionNotifier;
 
   @override
@@ -535,10 +604,17 @@ class _PostMedia extends StatelessWidget {
     if (mediaUrls.isEmpty) return Container(color: AppColors.borderDivider);
 
     if (type == 'reel') {
+      // No fallback to mediaUrls.first here: for a reel that is the .mp4
+      // itself, and handing it to CachedNetworkImage as a poster just paints
+      // a broken-image frame until the video initialises. Most reels arrive
+      // with thumbnailUrl '' (the web composer has no thumbnail generator),
+      // and the feed now serves reels constantly, so the player draws its own
+      // dark poster for that case instead.
       return _FeedReelPlayer(
         postId: postId,
         videoUrl: mediaUrls.first,
-        thumbnailUrl: thumbnailUrl.isNotEmpty ? thumbnailUrl : mediaUrls.first,
+        thumbnailUrl: thumbnailUrl,
+        visible: visible,
         positionNotifier: positionNotifier,
       );
     }
@@ -589,20 +665,29 @@ class _PostMedia extends StatelessWidget {
   }
 }
 
-/// In-feed reel autoplay: plays only while >=60% of the tile is on-screen
-/// (VisibilityDetector), muted/unmuted following the same shared toggle as
-/// the dedicated Reels tab so the setting is consistent app-wide.
+/// In-feed reel autoplay — the square tile a reel row from GET /feed renders
+/// as, sitting between photo posts in date order with the same store pill,
+/// action row and caption as any other card. Plays only while >=60% of the
+/// tile is on-screen ([visible], from PostCard's VisibilityDetector), the
+/// tab it sits in is the settled one and the app is in the foreground —
+/// muted, every time, with the corner speaker unmuting this one tile only:
+/// following the Reels tab's shared toggle meant one unmute there turned
+/// every card's autoplay loud for the rest of the session. Tapping the tile
+/// falls through to PostCard's onSingleTap, which opens the full-screen reel
+/// player at this reel, resuming from [positionNotifier].
 class _FeedReelPlayer extends ConsumerStatefulWidget {
   const _FeedReelPlayer({
     required this.postId,
     required this.videoUrl,
     required this.thumbnailUrl,
+    required this.visible,
     required this.positionNotifier,
   });
 
   final String postId;
   final String videoUrl;
   final String thumbnailUrl;
+  final ValueNotifier<bool> visible;
   final ValueNotifier<Duration> positionNotifier;
 
   @override
@@ -611,31 +696,81 @@ class _FeedReelPlayer extends ConsumerStatefulWidget {
 
 class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
   VideoPlayerController? _video;
-  bool _visible = false;
+  // Set once the file fetch is under way, so the many _syncPlayback
+  // triggers (scroll, tab settle, foreground) start it exactly once.
+  Future<void>? _load;
+  // Which shell tab this card sits in, or null outside the shell (the
+  // store's and search's post pagers are pushed routes) — there only scroll
+  // visibility and app foreground gate playback.
+  int? _shellTab;
+  bool _muted = true;
 
   @override
   void initState() {
     super.initState();
-    _loadVideo();
+    widget.visible.addListener(_onVisibleChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _shellTab = ShellTabScope.maybeIndexOf(context);
+  }
+
+  @override
+  void didUpdateWidget(_FeedReelPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.visible != widget.visible) {
+      oldWidget.visible.removeListener(_onVisibleChanged);
+      widget.visible.addListener(_onVisibleChanged);
+    }
+    // The feed keys its cards by post id, so this element normally lives
+    // and dies with one reel. Belt and braces for an unkeyed host: a
+    // different reel landing here must not keep the previous one's clip
+    // playing under the new post's pill and caption.
+    if (oldWidget.videoUrl != widget.videoUrl) {
+      _dropVideo();
+      _syncPlayback();
+    }
   }
 
   // Caching the file (not just streaming it via .networkUrl) makes a
   // rewatch instant from disk instead of re-downloading — same treatment as
   // the story viewer's video loading.
   Future<void> _loadVideo() async {
-    final file = await MediaCache.instance.getSingleFile(widget.videoUrl);
-    if (!mounted) return;
+    final url = widget.videoUrl;
+    final File file;
+    try {
+      file = await MediaCache.instance.getSingleFile(url);
+    } catch (_) {
+      // A dead URL or a dropped connection keeps the poster; the next
+      // scroll-in tries again instead of leaving this tile black for the
+      // rest of the session. (Not if the host has since moved on to
+      // another reel — that fetch is someone else's.)
+      if (mounted && url == widget.videoUrl) _load = null;
+      return;
+    }
+    // Stale if the host swapped reels while the fetch was in flight, or a
+    // parallel fetch for the same URL (swapped away and back) already won.
+    if (!mounted || _video != null || url != widget.videoUrl) return;
     final vc = VideoPlayerController.file(file);
     _video = vc;
-    vc.setVolume(ref.read(reelsMutedProvider) ? 0 : 1);
+    vc.setVolume(_muted ? 0 : 1);
     // Loops indefinitely — user controls when it stops (scrolling away),
     // not a fixed replay count.
     vc.setLooping(true);
     vc.addListener(_reportPosition);
     await vc.initialize();
     if (!mounted || _video != vc) return;
-    if (_visible) vc.play();
+    _syncPlayback();
     setState(() {});
+  }
+
+  void _dropVideo() {
+    _video?.removeListener(_reportPosition);
+    _video?.dispose();
+    _video = null;
+    _load = null;
   }
 
   // Keeps the parent PostCard's positionNotifier current so tapping through
@@ -650,26 +785,46 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
 
   @override
   void dispose() {
-    _video?.removeListener(_reportPosition);
-    _video?.dispose();
+    widget.visible.removeListener(_onVisibleChanged);
+    _dropVideo();
     super.dispose();
   }
 
-  void _onVisibilityChanged(VisibilityInfo info) {
-    // VisibilityDetector can deliver one last callback just after this
-    // widget leaves the tree (e.g. a pull-to-refresh removing this card),
-    // arriving after dispose() — _video isn't nulled out there, so without
-    // this guard a disposed controller's pause()/play() gets called and
-    // throws.
-    if (!mounted) return;
-    final isVisible = info.visibleFraction > 0.6;
-    if (isVisible == _visible) return;
-    _visible = isVisible;
+  void _onVisibleChanged() {
     final video = _video;
-    if (video == null || !video.value.isInitialized) return;
-    if (isVisible) {
-      // Scrolled back into view: fresh watch from the start.
+    // Scrolled back into view: fresh watch from the start.
+    if (widget.visible.value && video != null && video.value.isInitialized) {
       video.seekTo(Duration.zero);
+    }
+    _syncPlayback();
+  }
+
+  void _toggleMuted() {
+    setState(() => _muted = !_muted);
+    _video?.setVolume(_muted ? 0 : 1);
+  }
+
+  // The one rule for whether this tile plays right now; every input change
+  // (scroll, shell tab settling, app foreground) funnels through here. It
+  // is also what starts the file fetch — only once the tile first qualifies
+  // to play, never on mount: a reel can be 100 MB, the feed's ListView
+  // builds cards past the viewport, and fetching in initState pulled every
+  // reel the user scrolled anywhere near, in full, on mobile data. Safe
+  // before the controller initialises: _loadVideo re-runs it once the file
+  // is ready, so an early "play" is never lost.
+  void _syncPlayback() {
+    final shouldPlay =
+        widget.visible.value &&
+        ref.read(appInForegroundProvider) &&
+        (_shellTab == null || ref.read(settledShellTabProvider) == _shellTab);
+    final video = _video;
+    if (video == null) {
+      if (shouldPlay) _load ??= _loadVideo();
+      return;
+    }
+    if (!video.value.isInitialized) return;
+    if (shouldPlay == video.value.isPlaying) return;
+    if (shouldPlay) {
       video.play();
     } else {
       video.pause();
@@ -678,59 +833,59 @@ class _FeedReelPlayerState extends ConsumerState<_FeedReelPlayer> {
 
   @override
   Widget build(BuildContext context) {
-    final muted = ref.watch(reelsMutedProvider);
-    ref.listen<bool>(reelsMutedProvider, (_, isMuted) {
-      _video?.setVolume(isMuted ? 0 : 1);
-    });
+    ref.listen<bool>(appInForegroundProvider, (_, _) => _syncPlayback());
+    ref.listen<int?>(settledShellTabProvider, (_, _) => _syncPlayback());
 
-    return VisibilityDetector(
-      key: Key('feed-reel-${widget.postId}'),
-      onVisibilityChanged: _onVisibilityChanged,
-      // No onTap on the video area itself — it needs to fall through to the
-      // outer DoubleTapLikeOverlay's onSingleTap, which opens the reel in
-      // the full-screen player. An earlier attempt at tap-to-mute here stole
-      // that tap instead.
-      child: Stack(
-        alignment: Alignment.center,
-        fit: StackFit.expand,
-        children: [
-          if (_video?.value.isInitialized ?? false)
-            PinchZoomImage(
-              child: FittedBox(
-                fit: BoxFit.cover,
-                clipBehavior: Clip.hardEdge,
-                child: SizedBox(
-                  width: _video!.value.size.width,
-                  height: _video!.value.size.height,
-                  child: VideoPlayer(_video!),
-                ),
-              ),
-            )
-          else
-            CachedNetworkImage(
-              imageUrl: widget.thumbnailUrl,
+    // No onTap on the video area itself — it needs to fall through to the
+    // outer DoubleTapLikeOverlay's onSingleTap, which opens the reel in
+    // the full-screen player. An earlier attempt at tap-to-mute here stole
+    // that tap instead.
+    return Stack(
+      alignment: Alignment.center,
+      fit: StackFit.expand,
+      children: [
+        if (_video?.value.isInitialized ?? false)
+          PinchZoomImage(
+            child: FittedBox(
               fit: BoxFit.cover,
+              clipBehavior: Clip.hardEdge,
+              child: SizedBox(
+                width: _video!.value.size.width,
+                height: _video!.value.size.height,
+                child: VideoPlayer(_video!),
+              ),
             ),
-          // Small, corner-scoped hit area — deliberately not covering the
-          // whole tile, so it can't compete with the outer open-reel tap.
-          Positioned(
-            right: 8,
-            bottom: 8,
-            child: GestureDetector(
-              onTap: () => ref.read(reelsMutedProvider.notifier).toggle(),
-              child: CircleAvatar(
-                radius: 14,
-                backgroundColor: AppColors.overlayAlphaBlack,
-                child: Icon(
-                  muted ? Icons.volume_off : Icons.volume_up,
-                  color: Colors.white,
-                  size: 16,
-                ),
+          )
+        else if (widget.thumbnailUrl.isNotEmpty)
+          CachedNetworkImage(
+            imageUrl: widget.thumbnailUrl,
+            fit: BoxFit.cover,
+            // A missing/expired thumbnail file must not show the default
+            // broken-image icon in the middle of the feed — same dark
+            // poster as the no-thumbnail case, the video replaces it.
+            errorWidget: (_, _, _) => const ColoredBox(color: Colors.black),
+          )
+        else
+          const ColoredBox(color: Colors.black),
+        // Small, corner-scoped hit area — deliberately not covering the
+        // whole tile, so it can't compete with the outer open-reel tap.
+        Positioned(
+          right: 8,
+          bottom: 8,
+          child: GestureDetector(
+            onTap: _toggleMuted,
+            child: CircleAvatar(
+              radius: 14,
+              backgroundColor: AppColors.overlayAlphaBlack,
+              child: Icon(
+                _muted ? Icons.volume_off : Icons.volume_up,
+                color: Colors.white,
+                size: 16,
               ),
             ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

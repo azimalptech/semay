@@ -1,18 +1,40 @@
 import type { UserNotification } from "@prisma/client";
 
 import { prisma } from "../db.js";
+import { getFcmDisabledReason } from "../lib/firebaseAdmin.js";
 import { parseBigIntId } from "../lib/ids.js";
-import { sendPushToUsers } from "./push.js";
+import { isPushEnabled, pushLogger, sendPushToUsers } from "./push.js";
+
+/** Android channel for superadmin broadcasts — created at IMPORTANCE_HIGH by
+ * the app's MainActivity.kt next to the chat one, so a user can silence
+ * announcements in system settings without silencing their chats. The id
+ * here and there must match. An app that predates the channel falls back to
+ * the manifest default (`chat_messages`), so the server side can ship first. */
+const BROADCAST_PUSH_CHANNEL = "announcements";
+
+/** One shade entry for announcements: a newer broadcast replaces an older
+ * unread one (Android `tag`, iOS `thread-id`) instead of stacking — the in-app
+ * inbox keeps every one. */
+const BROADCAST_PUSH_TAG = "broadcast";
+
+export interface BroadcastResult {
+  /** Users who got an in-app inbox row — NOT pushes. Push runs in the
+   * background after this returns (see broadcastToAllUsers). */
+  sent: number;
+  /** Always 0 now that push no longer blocks the request; kept so the old
+   * `{sent, failed}` shape (web-admin, notificationRequests) still parses. */
+  failed: number;
+  /** False when the API has no usable FCM credential: the inbox rows were
+   * written but no phone will ring. Surfaced so the panel can say so instead
+   * of reporting "Sent: N" for a push that never left the server — which is
+   * what a push-less deployment looked like from the admin's chair. */
+  pushEnabled: boolean;
+  pushDisabledReason?: string;
+}
 
 /** Shared by broadcastNotification and decideNotificationRequest's approve
- * path — same fan-out both used in the old backend (`broadcastToAllUsers`).
- * `sent` counts users who got an in-app notification row; `failed` counts
- * push deliveries FCM reported as failed (per-token, since a user can have
- * multiple devices) — matches the old callable's `{sent, failed}` shape. */
-export async function broadcastToAllUsers(
-  title: string,
-  body: string
-): Promise<{ sent: number; failed: number }> {
+ * path — same fan-out both used in the old backend (`broadcastToAllUsers`). */
+export async function broadcastToAllUsers(title: string, body: string): Promise<BroadcastResult> {
   const users = await prisma.user.findMany({ select: { id: true } });
   const userIds = users.map((u) => u.id);
   // Chunk the insert — a single createMany of 100K rows can blow past MySQL's
@@ -27,9 +49,26 @@ export async function broadcastToAllUsers(
   // batches). Fire it in the background so the admin's request returns promptly
   // with the recipient count instead of blocking for the whole fan-out (which
   // would exceed the HTTP timeout well before 100K users). The in-app
-  // notifications above are already durably persisted regardless.
-  void sendPushToUsers(userIds, title, body).catch(() => {});
-  return { sent: users.length, failed: 0 };
+  // notifications above are already durably persisted regardless — which is
+  // why the outcome goes to the log: it is the only place it can be seen.
+  // `type` is what the app keys on to route a tap into the inbox and refresh
+  // it; no wakeApp, a broadcast has nothing for a backgrounded app to do.
+  void sendPushToUsers(
+    userIds,
+    title,
+    body,
+    { type: "broadcast" },
+    { channelId: BROADCAST_PUSH_CHANNEL, tag: BROADCAST_PUSH_TAG }
+  )
+    .then((push) => pushLogger().info({ users: userIds.length, ...push }, "broadcast push done"))
+    .catch((err: unknown) => pushLogger().error({ err }, "broadcast push failed"));
+  const pushDisabledReason = getFcmDisabledReason();
+  return {
+    sent: users.length,
+    failed: 0,
+    pushEnabled: isPushEnabled(),
+    ...(pushDisabledReason !== undefined ? { pushDisabledReason } : {}),
+  };
 }
 
 export async function listNotifications(

@@ -5,9 +5,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
-import { createOrGetChat, markReceipts, sendMessage } from "../src/chats/service.js";
+import { createOrGetChat, hideChat, markReceipts, sendMessage } from "../src/chats/service.js";
 import { prisma } from "../src/db.js";
-import { cleanupStores, cleanupUsers, createStore, createUserWithToken } from "./helpers.js";
+import {
+  cleanupStores,
+  cleanupUsers,
+  createStore,
+  createUserWithToken,
+  refreshedToken,
+} from "./helpers.js";
 
 // The gateway is the one surface app.inject() cannot reach — it needs a real
 // listener and a real socket (CLAUDE.md rule 9). These are the chat-liveness
@@ -229,5 +235,34 @@ describe("realtime gateway over a real socket", () => {
     } finally {
       await prisma.user.update({ where: { id: userId }, data: { activeChatId: null } });
     }
+  });
+
+  // Last in the file on purpose: it hides the shared chat for the customer.
+  it("chat-delete: the snapshot after a delete stops at that side's cutoff; the other side's does not", async () => {
+    // The snapshot used to call listMessages with the chat id alone — no
+    // side, no cutoff — so a customer who deleted the chat got every old
+    // message back the moment the thread resubscribed.
+    const chat = await prisma.chat.findUniqueOrThrow({ where: { id: chatId } });
+    const before = await sendMessage(chat, "admin", adminId, { text: "before the delete" });
+    await hideChat(chat, "user");
+    const hidden = await prisma.chat.findUniqueOrThrow({ where: { id: chatId } });
+    const after = await sendMessage(hidden, "admin", adminId, { text: "after the delete" });
+
+    const channel = `chat:${chatId}:messages`;
+    const user = await connect(port, userToken);
+    user.ws.send(JSON.stringify({ type: "subscribe", channel }));
+    const userSnap = await user.next((f) => f.channel === channel && f.type === "snapshot");
+    expect((userSnap.data as { id: string }[]).map((m) => m.id)).toEqual([after.id.toString()]);
+    user.ws.close();
+
+    // The fixture discarded the admin's token; any valid token for adminId
+    // will do — the gateway derives role/storeIds from the DB, not the token.
+    const admin = await connect(port, await refreshedToken(adminId));
+    admin.ws.send(JSON.stringify({ type: "subscribe", channel }));
+    const adminSnap = await admin.next((f) => f.channel === channel && f.type === "snapshot");
+    const adminIds = (adminSnap.data as { id: string }[]).map((m) => m.id);
+    expect(adminIds).toContain(before.id.toString());
+    expect(adminIds).toContain(after.id.toString());
+    admin.ws.close();
   });
 });

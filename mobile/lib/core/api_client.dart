@@ -82,10 +82,12 @@ class ApiClient {
 }
 
 /// Why a refresh did not produce a new token. The two failures are handled
-/// very differently: a refresh token the server REJECTED means the session is
-/// over (log out); a server we could not REACH means nothing about the
-/// session, and logging out over it (which the interceptor used to do) threw
-/// people back to the phone screen every time the network hiccuped mid-401.
+/// very differently: a refresh token the server explicitly REJECTED (401
+/// SESSION_INVALID) means the session is over (log out); anything else — a
+/// server we could not reach, a 429, a 5xx — means nothing about the session.
+/// Logging out over those threw people back to the phone screen every time the
+/// network hiccuped mid-401, and later every ~15 minutes once a single lost
+/// refresh response had left the phone with a rotated-away token.
 enum RefreshOutcome { ok, rejected, unreachable }
 
 Future<RefreshOutcome>? _refreshInFlight;
@@ -99,13 +101,36 @@ Future<RefreshOutcome> _tryRefresh(Ref ref) {
   return _refreshInFlight ??= _doRefresh(ref).whenComplete(() => _refreshInFlight = null);
 }
 
-/// Refresh call deliberately uses a bare Dio (no interceptor) — routing it
-/// through the same interceptor that triggers refreshes would recurse.
+/// Refresh: one attempt, and one quick retry if the server could not be
+/// reached or answered 429/5xx. The retry is what heals the common case of a
+/// single lost packet, and it is safe because the server keeps accepting a
+/// just-rotated token for a grace window — a first attempt whose RESPONSE was
+/// lost (the server did rotate) is healed by presenting the same token again,
+/// not turned into a logout. A second miss is left to the next request, which
+/// refreshes again; stacking more waits here would only stall whatever
+/// triggered the refresh.
 Future<RefreshOutcome> _doRefresh(Ref ref) async {
   final store = ref.read(secureSessionStoreProvider);
   final refreshToken = await store.readRefreshToken();
   if (refreshToken == null) return RefreshOutcome.rejected;
 
+  var outcome = await _postRefresh(ref, store, refreshToken);
+  if (outcome == RefreshOutcome.unreachable) {
+    await Future<void>.delayed(_refreshRetryDelay);
+    outcome = await _postRefresh(ref, store, refreshToken);
+  }
+  return outcome;
+}
+
+const _refreshRetryDelay = Duration(seconds: 2);
+
+/// Deliberately uses a bare Dio (no interceptor) — routing it through the same
+/// interceptor that triggers refreshes would recurse.
+Future<RefreshOutcome> _postRefresh(
+  Ref ref,
+  SecureSessionStore store,
+  String refreshToken,
+) async {
   try {
     final res = await Dio(
       BaseOptions(
@@ -120,23 +145,27 @@ Future<RefreshOutcome> _doRefresh(Ref ref) async {
     // ended (and leave the rotated server session unrevoked).
     if (await store.readRefreshToken() != refreshToken) return RefreshOutcome.rejected;
     // rotateSession (server-side) issues a NEW refresh token on every call —
-    // must persist it, or the next refresh attempt reuses an already-revoked
-    // one and fails permanently instead of just once.
+    // must persist it, or every later refresh presents a retired token and,
+    // once the server's reuse grace has passed, fails for good.
     await ref.read(sessionControllerProvider.notifier).setTokens(
       accessToken: data['accessToken'] as String,
       refreshToken: data['refreshToken'] as String,
     );
     return RefreshOutcome.ok;
   } on DioException catch (e) {
-    // Only a verdict on the TOKEN itself is a rejection: 401 (revoked or
-    // rotated away), 403, 400 (malformed). 429 from the auth rate limiter
-    // (60/min per IP, and carrier NAT puts many phones behind one IP — see
-    // server config.ts) and any 5xx mean the server is busy, not that the
-    // session is over; mapping every 4xx to "rejected" would log a whole
-    // cell tower's worth of users out the moment their phones reconnected
-    // together.
-    final status = e.response?.statusCode;
-    if (status == 400 || status == 401 || status == 403) return RefreshOutcome.rejected;
+    // The ONLY verdict on the session is the server saying so: 401
+    // SESSION_INVALID — this refresh token was revoked (signed out on this
+    // device, account deleted) or replayed long after it was rotated away.
+    // Everything else says nothing about the session: 429 from the rate
+    // limiter (carrier NAT puts many phones behind one IP), any 5xx, a
+    // timeout, a dropped socket, even a 400. The old rule counted every
+    // 400/401/403 as final, and logging out over a non-verdict is precisely
+    // the "signed out every 15 minutes" bug.
+    final body = e.response?.data;
+    final error = body is Map ? body['error'] : null;
+    if (e.response?.statusCode == 401 && error == 'SESSION_INVALID') {
+      return RefreshOutcome.rejected;
+    }
     return RefreshOutcome.unreachable;
   } catch (_) {
     return RefreshOutcome.unreachable;

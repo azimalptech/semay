@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { businessDay, businessDaysAgo } from "@/lib/businessDay";
 import type { ClientDict } from "@/lib/l10n";
 
 export interface OrderRow {
@@ -19,16 +20,9 @@ type FilterMode = "all" | "shop" | "phone";
 type RangePreset = 7 | 30 | 90 | 365 | "manual";
 const PRESET_DAYS: Exclude<RangePreset, "manual">[] = [7, 30, 90, 365];
 
-// UTC "YYYY-MM-DD", matching how order.date is derived server-side
-// (createdAt.toISOString().slice(0,10)) so preset boundaries compare correctly.
-function utcDaysAgo(n: number): string {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() - n);
-  return d.toISOString().slice(0, 10);
-}
-function utcToday(): string {
-  return new Date().toISOString().slice(0, 10);
-}
+// Preset bounds are Asia/Ashgabat "YYYY-MM-DD" (businessDay), the same zone
+// order.date is derived in server-side, so the boundaries compare correctly
+// whatever zone the viewer's browser is in.
 
 export function OrdersTable({
   orders,
@@ -56,7 +50,7 @@ export function OrdersTable({
   const { rangeFrom, rangeTo } =
     preset === "manual"
       ? { rangeFrom: fromDate, rangeTo: toDate }
-      : { rangeFrom: utcDaysAgo(preset), rangeTo: utcToday() };
+      : { rangeFrom: businessDaysAgo(preset), rangeTo: businessDay(new Date()) };
 
   const storeIds = useMemo(
     () => Object.keys(storeNames).sort((a, b) => storeNames[a].localeCompare(storeNames[b])),

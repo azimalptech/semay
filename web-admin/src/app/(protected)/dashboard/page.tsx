@@ -1,3 +1,4 @@
+import { businessDay } from "@/lib/businessDay";
 import { prisma } from "@/lib/db";
 import { getTranslations, toClientDict } from "@/lib/l10n";
 import { requireSuperAdmin } from "@/lib/session";
@@ -32,7 +33,7 @@ async function getOrders(): Promise<OrderRow[]> {
     storeName: o.store.name,
     userPhone: o.userPhone,
     itemQuantity: o.itemQuantity,
-    date: o.createdAt.toISOString().slice(0, 10),
+    date: businessDay(o.createdAt),
   }));
 }
 

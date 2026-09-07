@@ -40,6 +40,13 @@ dependencies:
   # to the self-hosted API (see docs/07_MIGRATION.md Phase 9).
   firebase_core: ^4.12.0
   firebase_messaging: ^16.4.2
+  # Foreground push presentation on Android. firebase_messaging hands a push
+  # that arrives while the app is open to Dart WITHOUT showing anything, so
+  # the app posts the system notification itself (notification_service.dart).
+  # Pinned exactly: the plugin's Android side has changed its Gradle
+  # requirements across majors, and a floating caret would let `pub upgrade`
+  # break the native build silently.
+  flutter_local_notifications: 22.3.0
   image_picker: ^1.2.3
   video_player: ^2.11.1
   video_thumbnail: ^0.5.6

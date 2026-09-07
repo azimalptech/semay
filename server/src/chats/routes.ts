@@ -96,15 +96,14 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     if (!query.success) return reply.code(400).send({ error: "INVALID_INPUT" });
 
     try {
-      await getChatForParticipant(id, req.auth!);
+      const { chat, side } = await getChatForParticipant(id, req.auth!);
+      const messages = await listMessages(chat, side, query.data);
+      return reply.send({ messages });
     } catch (err) {
       const mapped = mapChatError(err);
       if (mapped) return reply.code(mapped.code).send(mapped.body);
       throw err;
     }
-
-    const messages = await listMessages(id, query.data);
-    return reply.send({ messages });
   });
 
   app.post("/chats/:id/messages", { preHandler: requireAuth }, async (req, reply) => {

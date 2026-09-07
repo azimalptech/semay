@@ -9,7 +9,19 @@ const schema = z.object({
 
   JWT_SECRET: z.string().min(24, "JWT_SECRET must be a long random string"),
   ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
-  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
+  // Sessions last until logout. A refresh token expires only after this long
+  // WITHOUT being used: every /auth/refresh issues its successor with a fresh
+  // window (sliding expiry), so a device that opens the app even once in two
+  // years never sees the login screen again. Not "never": the reaper needs a
+  // bound to clear the rows behind devices that are gone for good.
+  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(730),
+  // A refresh token that was already rotated away this recently is still
+  // accepted, and gets its own live successor. Without it a client whose
+  // refresh RESPONSE never arrived (timeout, process suspended mid-request) is
+  // left holding a dead token and its next refresh logs the device out; the
+  // same window absorbs concurrent refreshes with one token (two browser
+  // tabs). Outside it a replayed token is a replay and gets 401.
+  REFRESH_REUSE_GRACE_SECONDS: z.coerce.number().int().nonnegative().default(60),
 
   // Per-IP request cap (backstop against a single runaway/abusive client).
   // Kept generous by default because Turkmen carrier NAT can put many real
@@ -17,6 +29,12 @@ const schema = z.object({
   // (per-phone OTP limits). Auth endpoints get a tighter cap (below).
   RATE_LIMIT_MAX_PER_MIN: z.coerce.number().int().positive().default(3000),
   RATE_LIMIT_AUTH_MAX_PER_MIN: z.coerce.number().int().positive().default(60),
+  // /auth/refresh and /auth/logout get their own, wider bucket. A refresh
+  // token is 256 random bits (not guessable) and a refresh costs no SMS, so
+  // sharing the OTP cap only meant a busy carrier NAT — or the single Next.js
+  // server IP every admin-panel refresh arrives from — hit 429 on routine
+  // renewals.
+  RATE_LIMIT_REFRESH_MAX_PER_MIN: z.coerce.number().int().positive().default(600),
 
   SMS_GATEWAY_URL: z.string().default(""),
   SMS_GATEWAY_USER: z.string().default(""),

@@ -95,29 +95,49 @@ describe("maintenance reaper", () => {
     await prisma.story.delete({ where: { id: justExpired.id } });
   });
 
-  it("reaps expired sessions but keeps live ones", async () => {
+  // Sessions last until logout: a live row must survive any age, and only rows
+  // past their (sliding) expiry or retired long ago may go.
+  it("reaps expired and long-retired sessions, never a live one", async () => {
     const user = await createUserWithToken();
     userIds.push(user.userId);
+    const now = Date.now();
+    const day = 86_400_000;
+    const stamp = `${now}-${Math.floor(Math.random() * 1e6)}`;
+    const mk = (
+      label: string,
+      data: { expiresAt: Date; rotatedAt?: Date; revokedAt?: Date; createdAt?: Date }
+    ) => prisma.session.create({ data: { userId: user.userId, tokenHash: `${label}-${stamp}`, ...data } });
 
-    const dead = await prisma.session.create({
-      data: {
-        userId: user.userId,
-        tokenHash: `dead-${Date.now()}`,
-        expiresAt: new Date(Date.now() - 1000),
-      },
+    const expired = await mk("expired", { expiresAt: new Date(now - 1000) });
+    const rotatedLongAgo = await mk("rotated-old", {
+      expiresAt: new Date(now + 700 * day),
+      rotatedAt: new Date(now - 8 * day),
     });
-    const alive = await prisma.session.create({
-      data: {
-        userId: user.userId,
-        tokenHash: `alive-${Date.now()}`,
-        expiresAt: new Date(Date.now() + 86_400_000),
-      },
+    const revokedLongAgo = await mk("revoked-old", {
+      expiresAt: new Date(now + 700 * day),
+      revokedAt: new Date(now - 8 * day),
     });
+    // Retired an hour ago: still inside the window a replayed token must find it.
+    const rotatedRecently = await mk("rotated-new", {
+      expiresAt: new Date(now + 700 * day),
+      rotatedAt: new Date(now - 60 * 60_000),
+    });
+    // Logged in five years ago, refreshed since, never logged out.
+    const ancientLive = await mk("ancient-live", {
+      expiresAt: new Date(now + 700 * day),
+      createdAt: new Date(now - 5 * 365 * day),
+    });
+    const alive = await mk("alive", { expiresAt: new Date(now + day) });
 
     await runReapCycle(log);
 
-    expect(await prisma.session.findUnique({ where: { id: dead.id } })).toBeNull();
-    expect(await prisma.session.findUnique({ where: { id: alive.id } })).not.toBeNull();
+    const gone = async (id: string) => (await prisma.session.findUnique({ where: { id } })) === null;
+    expect(await gone(expired.id)).toBe(true);
+    expect(await gone(rotatedLongAgo.id)).toBe(true);
+    expect(await gone(revokedLongAgo.id)).toBe(true);
+    expect(await gone(rotatedRecently.id)).toBe(false);
+    expect(await gone(ancientLive.id)).toBe(false);
+    expect(await gone(alive.id)).toBe(false);
   });
 
   // Regression: the lease was originally MySQL GET_LOCK, which is session-scoped

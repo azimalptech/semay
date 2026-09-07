@@ -103,6 +103,13 @@ class _DeliveryMarker {
     if (unread > prev) _mark(id);
   }
 
+  /// The chat left the list — this side deleted it, which also zeroed my
+  /// unread server-side. Its baseline goes with it: the message that brings
+  /// the chat back arrives as unread 1, and against a remembered 3 that is
+  /// not a rise, so the sender would wait for my read receipt to get their
+  /// second tick.
+  void forget(String chatId) => _prevUnread.remove(chatId);
+
   Future<void> _mark(String chatId) async {
     if (_inFlight.contains(chatId)) {
       _dirty.add(chatId);
@@ -180,6 +187,7 @@ Stream<List<ChatDoc>> _chatListChannel(
       case RealtimeEventType.remove:
         if (e.removedId != null) {
           byId.remove(e.removedId);
+          delivery.forget(e.removedId!);
           unawaited(cache.removeChat(e.removedId!));
         }
       case RealtimeEventType.receipts:
@@ -276,6 +284,7 @@ final adminChatsProvider = StreamProvider<List<ChatDoc>>((ref) {
             case RealtimeEventType.remove:
               if (e.removedId != null) {
                 byId.remove(e.removedId);
+                delivery.forget(e.removedId!);
                 unawaited(cache.removeChat(e.removedId!));
               }
             case RealtimeEventType.receipts:
@@ -360,23 +369,41 @@ final chatDocProvider = StreamProvider.family<Map<String, dynamic>?, String>((
 
 int _messageId(Map<String, dynamic> m) => int.tryParse('${m['id']}') ?? 0;
 
+/// [m] as this side may see it once its history cutoff is [cutoff]: a quote of
+/// a row at or below it is blanked. The other side can still reply to a
+/// message this side deleted, and the reply carries that message's text —
+/// the server projects the same mask over the thread window and paging
+/// (listMessages), but the live upsert on `chat:{id}:messages` is one frame
+/// for both sides, and a cached row may predate the cutoff being known, so
+/// it is applied here as well. Returns [m] itself when nothing is masked.
+Map<String, dynamic> _withoutHiddenQuote(Map<String, dynamic> m, int cutoff) {
+  final quoted = int.tryParse('${m['replyToMessageId']}');
+  if (quoted == null || quoted > cutoff) return m;
+  return {...m, 'replyToMessageId': null, 'replyToText': null, 'replyToSenderRole': null};
+}
+
 /// Applies a `receipts` roll-up the way the server's updateMany did: every
 /// message from `senderRole` up to `upToMessageId` (the newest row the server
 /// actually stamped — a message that arrived over the socket a moment before
 /// the receipt was NOT in that set, and stamping it would show "Seen" for a
-/// message nobody has seen) that is still missing the stamp gets it. Copies
-/// rather than mutating, so lists already handed to the UI are never edited
-/// under it. Returns the keys it changed.
+/// message nobody has seen) and above `fromMessageId` (the reader's history
+/// cutoff — rows at or below it are invisible to them, so they were not
+/// stamped and must not show as seen here either) that is still missing the
+/// stamp gets it. Copies rather than mutating, so lists already handed to the
+/// UI are never edited under it. Returns the keys it changed.
 List<String> _applyReceipts(Map<String, Map<String, dynamic>> byId, Map<String, dynamic> receipt) {
   final role = receipt['senderRole'];
   final status = receipt['status'];
   final at = receipt['at'];
   final upTo = int.tryParse('${receipt['upToMessageId']}');
+  final from = int.tryParse('${receipt['fromMessageId']}');
   final changed = <String>[];
   for (final entry in byId.entries.toList()) {
     final m = entry.value;
     if (m['senderRole'] != role) continue;
-    if (upTo != null && _messageId(m) > upTo) continue;
+    final id = _messageId(m);
+    if (upTo != null && id > upTo) continue;
+    if (from != null && id <= from) continue;
     if (status == 'read') {
       if (m['readAt'] != null) continue;
       byId[entry.key] = {...m, 'readAt': at, 'deliveredAt': at};
@@ -430,6 +457,12 @@ class ChatMessagesState {
 /// Scroll-back is [loadOlder]: pages before the oldest held message, 50 at a
 /// time, merged in and cached (the cache keeps the newest 500 per thread).
 /// Every change is written through to the cache.
+///
+/// Deleting the chat (ChatService.hideChat) makes everything sent so far
+/// invisible to this side, server-side, by message id — the chat doc's
+/// hiddenBy*UpToId. That cutoff is applied here too ([_applyCutoff]), because
+/// the cache and an in-memory window can both hold rows the server will never
+/// return again, and neither may resurrect them.
 class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
   ChatMessagesNotifier(this.chatId);
 
@@ -449,6 +482,7 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
   bool _hasMore = true;
   bool _loadingOlder = false;
   String? _error;
+  int? _cutoff; // this side's history cutoff (message id), once known
 
   ChatCache get _cache => ref.read(chatCacheProvider);
 
@@ -461,16 +495,54 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
     _hasMore = true;
     _loadingOlder = false;
     _error = null;
+    _cutoff = null;
     ref.onDispose(() {
       _disposed = true;
       _wsSub?.cancel();
       _sentSub?.cancel();
     });
+    // The cutoff comes from the chat doc, for whichever side this account is
+    // on — the customer if it owns the chat, the store side otherwise, which
+    // is exactly the server's resolveChatSide. Listened to rather than read
+    // once: a delete on this account's other device reaches an open thread as
+    // a chat:{id} upsert, and its rows must go the same way.
+    final uid = ref.read(authStateChangesProvider).value?.uid;
+    ref.listen(chatDocProvider(chatId), (_, next) {
+      final chat = next.value;
+      if (chat == null) return;
+      final key = chat['userId'] == uid ? 'hiddenByUserUpToId' : 'hiddenByAdminUpToId';
+      final cutoff = int.tryParse('${chat[key]}');
+      if (cutoff != null) _applyCutoff(cutoff);
+    }, fireImmediately: true);
     unawaited(_seedFromCache());
     unawaited(_seedFromRest());
     _listenSocket();
     _listenOutbox();
     return const ChatMessagesState();
+  }
+
+  /// Everything at or below [cutoff] is gone for this side. Whatever arrived
+  /// before the cutoff was known — the cache seed, a stale window — is dropped
+  /// now; whatever arrives later is refused at the door ([_upsert],
+  /// [_seedFromCache]); and the on-disk copy is pruned so a relaunch cannot
+  /// paint it either.
+  void _applyCutoff(int cutoff) {
+    if (_cutoff != null && cutoff <= _cutoff!) return;
+    _cutoff = cutoff;
+    unawaited(_cache.pruneMessagesUpTo(chatId, cutoff));
+    final before = _byId.length;
+    _byId.removeWhere((_, m) => _messageId(m) <= cutoff);
+    // Rows that stay may still quote rows that just went (see
+    // _withoutHiddenQuote); the cache learns the masked copy too.
+    final unquoted = <Map<String, dynamic>>[];
+    for (final entry in _byId.entries.toList()) {
+      final masked = _withoutHiddenQuote(entry.value, cutoff);
+      if (identical(masked, entry.value)) continue;
+      _byId[entry.key] = masked;
+      unquoted.add(masked);
+    }
+    if (unquoted.isNotEmpty) unawaited(_cache.upsertMessages(chatId, unquoted));
+    if (_byId.length != before || unquoted.isNotEmpty) _publish();
   }
 
   List<ChatDoc> _current() {
@@ -492,26 +564,35 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
 
   /// A late arrival must never regress a stamp already applied from a
   /// receipts event — the POST response can land after the socket echo.
-  void _upsert(Map<String, dynamic> m) {
+  /// Returns false when the row is below this side's cutoff and was refused.
+  bool _upsert(Map<String, dynamic> row) {
+    final cutoff = _cutoff;
+    if (cutoff != null && _messageId(row) <= cutoff) return false;
+    final m = cutoff == null ? row : _withoutHiddenQuote(row, cutoff);
     final id = '${m['id']}';
     final existing = _byId[id];
     if (existing == null) {
       _byId[id] = m;
-      return;
+      return true;
     }
     _byId[id] = {
       ...m,
       'deliveredAt': m['deliveredAt'] ?? existing['deliveredAt'],
       'readAt': m['readAt'] ?? existing['readAt'],
     };
+    return true;
   }
 
   /// Merges an authoritative window (the socket snapshot or the REST seed):
   /// inside its id range the server is right — rows it lacks are dropped —
-  /// while anything outside the range is kept: newer rows are an upsert (or
-  /// our own POST response) that raced the query, older rows are cached or
-  /// paged history the window never covered.
-  void _mergeWindow(List<Map<String, dynamic>> rows) {
+  /// and newer rows outside it are kept: an upsert (or our own POST response)
+  /// that raced the query. Older rows are kept only while the window is full
+  /// (paged history it never covered). A window shorter than the server's
+  /// limit — [complete] — IS the entire thread this side may see, so anything
+  /// older held here (the cache seed, above all) is precisely what the server
+  /// chose not to return, i.e. history below a delete's cutoff, and must not
+  /// be painted around it.
+  void _mergeWindow(List<Map<String, dynamic>> rows, {required bool complete}) {
     if (rows.isEmpty) {
       _byId.clear();
       return;
@@ -525,7 +606,7 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
     }
     _byId.removeWhere((_, m) {
       final id = _messageId(m);
-      return id >= minId && id <= maxId;
+      return id <= maxId && (complete || id >= minId);
     });
     for (final m in rows) {
       _byId['${m['id']}'] = m;
@@ -535,9 +616,13 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
   Future<void> _seedFromCache() async {
     final rows = await _cache.messages(chatId);
     if (_disposed || _authoritative || rows.isEmpty) return;
+    // The prune in _applyCutoff may not have reached the disk copy yet.
+    final cutoff = _cutoff;
     for (final m in rows) {
-      _byId.putIfAbsent('${m['id']}', () => m);
+      if (cutoff != null && _messageId(m) <= cutoff) continue;
+      _byId.putIfAbsent('${m['id']}', () => cutoff == null ? m : _withoutHiddenQuote(m, cutoff));
     }
+    if (_byId.isEmpty) return; // nothing survived — let the server seed
     _seeded = true;
     _publish();
   }
@@ -549,7 +634,7 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
           .get('/chats/$chatId/messages', query: {'limit': _windowSize});
       if (_disposed || _authoritative) return;
       final rows = (json['messages'] as List<dynamic>? ?? const []).cast<Map<String, dynamic>>();
-      _mergeWindow(rows);
+      _mergeWindow(rows, complete: rows.length < _windowSize);
       _authoritative = true;
       _seeded = true;
       if (rows.length < _windowSize) _hasMore = false;
@@ -566,7 +651,7 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
       switch (e.type) {
         case RealtimeEventType.snapshot:
           final rows = (e.data as List<dynamic>? ?? const []).cast<Map<String, dynamic>>();
-          _mergeWindow(rows);
+          _mergeWindow(rows, complete: rows.length < _windowSize);
           _authoritative = true;
           _seeded = true;
           _error = null;
@@ -574,8 +659,9 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
           unawaited(_cache.upsertMessages(chatId, rows));
         case RealtimeEventType.upsert:
           final m = e.data as Map<String, dynamic>;
-          _upsert(m);
-          unawaited(_cache.upsertMessages(chatId, [_byId['${m['id']}']!]));
+          if (_upsert(m)) {
+            unawaited(_cache.upsertMessages(chatId, [_byId['${m['id']}']!]));
+          }
         case RealtimeEventType.remove:
           final id = e.removedId;
           if (id != null) {
@@ -602,7 +688,7 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
   void _listenOutbox() {
     _sentSub = ref.read(outboxServiceProvider).sentMessages.listen((sent) {
       if (sent.chatId != chatId) return;
-      _upsert(sent.message);
+      if (!_upsert(sent.message)) return;
       _seeded = true; // our own accepted message is worth showing on its own
       unawaited(_cache.upsertMessages(chatId, [_byId['${sent.message['id']}']!]));
       _publish();
@@ -690,8 +776,14 @@ final mergedChatMessagesProvider =
           'sharedStoryId': item.payload['sharedStoryId'],
           'replyToText': item.payload['replyToText'],
           'replyToSenderRole': item.payload['replyToSenderRole'],
-          'createdAt':
-              DateTime.fromMillisecondsSinceEpoch(item.createdAt).toIso8601String(),
+          // Same wire shape as a server row (UTC, trailing Z) so parseTimestamp
+          // localises pending and confirmed bubbles identically — a naive local
+          // string here disagreed with confirmed rows by the zone offset and
+          // could put a spurious date divider between the two near midnight.
+          'createdAt': DateTime.fromMillisecondsSinceEpoch(
+            item.createdAt,
+            isUtc: true,
+          ).toIso8601String(),
           'deliveredAt': null,
           'readAt': null,
         }));

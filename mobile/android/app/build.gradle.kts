@@ -25,6 +25,11 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // flutter_local_notifications (foreground push, see
+        // lib/services/notification_service.dart) is compiled against java.time
+        // and refuses to build without the JDK-library backport, even though this
+        // app never schedules a notification — its README, "Gradle setup".
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -71,6 +76,12 @@ android {
             )
         }
     }
+}
+
+dependencies {
+    // Pairs with isCoreLibraryDesugaringEnabled above; the version the plugin
+    // itself builds with.
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
 
 flutter {

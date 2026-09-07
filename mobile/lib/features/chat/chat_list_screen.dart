@@ -76,6 +76,11 @@ Future<void> _confirmAndHideChat(
   );
   if (!confirmed) return;
   await ref.read(chatServiceProvider).hideChat(chatId, asAdmin: asAdmin);
+  if (!context.mounted) return;
+  // A notifier still alive for this thread holds the old rows in memory and
+  // would write them straight back into the cache hideChat just cleared —
+  // rebuild it, so nothing predating the delete can be painted or re-cached.
+  ref.invalidate(chatMessagesProvider(chatId));
 }
 
 class ChatListScreen extends ConsumerStatefulWidget {

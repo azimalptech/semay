@@ -11,8 +11,10 @@ import 'core/interaction_buffer.dart';
 import 'core/outbox.dart';
 import 'core/realtime_client.dart';
 import 'core/router.dart';
+import 'core/shell_tab.dart';
 import 'core/theme.dart';
 import 'core/theme_provider.dart';
+import 'features/profile/notifications_providers.dart';
 import 'services/auth_service.dart';
 import 'services/notification_service.dart';
 import 'services/posts_service.dart';
@@ -37,19 +39,17 @@ Future<void> main() async {
   // marked even while the app is fully backgrounded or killed.
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   // iOS: a push that arrives while the app is in the FOREGROUND is otherwise
-  // presented with nothing at all — which also discards its badge number. The
-  // in-app banner covers alert/sound; the badge has to be let through, or the
-  // badge-only correction the server sends after a read never reaches the
-  // icon and it keeps the last background-applied count. No-op on Android.
+  // presented with nothing at all. Let the OS show it in full — banner, sound
+  // and badge — so a chat message or a broadcast is heard on any screen, the
+  // way it is on Android from the app's own local notification (see
+  // notification_service.dart, which posts nothing on iOS for that reason).
+  // Badge has to be included regardless, or the badge-only correction the
+  // server sends after a read never reaches the icon. No-op on Android.
   await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
+    alert: true,
     badge: true,
+    sound: true,
   );
-
-  // Registered exactly once here, not inside SeMayApp.build() — a raw
-  // Stream.listen (unlike Riverpod's ref.listen) creates a fresh subscription
-  // per rebuild, so calling this from build() would leak listeners. Top-level
-  // function now (see notification_service.dart), no service instance needed.
-  listenForegroundMessages(showForegroundMessageBanner);
 
   // The offline outbox + interaction buffer each need one container living for
   // the app's lifetime so their SQLite queues start now (outbox reconnect drain,
@@ -73,8 +73,15 @@ Future<void> main() async {
   );
   unawaited(container.read(outboxServiceProvider).start());
   unawaited(container.read(interactionBufferProvider).start());
-  // Tap on a push → open that chat (both the cold-start and background cases).
+  // Tap on a push → open that chat / the inbox (cold-start and background).
   listenNotificationTaps(container);
+  // A push that arrives while the app is open: Android system notification
+  // (skipped for the chat on screen), and an inbox refetch for a broadcast so
+  // the bell badge updates now instead of on the next restart.
+  await setUpForegroundNotifications(
+    container,
+    onBroadcast: () => container.invalidate(notificationsProvider),
+  );
 
   // Flush buffered view/send/share counts the moment the app is backgrounded or
   // closed, not only on the 30-min tick — otherwise a session shorter than the
@@ -84,7 +91,17 @@ Future<void> main() async {
   // while we were in the background — see realtime_client.dart) and drain the
   // outbox, so anything typed just before the screen locked goes out now
   // rather than on the next connectivity event.
+  //
+  // onStateChange is the one writer of appInForegroundProvider, which every
+  // video player pauses on (video_player itself plays on through a
+  // backgrounded app) — see shell_tab.dart.
   _lifecycleListener = AppLifecycleListener(
+    onStateChange: (state) => container
+        .read(appInForegroundProvider.notifier)
+        .set(
+          state == AppLifecycleState.resumed ||
+              state == AppLifecycleState.inactive,
+        ),
     onPause: () => unawaited(container.read(interactionBufferProvider).flush()),
     onDetach: () => unawaited(container.read(interactionBufferProvider).flush()),
     onResume: () {

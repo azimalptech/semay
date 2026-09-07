@@ -75,8 +75,20 @@ class _FeedViewState extends ConsumerState<FeedView> {
                             padding: const EdgeInsets.all(32),
                             child: Text(ref.watch(l10nProvider).noPostsYet),
                           ),
+                        // Keyed by post id so a card's State (its inline reel
+                        // controller, carousel page, view dwell) follows the
+                        // post when the list shifts — which it does on every
+                        // cold start (cached page, then the network page) and
+                        // pull-to-refresh. Matched by index, a tile that held
+                        // reel B kept B's video playing under reel A's pill
+                        // and caption once a newer post pushed everything
+                        // down one row.
                         for (final doc in feedAsync.value!)
-                          PostCard(postId: doc.id, post: doc.data()),
+                          PostCard(
+                            key: ValueKey(doc.id),
+                            postId: doc.id,
+                            post: doc.data(),
+                          ),
                         if (loadingMore)
                           const Padding(
                             padding: EdgeInsets.symmetric(vertical: 24),

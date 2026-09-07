@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { disconnectDb } from "./db.js";
 import { getFcmDisabledReason, getFcmIdentity } from "./lib/firebaseAdmin.js";
 import { startMaintenance } from "./maintenance.js";
+import { bindPushLogger } from "./notifications/push.js";
 import { closeBus, isDistributed } from "./realtime/bus.js";
 
 // buildApp() creates the media dir before mounting the static server.
@@ -13,7 +14,10 @@ const stopMaintenance = startMaintenance(app.log);
 
 async function start(): Promise<void> {
   // Surface a push-less deployment at boot rather than letting it be discovered
-  // when a notification never arrives.
+  // when a notification never arrives — and keep surfacing it: with the logger
+  // bound, every push the server then skips is a warn line in the same log
+  // ("push skipped: FCM disabled"), not a silent {sent: 0}.
+  bindPushLogger(app.log);
   const fcmDisabled = getFcmDisabledReason();
   if (fcmDisabled) {
     app.log.warn({ reason: fcmDisabled }, "FCM push is DISABLED");

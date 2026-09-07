@@ -45,9 +45,16 @@ Map<String, dynamic> normalizePost(Map<String, dynamic> post) {
   return post;
 }
 
+/// The API emits every DateTime as UTC ISO-8601 with a trailing `Z` (Prisma
+/// DATETIME(3) -> Date.prototype.toJSON), and every display helper reads
+/// `.hour`/`.day` straight off the result — so this is the one place the
+/// instant becomes device wall-clock time. Without `.toLocal()` a message sent
+/// at 22:46 in Ashgabat rendered as "17:46" and "Today" flipped five hours
+/// late. A naive string (no zone) is already local and passes through
+/// unchanged; instant comparisons (`isAfter`, `difference`) never cared.
 DateTime? parseTimestamp(dynamic value) {
   if (value == null) return null;
-  if (value is String) return DateTime.tryParse(value);
+  if (value is String) return DateTime.tryParse(value)?.toLocal();
   return null;
 }
 

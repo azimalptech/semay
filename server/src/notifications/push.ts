@@ -1,7 +1,8 @@
+import type { FastifyBaseLogger } from "fastify";
 import type { MulticastMessage } from "firebase-admin/messaging";
 
 import { prisma } from "../db.js";
-import { getFcmMessaging } from "../lib/firebaseAdmin.js";
+import { getFcmDisabledReason, getFcmMessaging } from "../lib/firebaseAdmin.js";
 
 const DEAD_TOKEN_ERROR_CODES = new Set([
   "messaging/registration-token-not-registered",
@@ -15,21 +16,63 @@ export interface PushResult {
 }
 
 /** False when FCM isn't configured (no service account — dev boxes, CI, the
- * test suite). Callers that do work purely to feed a push (badge aggregation,
- * recipient lookups) can skip it entirely. */
+ * test suite). For the iOS badge-only correction (chats/service.ts
+ * syncLauncherBadges), which is not a notification and may skip its
+ * aggregation silently. A path that would have shown a notification must NOT
+ * gate on this: it has to reach sendPushToUsers so the drop is logged. */
 export function isPushEnabled(): boolean {
   return getFcmMessaging() !== undefined;
 }
 
-/** Presentation hints for a push. Everything here is optional — the broadcast
- * and order paths pass none and get the plain title/body they always did.
- * Chat messages pass all three so the OS treats them like a messenger would. */
+export type PushLogger = Pick<FastifyBaseLogger, "info" | "warn" | "error">;
+
+// The services that send push have no request in hand (a broadcast's fan-out
+// outlives its request on purpose; a chat push runs after the transaction), so
+// index.ts binds the process logger here at boot. Silent until then — the test
+// suite binds a spy when it wants to assert on what was logged.
+let log: PushLogger = { info() {}, warn() {}, error() {} };
+
+export function bindPushLogger(logger: PushLogger): void {
+  log = logger;
+}
+
+export function pushLogger(): PushLogger {
+  return log;
+}
+
+// A push-less deployment used to fail in silence: sendPushToUsers answered
+// {0,0}, the broadcast route reported "sent: 25", and nothing after the boot
+// line said a push was ever skipped — which is how "broadcasts only show up
+// after reopening the app" went undiagnosed. Warned here, where every push
+// path converges, but at most once a minute: the order path fires per order,
+// and one line per skipped push would bury the rest of the log.
+const SKIP_WARN_INTERVAL_MS = 60_000;
+let lastSkipWarnAt = 0;
+let skippedSinceWarn = 0;
+
+function warnPushSkipped(recipients: number): void {
+  skippedSinceWarn += 1;
+  const now = Date.now();
+  if (now - lastSkipWarnAt < SKIP_WARN_INTERVAL_MS) return;
+  log.warn(
+    { reason: getFcmDisabledReason(), recipients, skipped: skippedSinceWarn },
+    "push skipped: FCM disabled"
+  );
+  lastSkipWarnAt = now;
+  skippedSinceWarn = 0;
+}
+
+/** Presentation hints for a push. Everything here is optional — the order path
+ * passes none and gets the plain title/body it always did. Chat messages pass
+ * all three so the OS treats them like a messenger would; broadcasts pass a
+ * channel and a tag (notifications/service.ts). */
 export interface PushOptions {
   /** Android notification channel. Must already exist on the device — the app
-   * creates `chat_messages` at IMPORTANCE_HIGH in MainActivity.kt, which is
-   * what makes a message pop as a heads-up banner with sound instead of
-   * landing silently in the shade under FCM's default "Miscellaneous"
-   * channel. An unknown id falls back to the manifest default. */
+   * creates `chat_messages` and `announcements` at IMPORTANCE_HIGH in
+   * MainActivity.kt, which is what makes a message pop as a heads-up banner
+   * with sound instead of landing silently in the shade under FCM's default
+   * "Miscellaneous" channel. An unknown id (an app older than the channel)
+   * falls back to the manifest default, `chat_messages`. */
   channelId?: string;
   /** Collapses notifications per conversation: Android `tag` (a newer
    * notification with the same tag REPLACES the older one, so five messages
@@ -45,9 +88,10 @@ export interface PushOptions {
   wakeApp?: boolean;
 }
 
-/** Sends to every registered token for the given users. Silently a no-op if
- * FCM isn't configured (see firebaseAdmin.ts) or none of them have a token —
- * push is best-effort and must never fail the caller's actual mutation.
+/** Sends to every registered token for the given users. A no-op — logged, see
+ * warnPushSkipped — if FCM isn't configured (see firebaseAdmin.ts), and a
+ * silent one if none of them have a token; push is best-effort and must never
+ * fail the caller's actual mutation.
  * sent/failed count per-token (a user can have multiple devices), matching
  * FCM's own multicast response shape. */
 // FCM's sendEachForMulticast rejects more than 500 tokens per call, and a huge
@@ -138,7 +182,10 @@ export async function sendPushToUsers(
   opts: PushOptions = {}
 ): Promise<PushResult> {
   if (userIds.length === 0) return { sent: 0, failed: 0 };
-  if (!getFcmMessaging()) return { sent: 0, failed: 0 };
+  if (!getFcmMessaging()) {
+    warnPushSkipped(userIds.length);
+    return { sent: 0, failed: 0 };
+  }
 
   const rows = await tokensForUsers(userIds);
   if (rows.length === 0) return { sent: 0, failed: 0 };

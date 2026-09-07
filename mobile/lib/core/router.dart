@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'app_icon.dart';
+import 'shell_tab.dart';
 import 'theme.dart';
 import '../features/auth/name_entry_screen.dart';
 import '../features/auth/otp_screen.dart';
@@ -77,10 +78,11 @@ final routerProvider = Provider<GoRouter>((ref) {
     // Set once here, not created fresh per GoRouter instance — the same
     // "global key wired up before runApp, used by code with no
     // BuildContext of its own" pattern rootNavigatorKey's own doc comment
-    // describes. This is what lets showForegroundMessageBanner reach the
-    // root Overlay and call GoRouter.of(context) from outside the widget
-    // tree entirely.
+    // describes. This is what lets a notification tap (notification_service
+    // .dart) call GoRouter.of(context) from outside the widget tree entirely.
     navigatorKey: rootNavigatorKey,
+    // Tells the tab shell when a page route covers it — see shell_tab.dart.
+    observers: [shellRouteObserver],
     initialLocation: _splashRoute,
     refreshListenable: refreshNotifier,
     redirect: (context, state) {
@@ -305,11 +307,6 @@ final routerProvider = Provider<GoRouter>((ref) {
   );
 });
 
-// Figma-defined order for both roles' MenuBar2: home, play-square (Reels),
-// trophy-star (Leaderboard), send (Chat), user (Profile).
-const _reelsPageIndex = 1;
-const _chatPageIndex = 3;
-
 class _TabIcon {
   const _TabIcon({
     required this.inactive,
@@ -370,9 +367,10 @@ List<_TabIcon> _buildTabIcons() => [
 /// approach that tries to keep an outgoing and incoming branch mounted
 /// together mid-transition (which a real drag-through needs) duplicates
 /// those keys and crashes. A plain PageView carries no such constraint —
-/// each page here is just a normal widget, kept alive via
-/// AutomaticKeepAliveClientMixin so switching tabs still preserves scroll
-/// position/video playback exactly like IndexedStack did.
+/// each page here is just a normal widget, kept alive (see ShellTabPager in
+/// shell_tab.dart) so switching tabs still preserves scroll position like
+/// IndexedStack did. Which tab may actually *play* video is published by
+/// that pager (settledShellTabProvider) rather than guessed by each tab.
 class _SwipeableTabShell extends StatefulWidget {
   const _SwipeableTabShell({required this.isAdmin});
 
@@ -444,19 +442,17 @@ class _SwipeableTabShellState extends State<_SwipeableTabShell> {
     // full-width swipe starting anywhere else doesn't compete with it. The
     // back arrow (wired to _goToPage(0) above) and the system back gesture
     // below are just an extra shortcut straight to Home.
-    final onReels = _settledIndex == _reelsPageIndex;
+    final onReels = _settledIndex == kReelsTabIndex;
     return Scaffold(
       body: PopScope(
         canPop: !onReels,
         onPopInvokedWithResult: (didPop, result) {
           if (!didPop && onReels) _goToPage(0);
         },
-        child: PageView(
+        child: ShellTabPager(
           controller: _pageController,
           onPageChanged: (index) => setState(() => _settledIndex = index),
-          children: [
-            for (final page in _buildPages()) _KeepAlivePage(child: page),
-          ],
+          pages: _buildPages(),
         ),
       ),
       bottomNavigationBar: onReels
@@ -467,31 +463,6 @@ class _SwipeableTabShellState extends State<_SwipeableTabShell> {
               onTap: _goToPage,
             ),
     );
-  }
-}
-
-/// Keeps a tab's whole widget subtree alive once built — including scroll
-/// position and any live VideoPlayerControllers — for as long as it stays
-/// in the PageView's children list, same guarantee IndexedStack gave every
-/// branch before.
-class _KeepAlivePage extends StatefulWidget {
-  const _KeepAlivePage({required this.child});
-
-  final Widget child;
-
-  @override
-  State<_KeepAlivePage> createState() => _KeepAlivePageState();
-}
-
-class _KeepAlivePageState extends State<_KeepAlivePage>
-    with AutomaticKeepAliveClientMixin {
-  @override
-  bool get wantKeepAlive => true;
-
-  @override
-  Widget build(BuildContext context) {
-    super.build(context);
-    return widget.child;
   }
 }
 
@@ -542,7 +513,7 @@ class _TabNavBar extends ConsumerWidget {
                       icon: tabIcons[i],
                       activation: (1 - (page - i).abs()).clamp(0.0, 1.0),
                       onTap: () => onTap(i),
-                      badgeCount: i == _chatPageIndex ? unreadChats : 0,
+                      badgeCount: i == kChatTabIndex ? unreadChats : 0,
                     ),
                   ),
                 ],

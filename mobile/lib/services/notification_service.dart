@@ -1,16 +1,17 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/api_client.dart';
 import '../core/firebase_options.dart';
-import '../core/theme.dart';
 import 'auth_service.dart';
 
 // Web push needs a VAPID key, which is per-project and can't be derived from
@@ -20,231 +21,157 @@ import 'auth_service.dart';
 //   flutter build web --dart-define=FCM_VAPID_KEY=...
 const _webVapidKey = String.fromEnvironment('FCM_VAPID_KEY');
 
+// Android notification channels, created at IMPORTANCE_HIGH by MainActivity.kt
+// (ids and names must match there and on the server: CHAT_PUSH_CHANNEL in
+// chats/service.ts, BROADCAST_PUSH_CHANNEL in notifications/service.ts). A
+// backgrounded app's push lands on them via FCM; a foreground one is posted
+// here on the same channel, so the user's per-channel settings apply to both.
+const _chatChannelId = 'chat_messages';
+const _chatChannelName = 'Messages';
+const _announcementsChannelId = 'announcements';
+const _announcementsChannelName = 'Announcements';
+
 final messagingProvider = Provider<FirebaseMessaging>(
   (ref) => FirebaseMessaging.instance,
 );
 
 // The chat thread currently on screen, in plain synchronous memory — this is
-// THE suppression for "don't banner a message from the chat I'm looking at".
-// It used to be mirrored to users.activeChatId so the server could skip the
-// push (and the unread increment) too, but a killed app left that flag stuck
-// and the chat went permanently silent; the server no longer suppresses on
-// it (see server/src/chats/service.ts sendMessage). Readable from main.dart's
-// foreground handler, which runs outside any BuildContext/ProviderScope —
-// same "simple global mutable flag" convention as AppColors._isDark.
+// THE suppression for "don't notify about a message from the chat I'm looking
+// at". It used to be mirrored to users.activeChatId so the server could skip
+// the push (and the unread increment) too, but a killed app left that flag
+// stuck and the chat went permanently silent; the server no longer suppresses
+// on it (see server/src/chats/service.ts sendMessage). Readable from the
+// foreground handler below, which runs outside any BuildContext/ProviderScope
+// — same "simple global mutable flag" convention as AppColors._isDark.
 String? _activeChatId;
 void setLocallyActiveChatId(String? chatId) => _activeChatId = chatId;
 
-// Anchors the in-app foreground banner (see showForegroundMessageBanner)
-// outside any single screen's widget tree — main.dart wires this into
-// MaterialApp.router's navigatorKey, the same "global key set up before
-// runApp, used by code with no BuildContext of its own" pattern
-// firebaseMessagingBackgroundHandler already relies on for Firebase itself.
-// A NavigatorState's context sits above every route, which is what lets the
-// banner insert itself into the *root* Overlay (so it floats above whatever
-// screen is currently showing, not just the one active when it was set up)
-// and resolve GoRouter.of(context) for the tap-to-open-chat navigation.
+// Anchors notification-tap navigation outside any single screen's widget tree
+// — router.dart wires this into MaterialApp.router's navigatorKey, the same
+// "global key set up before runApp, used by code with no BuildContext of its
+// own" pattern firebaseMessagingBackgroundHandler already relies on for
+// Firebase itself. A NavigatorState's context sits above every route, which is
+// what lets GoRouter.of(context) resolve from a push handler.
 final rootNavigatorKey = GlobalKey<NavigatorState>();
 
-// Foreground-only banner — a backgrounded/killed app gets the OS's own
-// system notification for free from the FCM `notification` payload;
-// foreground FCM delivery never shows anything automatically, so this is
-// what stands in for it. Skipped entirely when the recipient is already
-// looking straight at this exact chat (the local _activeChatId check — the
-// server sends the push regardless, by design; see that flag's comment).
-Future<void> showForegroundMessageBanner(RemoteMessage message) async {
-  debugPrint(
-    'showForegroundMessageBanner: fired data=${message.data} '
-    'notification.title=${message.notification?.title} '
-    'notification.body=${message.notification?.body}',
-  );
-  final chatId = message.data['chatId'] as String?;
-  if (chatId != null && chatId == _activeChatId) {
-    debugPrint(
-      'showForegroundMessageBanner: suppressed, chatId=$chatId matches active chat',
+// What a push is about, read off its data payload. The server sets `type`
+// ('chat_message' with a chatId, or 'broadcast'); anything else — an order
+// notice, say — has nowhere to route and no channel of its own.
+class _PushKind {
+  _PushKind(Map<String, dynamic> data)
+    : chatId = data['chatId'] as String?,
+      isBroadcast = data['type'] == 'broadcast';
+
+  final String? chatId;
+  final bool isBroadcast;
+}
+
+final _localNotifications = FlutterLocalNotificationsPlugin();
+
+// Only Android posts its own foreground notification. firebase_messaging hands
+// a push that arrives while the app is open to Dart and shows nothing — the
+// heads-up a backgrounded app gets for free from the `notification` payload
+// never appears — so the app posts it itself. iOS is the other way round: the
+// OS presents a foreground push itself once main.dart asks it to
+// (setForegroundNotificationPresentationOptions), and a local copy on top of
+// that would show two banners for one message.
+bool get _postsForegroundNotifications =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+/// A push that arrives while the app is OPEN. Registered exactly once from
+/// main() with the app-lifetime container, after the plugin is ready — a raw
+/// Stream.listen (unlike Riverpod's ref.listen) creates a fresh subscription
+/// per call, so this must never run from a build(). `onBroadcast` is how the
+/// inbox learns a new row exists: the notifications list is REST-only
+/// (notifications_providers.dart) and this is the one moment the app knows to
+/// refetch it, so the bell badge updates without a restart.
+Future<void> setUpForegroundNotifications(
+  ProviderContainer container, {
+  required VoidCallback onBroadcast,
+}) async {
+  if (_postsForegroundNotifications) {
+    await _localNotifications.initialize(
+      settings: const InitializationSettings(
+        // A dedicated monochrome status-bar glyph, NOT the launcher icon: on
+        // API 26+ @mipmap/ic_launcher resolves to an adaptive icon, which
+        // Android 8.0 rejects as a notification small icon (RemoteService-
+        // Exception "Bad notification posted" — the process dies) and later
+        // versions flatten to a blob. FCM's own SDK guards against that; this
+        // plugin does not. The manifest points FCM at the same drawable so a
+        // background delivery looks identical.
+        android: AndroidInitializationSettings('@drawable/ic_notification'),
+      ),
+      onDidReceiveNotificationResponse: (response) =>
+          _openFromPayload(container, response.payload),
     );
+    // The notification was posted while the app was open, the app has since
+    // been killed, and its tap is what launched us — the plugin reports that
+    // here rather than through the callback above (which needs a live app).
+    final launch = await _localNotifications.getNotificationAppLaunchDetails();
+    if (launch != null && launch.didNotificationLaunchApp) {
+      _openFromPayload(container, launch.notificationResponse?.payload);
+    }
+  }
+  FirebaseMessaging.onMessage.listen((message) {
+    debugPrint(
+      'foreground push: messageId=${message.messageId} data=${message.data}',
+    );
+    _markMessageDelivered(message);
+    final kind = _PushKind(message.data);
+    if (kind.isBroadcast) onBroadcast();
+    _showForegroundNotification(message, kind);
+  });
+}
+
+// Android's system notification for a foreground push — the same channel, tag
+// and (id 0) identity FCM's own Android SDK uses for a background delivery, so
+// a chat that already has a notification in the shade gets it REPLACED rather
+// than a second one stacked next to it. A push with no collapse identity (an
+// order notice: no chatId, no type) gets no tag and its own id instead, so it
+// stacks the way FCM's background delivery does — with tag 'broadcast' it
+// would silently overwrite a pending announcement, and vice versa. Skipped
+// entirely when the recipient is already looking straight at this exact chat
+// (the local _activeChatId check — the server sends the push regardless, by
+// design; see that flag).
+Future<void> _showForegroundNotification(
+  RemoteMessage message,
+  _PushKind kind,
+) async {
+  if (!_postsForegroundNotifications) return;
+  if (kind.chatId != null && kind.chatId == _activeChatId) {
+    debugPrint('foreground push: suppressed, chat ${kind.chatId} is on screen');
     return;
   }
-
   final title = message.notification?.title ?? '';
   final body = message.notification?.body ?? '';
-  if (title.isEmpty && body.isEmpty) {
-    debugPrint('showForegroundMessageBanner: suppressed, empty title+body');
-    return;
-  }
+  if (title.isEmpty && body.isEmpty) return;
 
-  // Read before the await below — a GlobalKey's currentContext, unlike a
-  // widget's own context, doesn't go stale mid-async-gap under any
-  // realistic scenario here (it would only become invalid if the whole app
-  // were being torn down, at which point nothing in this function matters
-  // anyway), but grabbing it first still means failing fast instead of
-  // doing the async permission check for nothing.
-  // NavigatorState.overlay directly, not Overlay.of(currentContext) — the
-  // latter walks up from the navigator's own context and intermittently
-  // fails to locate an ancestor Overlay mid-navigation (its null-check throws,
-  // crashing the whole foreground-message stream). The navigator owns its
-  // overlay, so reading it off the state is both correct and can't throw.
-  final navigator = rootNavigatorKey.currentState;
-  final overlay = navigator?.overlay;
-  debugPrint(
-    'showForegroundMessageBanner: overlay=${overlay != null ? "attached" : "NULL"}',
-  );
-  if (navigator == null || overlay == null) return;
-
-  // Device-level notification permission — off means the user has
-  // explicitly told the OS they don't want to be alerted, so the sound
-  // (which is what actually interrupts them) respects that; the in-app
-  // banner itself still shows, since that's this app's own UI, not a
-  // system notification, same as e.g. an in-app toast wouldn't need OS
-  // notification permission either.
-  final settings = await FirebaseMessaging.instance.getNotificationSettings();
-  if (settings.authorizationStatus == AuthorizationStatus.authorized ||
-      settings.authorizationStatus == AuthorizationStatus.provisional) {
-    SystemSound.play(SystemSoundType.alert);
-  }
-
-  _dismissForegroundBanner?.call();
-  late final OverlayEntry entry;
-  entry = OverlayEntry(
-    builder: (context) => _ForegroundBanner(
-      title: title,
-      body: body,
-      onTap: () {
-        _dismissForegroundBanner?.call();
-        if (chatId != null) GoRouter.of(context).push('/chat/$chatId');
-      },
-      onDismiss: () => _dismissForegroundBanner?.call(),
-    ),
-  );
-  _dismissForegroundBanner = () {
-    if (entry.mounted) entry.remove();
-    _dismissForegroundBanner = null;
-  };
-  overlay.insert(entry);
-  // No built-in auto-dismiss on a raw OverlayEntry — hide it after a few
-  // seconds like a real push notification banner, not a persistent fixture
-  // the user has to manually clear.
-  Future.delayed(
-    const Duration(seconds: 4),
-    () => _dismissForegroundBanner?.call(),
-  );
-}
-
-VoidCallback? _dismissForegroundBanner;
-
-/// Floats above whatever screen is currently showing — doesn't reserve any
-/// layout space (unlike MaterialBanner, which pushes the body below it down
-/// by however tall the banner is), same as how a real system notification
-/// overlays instead of shoving the app's own content around.
-class _ForegroundBanner extends StatefulWidget {
-  const _ForegroundBanner({
-    required this.title,
-    required this.body,
-    required this.onTap,
-    required this.onDismiss,
-  });
-
-  final String title;
-  final String body;
-  final VoidCallback onTap;
-  final VoidCallback onDismiss;
-
-  @override
-  State<_ForegroundBanner> createState() => _ForegroundBannerState();
-}
-
-class _ForegroundBannerState extends State<_ForegroundBanner>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 220),
-  )..forward();
-  late final Animation<Offset> _slide = Tween<Offset>(
-    begin: const Offset(0, -1),
-    end: Offset.zero,
-  ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned(
-      top: MediaQuery.of(context).padding.top + 8,
-      left: 12,
-      right: 12,
-      child: SlideTransition(
-        position: _slide,
-        child: SafeArea(
-          bottom: false,
-          child: Material(
-            color: AppColors.backgroundCard,
-            elevation: 6,
-            borderRadius: BorderRadius.circular(14),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(14),
-              onTap: widget.onTap,
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: AppColors.brand,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(
-                        Icons.chat_bubble_outline,
-                        color: Colors.white,
-                        size: 18,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (widget.title.isNotEmpty)
-                            Text(
-                              widget.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: AppTypography.bodyMediumSemibold,
-                            ),
-                          if (widget.body.isNotEmpty)
-                            Text(
-                              widget.body,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: AppTypography.bodySmall,
-                            ),
-                        ],
-                      ),
-                    ),
-                    GestureDetector(
-                      onTap: widget.onDismiss,
-                      child: Icon(
-                        Icons.close,
-                        size: 18,
-                        color: AppColors.textMuted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
+  final channelId = kind.isBroadcast ? _announcementsChannelId : _chatChannelId;
+  final channelName = kind.isBroadcast
+      ? _announcementsChannelName
+      : _chatChannelName;
+  final tag = kind.chatId ?? (kind.isBroadcast ? 'broadcast' : null);
+  await _localNotifications.show(
+    // messageId is set by FCM's Android SDK on every delivery; its String
+    // hashCode fits the 32-bit id the plugin requires.
+    id: tag == null ? message.messageId.hashCode : 0,
+    title: title,
+    body: body,
+    notificationDetails: NotificationDetails(
+      android: AndroidNotificationDetails(
+        channelId,
+        channelName,
+        // Matches the channel MainActivity.kt created; the plugin would
+        // otherwise create a default-importance one under the same id on a
+        // device where the activity has not run yet, and a channel's
+        // importance is fixed at creation.
+        importance: Importance.high,
+        priority: Priority.high,
+        tag: tag,
       ),
-    );
-  }
+    ),
+    payload: jsonEncode(message.data),
+  );
 }
 
 // Marks the message the push refers to as "delivered" — the double-gray-
@@ -286,45 +213,45 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await _markMessageDelivered(message);
 }
 
-/// Foreground counterpart to firebaseMessagingBackgroundHandler — the
-/// background handler only ever fires while the app isn't already running in
-/// the foreground, so this covers the rest: app open, on some other screen
-/// than the message's own thread. Top-level (not an instance method) so
-/// main() can register it before runApp without constructing anything that
-/// needs a ProviderScope — same leak-avoidance the old code documented.
-void listenForegroundMessages(void Function(RemoteMessage message) onMessage) {
-  FirebaseMessaging.onMessage.listen((message) {
-    debugPrint(
-      'listenForegroundMessages: onMessage fired, messageId=${message.messageId}',
-    );
-    _markMessageDelivered(message);
-    onMessage(message);
-  });
-}
-
-/// Tapping a push opens its thread. Two entry points, because firebase_messaging
-/// reports them differently: the app was KILLED and the tap launched it
-/// (getInitialMessage — resolves once, at startup) or it was in the background
-/// (onMessageOpenedApp). Neither was handled before, so a tap only brought the
-/// app to whatever screen it was last on and left the user to hunt for the
-/// chat — the single most common way people open a messenger. Registered from
-/// main() with the app-lifetime container, like the outbox.
+/// Tapping a push the OS showed opens what it is about. Two entry points,
+/// because firebase_messaging reports them differently: the app was KILLED and
+/// the tap launched it (getInitialMessage — resolves once, at startup) or it
+/// was in the background (onMessageOpenedApp). Neither was handled before, so
+/// a tap only brought the app to whatever screen it was last on and left the
+/// user to hunt for the chat — the single most common way people open a
+/// messenger. Registered from main() with the app-lifetime container, like
+/// the outbox. (A tap on a notification the app posted itself while open
+/// arrives through the local plugin instead — setUpForegroundNotifications.)
 void listenNotificationTaps(ProviderContainer container) {
   FirebaseMessaging.instance.getInitialMessage().then((message) {
-    if (message != null) _openChatFromNotification(container, message);
+    if (message != null) _openFromNotificationData(container, message.data);
   });
   FirebaseMessaging.onMessageOpenedApp.listen(
-    (message) => _openChatFromNotification(container, message),
+    (message) => _openFromNotificationData(container, message.data),
   );
 }
 
-Future<void> _openChatFromNotification(
+// The local plugin hands back the JSON-encoded FCM data the notification was
+// posted with (see _showForegroundNotification), so both tap paths converge.
+void _openFromPayload(ProviderContainer container, String? payload) {
+  if (payload == null || payload.isEmpty) return;
+  try {
+    final data = jsonDecode(payload) as Map<String, dynamic>;
+    _openFromNotificationData(container, data);
+  } catch (e) {
+    debugPrint('notification tap: unreadable payload: $e');
+  }
+}
+
+Future<void> _openFromNotificationData(
   ProviderContainer container,
-  RemoteMessage message,
+  Map<String, dynamic> data,
 ) async {
-  final chatId = message.data['chatId'] as String?;
-  if (chatId == null) return;
-  debugPrint('notification tap: opening chat $chatId');
+  final kind = _PushKind(data);
+  if (kind.chatId == null && !kind.isBroadcast) return;
+  debugPrint(
+    'notification tap: opening ${kind.chatId != null ? "chat ${kind.chatId}" : "inbox"}',
+  );
   // The router only lets a signed-in user with a completed profile past the
   // splash/auth gates — wait for that before pushing, or the redirect that
   // sends them on to the home shell would land on top of the thread. On a warm
@@ -337,10 +264,15 @@ Future<void> _openChatFromNotification(
   }
   // One beat for the router's own redirect (splash → shell) to settle.
   await Future<void>.delayed(const Duration(milliseconds: 300));
-  if (chatId == _activeChatId) return; // already looking at it
   final context = rootNavigatorKey.currentContext;
   if (context == null || !context.mounted) return;
-  GoRouter.of(context).push('/chat/$chatId');
+  final chatId = kind.chatId;
+  if (chatId != null) {
+    if (chatId == _activeChatId) return; // already looking at it
+    GoRouter.of(context).push('/chat/$chatId');
+  } else {
+    GoRouter.of(context).push('/settings/notifications');
+  }
 }
 
 class NotificationService {
@@ -352,6 +284,8 @@ class NotificationService {
   /// Requests permission, fetches the FCM token, and registers it with the
   /// API (POST /users/me/fcm-tokens — UNIQUE(token) upsert; see
   /// docs/07_MIGRATION.md Phase 7). Called from SeMayApp once auth resolves.
+  /// The one permission prompt covers the app's own foreground notifications
+  /// too: Android 13+'s POST_NOTIFICATIONS gates every notification alike.
   Future<void> initAndSyncToken() async {
     try {
       // Web without a configured VAPID key can't produce a usable token — bail

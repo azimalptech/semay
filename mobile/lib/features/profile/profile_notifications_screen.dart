@@ -42,7 +42,15 @@ class ProfileNotificationsScreen extends ConsumerStatefulWidget {
 
 class _ProfileNotificationsScreenState
     extends ConsumerState<ProfileNotificationsScreen> {
-  bool _markedRead = false;
+  @override
+  void initState() {
+    super.initState();
+    // The provider is REST-only and otherwise cached for the app's lifetime,
+    // so a broadcast that arrived while this screen was closed (or the app
+    // backgrounded) is only seen if opening the inbox refetches. Riverpod
+    // keeps the previous list on screen while the refetch is in flight.
+    ref.invalidate(notificationsProvider);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -50,14 +58,18 @@ class _ProfileNotificationsScreenState
     final notificationsAsync = ref.watch(notificationsProvider);
     final docs = notificationsAsync.value ?? const [];
 
-    // Opening the list is the "seen" signal, same as Instagram/most apps —
-    // marks everything currently loaded as read once, not on every rebuild.
-    if (!_markedRead && docs.isNotEmpty) {
-      _markedRead = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        ref.read(notificationsServiceProvider).markAllRead(docs);
-      });
-    }
+    // Opening the list is the "seen" signal, same as Instagram/most apps. It
+    // is applied to each list the server RETURNS, not once on the first
+    // build: the first build shows the cached list (see initState), and the
+    // row this open fetched — the broadcast that arrived while the app was
+    // away — lands afterwards. Marked once per screen, that row would stay
+    // unread and the bell lit until the next open. markAllRead is a no-op
+    // when nothing is unread, so the refetch it triggers does not loop.
+    ref.listen(notificationsProvider, (previous, next) {
+      final loaded = next.value;
+      if (next.isLoading || loaded == null) return;
+      ref.read(notificationsServiceProvider).markAllRead(loaded);
+    });
 
     // Store-admin-only entry point into "request Super Admin broadcast a
     // notification" — lives here (not a separate row back on the Settings
@@ -82,14 +94,30 @@ class _ProfileNotificationsScreenState
             ),
         ],
       ),
-      body: docs.isEmpty
-          ? Center(
-              child: Text(
-                s.noNotificationsYet,
-                style: AppTypography.bodyMedium,
+      body: RefreshIndicator(
+        onRefresh: () => ref.refresh(notificationsProvider.future),
+        // Both branches stay scrollable when short — a RefreshIndicator only
+        // works over something the user can drag.
+        child: docs.isEmpty
+            ? CustomScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Center(
+                      child: Text(
+                        s.noNotificationsYet,
+                        style: AppTypography.bodyMedium,
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            : ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                children: _groupedByDate(docs),
               ),
-            )
-          : ListView(children: _groupedByDate(docs)),
+      ),
     );
   }
 

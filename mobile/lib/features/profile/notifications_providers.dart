@@ -7,8 +7,12 @@ import '../../services/auth_service.dart';
 typedef NotificationDoc = JsonDoc;
 
 /// The signed-in user's notifications, newest first. Empty (not an error)
-/// when signed out. REST + pull-to-refresh (no realtime channel — a new
-/// notification also arrives as an FCM push, and the list refreshes on open).
+/// when signed out. REST only, no realtime channel — so it is invalidated at
+/// the three moments a new row can exist: a broadcast push arriving while the
+/// app is open (main.dart's onBroadcast, which is what moves the feed's bell
+/// badge without a restart), the inbox screen opening, and pull-to-refresh.
+/// A broadcast that arrived while the app was backgrounded is picked up by
+/// the first of those on return, as before.
 final notificationsProvider = FutureProvider<List<NotificationDoc>>((ref) async {
   final session = await ref.watch(authStateChangesProvider.future);
   if (session == null) return const [];

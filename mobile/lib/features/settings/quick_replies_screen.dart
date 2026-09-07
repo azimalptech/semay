@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/api_client.dart';
 import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
@@ -70,8 +71,7 @@ class QuickRepliesScreen extends ConsumerWidget {
                   },
                   loading: () =>
                       const Center(child: CircularProgressIndicator()),
-                  error: (e, _) =>
-                      Center(child: Text(s.failedToLoad)),
+                  error: (e, _) => Center(child: Text(s.failedToLoad)),
                 ),
           ),
         ],
@@ -90,6 +90,9 @@ Future<void> _showEditSheet(
   final s = ref.read(l10nProvider);
   final controller = TextEditingController(text: initialText ?? '');
   final isEdit = replyId != null;
+  final service = ref.read(quickRepliesServiceProvider);
+  var submitting = false;
+  String? errorCode;
 
   await showModalBottomSheet<void>(
     context: context,
@@ -98,99 +101,143 @@ Future<void> _showEditSheet(
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
     ),
-    builder: (sheetContext) => Padding(
-      padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        top: 16,
-        bottom: MediaQuery.of(sheetContext).viewInsets.bottom + 16,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (sheetContext, setState) {
+        // One path for add/save/delete: the sheet closes only once the server
+        // has said yes; a failure keeps it open with the server's error code
+        // under the field. The handlers used to `await` the call bare inside
+        // `onPressed`, so a 400 surfaced as nothing at all — the sheet just
+        // would not close. Inline rather than a SnackBar because a SnackBar
+        // is drawn in the Scaffold *under* this sheet, i.e. hidden behind the
+        // very sheet whose error it reports.
+        Future<void> run(Future<void> Function() mutation) async {
+          setState(() {
+            submitting = true;
+            errorCode = null;
+          });
+          try {
+            await mutation();
+          } catch (e) {
+            if (sheetContext.mounted) {
+              setState(() {
+                submitting = false;
+                errorCode = e is ApiException ? e.error : '$e';
+              });
+            }
+            return;
+          }
+          ref.invalidate(quickRepliesProvider(storeId));
+          if (sheetContext.mounted) Navigator.of(sheetContext).pop();
+        }
+
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 16,
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom + 16,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                isEdit ? s.editQuickReply : s.addQuickReply,
-                style: AppTypography.titleLarge,
-              ),
-              const Spacer(),
-              IconButton(
-                icon: AppIcon('close', color: AppColors.textPrimary),
-                onPressed: () => Navigator.of(sheetContext).pop(),
-              ),
-            ],
-          ),
-          TextField(
-            controller: controller,
-            maxLines: 3,
-            style: AppTypography.bodyMedium,
-            decoration: const InputDecoration(border: OutlineInputBorder()),
-          ),
-          const SizedBox(height: 16),
-          if (isEdit)
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: () async {
-                      await ref
-                          .read(quickRepliesServiceProvider)
-                          .delete(storeId, replyId);
-                      ref.invalidate(quickRepliesProvider(storeId));
-                      if (sheetContext.mounted) {
-                        Navigator.of(sheetContext).pop();
-                      }
-                    },
-                    child: Text(s.delete),
+              Row(
+                children: [
+                  Text(
+                    isEdit ? s.editQuickReply : s.addQuickReply,
+                    style: AppTypography.titleLarge,
                   ),
+                  const Spacer(),
+                  IconButton(
+                    icon: AppIcon('close', color: AppColors.textPrimary),
+                    onPressed: submitting
+                        ? null
+                        : () => Navigator.of(sheetContext).pop(),
+                  ),
+                ],
+              ),
+              TextField(
+                controller: controller,
+                maxLines: 3,
+                style: AppTypography.bodyMedium,
+                decoration: InputDecoration(
+                  border: const OutlineInputBorder(),
+                  errorText: errorCode == null
+                      ? null
+                      : '${s.requestFailed} ($errorCode)',
                 ),
-                const SizedBox(width: 12),
-                Expanded(
+              ),
+              const SizedBox(height: 16),
+              if (isEdit)
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: submitting
+                            ? null
+                            : () => run(() => service.delete(storeId, replyId)),
+                        child: Text(s.delete),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: AppColors.brand,
+                        ),
+                        onPressed: submitting
+                            ? null
+                            : () {
+                                final text = controller.text.trim();
+                                if (text.isEmpty) return;
+                                run(
+                                  () => service.update(storeId, replyId, text),
+                                );
+                              },
+                        child: Text(s.save),
+                      ),
+                    ),
+                  ],
+                )
+              else
+                SizedBox(
+                  width: double.infinity,
                   child: FilledButton(
                     style: FilledButton.styleFrom(
                       backgroundColor: AppColors.brand,
                     ),
-                    onPressed: () async {
-                      final text = controller.text.trim();
-                      if (text.isEmpty) return;
-                      await ref
-                          .read(quickRepliesServiceProvider)
-                          .update(storeId, replyId, text);
-                      ref.invalidate(quickRepliesProvider(storeId));
-                      if (sheetContext.mounted) {
-                        Navigator.of(sheetContext).pop();
-                      }
-                    },
-                    child: Text(s.save),
+                    onPressed: submitting
+                        ? null
+                        : () {
+                            final text = controller.text.trim();
+                            if (text.isEmpty) return;
+                            // Re-read the list rather than trusting the one
+                            // on screen: the provider has no value while it
+                            // is still loading or after a failed load, and
+                            // hands back the *previous* list while a
+                            // post-invalidate refetch is in flight — either
+                            // way max + 1 of that would land on a slot that
+                            // is already taken (0, or the row just added)
+                            // and the new reply would tie instead of listing
+                            // last. A fetch failure surfaces like any other
+                            // error here. Stays a small int (see
+                            // nextQuickReplyPosition).
+                            run(() async {
+                              final current = await service.fetch(storeId);
+                              await service.add(
+                                storeId,
+                                text,
+                                position: nextQuickReplyPosition(current),
+                              );
+                            });
+                          },
+                    child: Text(s.add),
                   ),
                 ),
-              ],
-            )
-          else
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                style: FilledButton.styleFrom(backgroundColor: AppColors.brand),
-                onPressed: () async {
-                  final text = controller.text.trim();
-                  if (text.isEmpty) return;
-                  await ref
-                      .read(quickRepliesServiceProvider)
-                      .add(
-                        storeId,
-                        text,
-                        DateTime.now().millisecondsSinceEpoch,
-                      );
-                  ref.invalidate(quickRepliesProvider(storeId));
-                  if (sheetContext.mounted) Navigator.of(sheetContext).pop();
-                },
-                child: Text(s.add),
-              ),
-            ),
-        ],
-      ),
+            ],
+          ),
+        );
+      },
     ),
   );
 }

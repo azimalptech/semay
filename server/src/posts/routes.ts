@@ -121,12 +121,19 @@ export async function postRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ posts });
   });
 
+  // The home feed is every post type in one createdAt stream — reels
+  // interleave with photos as inline video cards, the way the Firestore-era
+  // feed (no type filter) behaved before this route was written with a
+  // hard `type IN ('image','carousel')` that silently dropped reels. The
+  // optional `type` filter is the same one GET /stores/:id/posts honours,
+  // for a client that wants a single type; the unfiltered walk is served
+  // directly by posts_createdAt_idx (see docs/08_OPERATIONS.md §6a).
   app.get("/feed", { preHandler: requireAuth }, async (req, reply) => {
     const query = listQuerySchema.safeParse(req.query);
     if (!query.success) return reply.code(400).send({ error: "INVALID_INPUT" });
 
     const rows = await prisma.post.findMany({
-      where: { type: { in: ["image", "carousel"] } },
+      where: query.data.type ? { type: query.data.type } : {},
       orderBy: { createdAt: "desc" },
       take: query.data.limit,
       skip: query.data.offset,

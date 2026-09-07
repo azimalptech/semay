@@ -111,12 +111,15 @@ describe("audit regressions", () => {
   });
 
   // findActiveSession reads without a lock and the revoke was unconditional, so
-  // N concurrent refreshes with one token each minted their own 30-day session
-  // family. Sequential replay already failed, which is what hid it.
-  describe("refresh token rotation is single-use under concurrency", () => {
-    it("lets exactly one of N parallel rotations win", async () => {
+  // N concurrent refreshes with one token each minted their own session family
+  // from it. Rotation is now a compare-and-swap, and the losers are honoured
+  // inside the reuse grace with a sibling in the SAME family (the contract is
+  // pinned in tests/session.rotation.test.ts) — so what this guards is the CAS
+  // itself: the presented row is retired once, and nothing leaves the family.
+  describe("refresh token rotation is one compare-and-swap under concurrency", () => {
+    it("retires the presented row once and keeps every issue inside its family", async () => {
       const user = await makeUser();
-      const { refreshToken } = await createSession(user.id, "audit");
+      const { session: root, refreshToken } = await createSession(user.id, "audit");
 
       const attempts = await Promise.allSettled(
         Array.from({ length: 8 }, async () => {
@@ -124,14 +127,21 @@ describe("audit regressions", () => {
           return rotateSession(session);
         })
       );
+      expect(attempts.filter((a) => a.status === "fulfilled")).toHaveLength(8);
 
-      const won = attempts.filter((a) => a.status === "fulfilled").length;
-      expect(won).toBe(1);
+      const rows = await prisma.session.findMany({ where: { userId: user.id } });
+      expect(rows).toHaveLength(9);
+      expect(rows.every((r) => r.familyId === root.familyId)).toBe(true);
+      const rootRow = rows.find((r) => r.id === root.id)!;
+      expect(rootRow.rotatedAt).not.toBeNull();
+      expect(rows.filter((r) => r.rotatedAt === null && r.revokedAt === null)).toHaveLength(8);
 
-      const live = await prisma.session.count({
-        where: { userId: user.id, revokedAt: null },
-      });
-      expect(live).toBe(1);
+      // A ninth, later presentation of the same token is served from the grace
+      // without touching the row again — the timestamp the winner wrote stands.
+      // (An unconditional UPDATE would pass every assertion above and fail this.)
+      await rotateSession(await findActiveSession(refreshToken));
+      const after = await prisma.session.findUniqueOrThrow({ where: { id: root.id } });
+      expect(after.rotatedAt).toEqual(rootRow.rotatedAt);
     });
   });
 

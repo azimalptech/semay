@@ -1,17 +1,18 @@
 import "server-only";
 import { cookies } from "next/headers";
-import { ACCESS_COOKIE, REFRESH_COOKIE } from "./authCookies";
+import {
+  ACCESS_COOKIE,
+  ACCESS_MAX_AGE_SECONDS,
+  authCookieOptions,
+  REFRESH_COOKIE,
+  REFRESH_MAX_AGE_SECONDS,
+} from "./authCookies";
+import { refreshSession } from "./refresh";
 
 const API_BASE_URL = process.env.API_BASE_URL;
 if (!API_BASE_URL) {
   throw new Error("API_BASE_URL is not set");
 }
-
-// Matches authCookies.ts — duplicated rather than imported since that file's
-// setAuthCookies takes a NextResponse and this needs the next/headers cookie
-// jar's own .set(), a different (but equivalent) API surface.
-const ACCESS_MAX_AGE_SECONDS = 15 * 60;
-const REFRESH_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 export class ApiError extends Error {
   constructor(
@@ -51,22 +52,6 @@ export async function callApi<T = unknown>(
   return json as T;
 }
 
-async function refreshTokens(
-  refreshToken: string
-): Promise<{ accessToken: string; refreshToken: string } | null> {
-  try {
-    const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken }),
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as { accessToken: string; refreshToken: string };
-  } catch {
-    return null;
-  }
-}
-
 /** Calls the real API using the caller's own cached access token and, if the
  * server rejects it as stale, refreshes once and retries before giving up.
  *
@@ -98,24 +83,17 @@ export async function callAuthedApi<T = unknown>(
     const refreshToken = jar.get(REFRESH_COOKIE)?.value;
     if (!refreshToken) throw err;
 
-    const refreshed = await refreshTokens(refreshToken);
-    if (!refreshed) throw err; // refresh token itself is gone — needs a real re-login
+    // The same single-flight call proxy.ts makes, so a Route Handler racing
+    // the page that triggered it shares one rotation instead of presenting the
+    // same token twice. Either failure leaves the cookies alone: "invalid" is
+    // proxy.ts's call to make on the next navigation (the one place that may
+    // end the session), and "unavailable" says nothing about the session at
+    // all — the caller just sees the original 401.
+    const refreshed = await refreshSession(refreshToken);
+    if (!refreshed.ok) throw err;
 
-    const secure = process.env.NODE_ENV === "production";
-    jar.set(ACCESS_COOKIE, refreshed.accessToken, {
-      httpOnly: true,
-      secure,
-      sameSite: "lax",
-      maxAge: ACCESS_MAX_AGE_SECONDS,
-      path: "/",
-    });
-    jar.set(REFRESH_COOKIE, refreshed.refreshToken, {
-      httpOnly: true,
-      secure,
-      sameSite: "lax",
-      maxAge: REFRESH_MAX_AGE_SECONDS,
-      path: "/",
-    });
+    jar.set(ACCESS_COOKIE, refreshed.accessToken, authCookieOptions(ACCESS_MAX_AGE_SECONDS));
+    jar.set(REFRESH_COOKIE, refreshed.refreshToken, authCookieOptions(REFRESH_MAX_AGE_SECONDS));
 
     // One retry only — if this ALSO 401s, something else is genuinely wrong
     // (account actually deleted/demoted for real), and that error should

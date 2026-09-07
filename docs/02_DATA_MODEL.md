@@ -76,7 +76,9 @@ Collection paths and document shapes. `→` marks a subcollection.
 ```jsonc
 {
   "storeId": "storeId1",
-  "type": "image",             // "image" | "carousel" | "reel"
+  "type": "image",             // "image" | "carousel" | "reel". All three flow through GET /feed in
+                                  // one createdAt stream (a reel renders as an inline video card between
+                                  // photo posts; optional ?type= narrows it); GET /reels is reels only.
   "mediaUrls": ["url1", "url2"],  // 1 item for image/reel, 2+ for carousel
   "thumbnailUrl": "",           // for reels
   "caption": "New arrivals! 💅",
@@ -88,7 +90,7 @@ Collection paths and document shapes. `→` marks a subcollection.
   "likesCount": 0,
   "savesCount": 0,
   "viewsCount": 0,               // denormalized unique-viewer count — see posts/{postId}/views below.
-                                  // Detail/full-view only; feed scrolling never counts.
+                                  // Counts after 0.8 s on screen, feed scrolling included.
   "sentCount": 0,                 // denormalized unique-sender count — see posts/{postId}/sent below.
   "sharesCount": 0,                // denormalized unique-sharer count — see posts/{postId}/shares below.
   "createdAt": "<timestamp>"
@@ -97,9 +99,15 @@ Collection paths and document shapes. `→` marks a subcollection.
 - `posts/{postId}/likes/{uid}` → `{ createdAt }` (existence = liked)
 - `posts/{postId}/views/{uid}` → `{ viewedAt }` — unique-viewer record, doc id = uid so re-viewing
   can't inflate the count (mirrors `stories/{storyId}/views/{uid}`). Written by
-  `PostsService.recordView` only from the post/reel **detail** view (`ImagePostDetailContent`,
-  `ReelPlayerView`), triggered after a 2s dwell timer, OR immediately on liking the post, OR
-  immediately on a pinch-zoom gesture — never from feed scrolling. `onViewCreated` (create-only
+  `PostsService.recordView` once a post or reel has been on screen for **0.8 s** with the app in
+  the foreground — backgrounding cancels a running dwell and returning starts it over
+  (`ViewDwell.threshold`, `mobile/lib/features/shared/view_dwell.dart` — the one constant behind
+  every surface): the feed card (`PostCard`, >60% of the media square visible while scrolling —
+  this now counts), the image detail view (`ImagePostDetailContent`) and the active reel
+  (`ReelPlayerView`, in the Reels tab or a pushed reel pager), OR immediately on liking / pinch-
+  zooming in the detail views. Whichever surface fires first, the same post counts once per
+  30-minute window — the dedupe is client-side (`InteractionBuffer`, `docs/07_MIGRATION.md`), so
+  scrolling past a card and then opening it is still one view. `onViewCreated` (create-only
   trigger, since these docs are never updated/deleted) increments `posts/{postId}.viewsCount`.
 - `posts/{postId}/sent/{uid}` → `{ sentAt }` — unique-sender record, same doc-id-per-uid shape as
   `views` above: the same person sending this post to chat more than once still counts once.
@@ -162,15 +170,37 @@ active story `createdAt`; any newer story flips the ring back to unseen automati
   "unreadByAdmin": 0,
   "typingUserAt": null,         // heartbeat timestamp while the user is composing; the admin side
   "typingAdminAt": null,        // shows "typing…" while it's <5s old (and vice versa). Cleared on send.
-  "hiddenByUserAt": null,       // <timestamp> | null — per-side "delete from my list" soft-hide
-  "hiddenByAdminAt": null,      // (ChatService.hideChat, swipe-left-to-delete on the chat list). The
-                                 // thread stays fully intact for the other party; the deleter's list
-                                 // just filters it out (chat_list_screen.dart's _isHiddenForSide) as
-                                 // long as lastMessageAt <= this stamp. A newer message bumps
-                                 // lastMessageAt past it, so the chat reappears automatically. hideChat
-                                 // also zeroes that side's unread counter so the nav badge doesn't keep
-                                 // counting a dismissed chat. NOT a hard delete — messages/order
-                                 // history are never removed.
+  "hiddenByUserAt": null,       // <timestamp> | null — per-side delete (ChatService.hideChat,
+  "hiddenByAdminAt": null,      // swipe-left-to-delete on the chat list). The deleter's list filters
+                                 // the chat out (chat_list_screen.dart's _isHiddenForSide) as long as
+                                 // lastMessageAt <= this stamp; a newer message bumps lastMessageAt
+                                 // past it and the chat reappears — showing only what arrived after
+                                 // the cutoff below. hideChat also zeroes that side's unread counter
+                                 // so the tab badge and the launcher icon don't keep counting a
+                                 // dismissed chat. The other party is untouched.
+  "hiddenByUserUpToId": null,   // <messageId> | null — that side's HISTORY cutoff: the newest
+  "hiddenByAdminUpToId": null,  // messages.id that existed when they last deleted the chat, read
+                                 // under the same chats-row lock sendMessage takes (a racing send
+                                 // lands wholly before or wholly after it). Every read that side
+                                 // performs — GET /chats/:id/messages (first page and ?before=
+                                 // paging), the chat:{id}:messages socket snapshot, delivered/read
+                                 // receipts (the roll-up carries it as fromMessageId), reply-to
+                                 // quoting — is filtered to id > this, and a message from the other
+                                 // side that quotes a row at/below it is served to this side with
+                                 // replyToMessageId/replyToText/replyToSenderRole nulled (projected
+                                 // per reader in listMessages and, for the shared live upsert, on
+                                 // the phone — the stored row keeps its quote). The other side reads
+                                 // the table unfiltered. Superadmin IS the admin side here, as on
+                                 // the store list and DELETE: its delete writes hiddenByAdminUpToId,
+                                 // and a store admin's delete bounds superadmin reads of that chat in
+                                 // turn. Keyed by id rather than createdAt-vs-hiddenAt
+                                 // because ids are the ordering/paging key everywhere else and never
+                                 // tie or cross between API processes. NOT a hard delete — rows are
+                                 // never removed, only invisible to the side that deleted. null =
+                                 // nothing hidden: chats deleted before this field existed were
+                                 // deliberately not backfilled and keep their list-only hide. The
+                                 // phone mirrors it (ChatMessagesNotifier drops held rows <= cutoff
+                                 // and prunes its SQLite cache; hideChat wipes the thread's cache).
   "mutedByUser": false,         // per-chat notification mute, set from the thread's own mute toggle
   "mutedByAdmin": false         // (chat_thread_screen.dart) — suppresses only the FCM push
                                  // (onMessageCreated), not the message itself or the unread counter.
@@ -283,7 +313,18 @@ token (or was offline) when a push went out. The client may only flip `read` to 
 ```jsonc
 {
   "text": "Yes we can deliver it. Where should we deliver to?",
-  "order": 0,                   // manual drag-to-reorder position, ascending
+  "position": 0,                // list order, ascending. MySQL `store_quick_replies.position` is a
+                                 // 32-bit non-negative int (0..2147483647); the server answers
+                                 // 400 INVALID_INPUT above that, defaults it to 0 when omitted.
+                                 // NOT a timestamp: the Firestore-era field was `order` and the app
+                                 // filled it with epoch milliseconds, which never fit this column —
+                                 // every Add since the cutover failed. The app now re-reads the
+                                 // list at Add time (not the one on screen, which may be unloaded
+                                 // or stale) and appends with max(position) + 1, clamped to the
+                                 // column max, so new replies list last. Ties (two admins adding
+                                 // in the same instant) order by id. There is no reorder UI yet (the drag handle
+                                 // is decorative); a future drag-to-reorder writes small ints via
+                                 // PATCH, never timestamps.
   "createdAt": "<timestamp>"
 }
 ```
@@ -336,6 +377,54 @@ number for 1 hour, blocking both `sendOtp` and `verifyOtp` until it passes; by t
 code has always also expired (lockout > TTL), so the client needs a fresh `sendOtp` call regardless of
 `attempts`.
 Short-lived, cleaned up by a scheduled Cloud Function (e.g. daily deletion of expired docs).
+
+## `sessions` (MySQL — `server/prisma/schema.prisma` `Session`)
+```jsonc
+{
+  "id": "<uuid>",
+  "userId": "<uid>",
+  "familyId": "<uuid>",         // id of the login's root row, inherited by every refresh's successor and
+                                 // every grace-issued sibling (below). One login = one family; logout
+                                 // revokes the family, so a live sibling the client never received (a
+                                 // lost refresh response) cannot outlive the sign-out. Never spans
+                                 // devices — each login creates its own root. No database default (Prisma
+                                 // fills it): a row inserted without one — '' on non-strict MySQL, from a
+                                 // build predating the column still serving on the new schema — is
+                                 // treated by session.ts as its own root, so such rows never merge into
+                                 // one cross-user family.
+  "tokenHash": "<sha256 hex>",  // of the opaque refresh token; the token itself is never stored, which is
+                                 // also why a grace reuse is answered with a NEW sibling pair rather than
+                                 // the pair the lost response carried.
+  "deviceInfo": "<string | null>",
+  "createdAt": "<timestamp>",
+  "lastUsedAt": "<timestamp>",  // = createdAt: every refresh creates a new row, so a row's creation is its
+                                 // last use. Nothing updates it.
+  "expiresAt": "<timestamp>",   // createdAt + REFRESH_TOKEN_TTL_DAYS (default 730). SLIDING: each
+                                 // refresh's successor gets a fresh window, so a session lapses only on a
+                                 // device silent for two years. Sessions last until logout (owner
+                                 // decision, 2026-09); this bounds abandoned devices, not login cadence.
+  "rotatedAt": null,            // <timestamp> | null — set by /auth/refresh on the presented row when its
+                                 // successor is issued (compare-and-swap: exactly one refresh sets it).
+                                 // The row stays accepted for REFRESH_REUSE_GRACE_SECONDS (60) after this
+                                 // and is answered with a live sibling in the same family — what stops a
+                                 // lost refresh response, or two browser tabs on one cookie, from logging
+                                 // a device out. After the grace a replay gets 401 SESSION_INVALID for
+                                 // that token only (no family revocation). Kept separate from revokedAt so
+                                 // "superseded" and "logged out" cannot be confused.
+  "revokedAt": null             // <timestamp> | null — explicit end. Set family-wide by /auth/logout
+                                 // when presented a token /auth/refresh would still accept (live, or
+                                 // rotated inside the grace); a token rotated past the grace, or expired,
+                                 // signs nothing out — a stale token must not be able to end the owner's
+                                 // live session. Never accepted again, grace or not. Account deletion and
+                                 // the superadmin password change delete rows outright instead.
+}
+```
+The maintenance reaper (`server/src/maintenance.ts`) deletes rows past `expiresAt` and rows whose
+`rotatedAt` or `revokedAt` is more than 7 days old — long after the grace, so a replayed token still
+meets an explicit dead row. A live row is never deleted, whatever its age. Rows minted before the
+`sessions_until_logout` migration became their own family (`familyId = id`) and had `expiresAt`
+re-based to `createdAt + 730 d`, so already-logged-in devices inherited the rule at once; rows retired
+under the old strictly-single-use rotation stay `revokedAt`-stamped and age out as before.
 
 ## Denormalization notes
 - `stores.postsCount` / `reelsCount` are incremented/decremented by Cloud Function triggers on

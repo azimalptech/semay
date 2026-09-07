@@ -135,7 +135,9 @@ Related fixes in the same pass:
   rotates the refresh token on every call, so the second refresh presented an
   already-revoked token and the session was killed for nothing. The interceptor
   also no longer logs out when the refresh endpoint was merely *unreachable* —
-  only when it *rejected* the token.
+  only when it *rejected* the token. The server has since grown a reuse grace
+  (§3c), so a second refresh with the same token is honoured even when one
+  does slip through.
 - **Receipts are a roll-up event**, not a re-snapshot. `markReceipts` published
   the full 200-message window on every delivered/read receipt; with delivered
   receipts now firing per incoming message, that was up to ~2×200 messages of
@@ -161,11 +163,13 @@ Related fixes in the same pass:
   on a per-attempt placeholder so a subscribe/unsubscribe/subscribe burst can't
   install two bus listeners. The access token no longer reaches the disk log
   (request serializer redacts `token=` in URLs).
-- **A refresh is "rejected" only on 400/401/403.** A 429 from the auth rate
-  limiter (60/min per IP, and carrier NAT puts many phones behind one IP) or
-  a 5xx used to count as rejection and log the user out; now it is
-  "unreachable" — retried, session kept. A logout that completes while a
-  refresh is in flight also wins over that refresh.
+- **A refresh is "rejected" only on an explicit `401 SESSION_INVALID`.** A 429
+  from the rate limiter (carrier NAT puts many phones behind one IP), a 5xx, a
+  timeout — originally even a 400/403 — used to count as rejection and log the
+  user out; now everything but the server's own verdict on the token is
+  "unreachable": retried once after 2 s, otherwise left to the next request,
+  session kept (§3c). A logout that completes while a refresh is in flight
+  also wins over that refresh.
 
 ### 3b. Push: what the server sends and why
 
@@ -174,17 +178,69 @@ Related fixes in the same pass:
   the app on enter/leave; a killed app, a crash, or a PATCH lost to bad signal
   left it stuck, and that chat then never badged or notified its user again.
   Whether someone is looking at a thread is only knowable on their device, so
-  the app suppresses its own in-app banner and the server counts and pushes
-  regardless. The thread screen answers each incoming message with a read
-  receipt within one round-trip, so the counter is back at 0 before anyone sees
-  it. The column is kept as a diagnostic hint only.
-- **Payload** (`notifications/push.ts`): `android.priority=high` (wakes a dozing
-  device), `channelId=chat_messages` (a channel the app creates at
-  IMPORTANCE_HIGH — heads-up banner + sound; FCM's default "Miscellaneous"
-  channel is silent), `tag=<chatId>` (one notification per conversation, newest
-  replaces oldest; iOS `thread-id` groups them), `contentAvailable` (iOS wakes
-  the app to post the delivered receipt), and `data:{type,chatId,messageId,
-  senderRole}` — `chatId` is what a notification tap routes to.
+  the app suppresses its own foreground notification for that one chat and
+  the server counts and pushes regardless. The thread screen answers each
+  incoming message with a read receipt within one round-trip, so the counter
+  is back at 0 before anyone sees it. The column is kept as a diagnostic hint
+  only.
+- **Chat payload** (`notifications/push.ts`, set by `chats/service.ts`):
+  `android.priority=high` (wakes a dozing device), `channelId=chat_messages`
+  (a channel the app creates at IMPORTANCE_HIGH — heads-up banner + sound;
+  FCM's default "Miscellaneous" channel is silent), `tag=<chatId>` (one
+  notification per conversation, newest replaces oldest; iOS `thread-id`
+  groups them), `contentAvailable` (iOS wakes the app to post the delivered
+  receipt), and `data:{type:"chat_message",chatId,messageId,senderRole}` —
+  `chatId` is what a notification tap routes to.
+- **Broadcast payload** (`notifications/service.ts`): same priority and sound,
+  `channelId=announcements` (a second IMPORTANCE_HIGH channel the app creates
+  next to the chat one, so a user can silence announcements in system settings
+  without silencing chats; an app older than the channel falls back to the
+  manifest default, `chat_messages`, so the server side shipped first),
+  `tag=broadcast` (a newer unread announcement replaces the older one in the
+  shade — the inbox keeps every one), `data:{type:"broadcast"}` (routes a tap
+  to the inbox and tells an open app to refetch it), and **no**
+  `contentAvailable`. The inbox row (`user_notifications`) is written first and
+  is the durable record; the push runs in the background after the response,
+  and its tally is logged as `broadcast push done {users, sent, failed}` (or
+  `broadcast push failed`). The response carries `pushEnabled` and, when false,
+  `pushDisabledReason`, and the panel shows both — `sent` counts inbox rows,
+  never pushes. Order notices (`orders/service.ts`) pass no channel or tag and
+  land on the manifest default; posted by the app in the foreground they get
+  no tag and their own id, so they stack instead of overwriting a pending
+  announcement (or being overwritten by the next one).
+- **While the app is open** FCM shows nothing by itself: on Android the SDK
+  hands a foreground push to Dart and the heads-up a backgrounded app gets for
+  free never appears, and on iOS the OS asks the app what to present. The app
+  therefore posts the notification itself on Android
+  (`flutter_local_notifications`, same channel, tag and id-0 identity FCM's own
+  SDK uses, so it replaces rather than stacks; skipped only for the chat on
+  screen; status-bar glyph `res/drawable/ic_notification`, also FCM's
+  `default_notification_icon` in the manifest — the adaptive launcher icon is
+  rejected as a small icon by Android 8.0, which kills the posting process)
+  and on iOS asks the OS to present alert + sound + badge
+  (`setForegroundNotificationPresentationOptions` in `main.dart` — which
+  cannot be decided per message, so an iOS user in a thread also hears a push
+  for that thread). The previous in-app overlay banner is gone: it called
+  `SystemSound.play(SystemSoundType.alert)`, which Flutter documents as ignored
+  on Android and iOS, so it was silent by construction. A foreground broadcast
+  also invalidates the REST-only inbox provider, which is what moves the
+  feed's bell badge without a restart; the inbox screen marks read every list
+  the server returns (not once per open), so the row its own refetch brings
+  in — a broadcast that arrived while the app was away — is marked too.
+- **`push skipped: FCM disabled {reason, recipients, skipped}`** — logged (warn,
+  at most once a minute) by every notification push path — chat, broadcast,
+  order notice — when the server has no usable service account.
+  `chats/service.ts` deliberately does not gate `sendChatPush` on
+  `isPushEnabled()`: an early return there left chat, the highest-volume push,
+  out of the count (the badge lookups it saves are the normal per-message
+  ones). The one silent skip is the iOS badge-only correction after a read
+  (`syncLauncherBadges`), which shows nothing even when it is sent. Until this
+  line existed a push-less production was
+  indistinguishable from a working one: the broadcast route answered
+  `{sent: 25, failed: 0}`, the panel showed "Sent: 25", the inbox rows were
+  there on next open, and no phone ever rang — exactly the "broadcast only
+  visible after reopening, and silent" report. The boot line (§4) says the
+  same thing once; this one says it every time it matters.
 - **Launcher badge** is per recipient: `SUM(unreadByUser)` across the user's
   chats, or for an admin the sum across every store they manage (two queries
   however many admins) — muted chats excluded, because a muted chat sends no
@@ -199,6 +255,72 @@ Related fixes in the same pass:
   (now in the Xcode project), `UIBackgroundModes: remote-notification` in
   Info.plist (now set), and an APNs key uploaded to the Firebase project with
   the App ID's Push Notifications capability enabled (portal work, not code).
+
+### 3c. Sessions last until logout
+
+Both clients were forcing a re-login after roughly the 15-minute access-token
+window (owner report, 2026-09) although refresh tokens nominally lasted 30
+days. The access TTL was only the trigger; the session died because rotation
+was strictly single-use and both clients turned *any* failed refresh into a
+logout:
+
+- **web-admin** refreshed per request with no coordination. A page plus its
+  `/api/*` fetches, a hover-prefetch plus the click, or two tabs all POSTed
+  `/auth/refresh` with the same cookie; rotation let one win and told the rest
+  `SESSION_INVALID`, and `proxy.ts` answered that — and equally any 429, 5xx
+  or network error — with a redirect to `/login` and cleared cookies. The
+  dev-box request logs show the 200-then-401 pair on one token over and over.
+- **mobile** treated 400/401/403 from `/auth/refresh` as final. A refresh whose
+  response never arrived (15 s receive timeout, app suspended mid-request) left
+  the phone holding a token the server had already retired; the next refresh
+  was a replay, got 401, and the app logged out. `SecureSessionStore.save` also
+  wrote the access token before the refresh token, so a kill between the two
+  writes stranded the retired one.
+- `REFRESH_TOKEN_TTL_DAYS=30`, with the reaper deleting on expiry, logged out
+  any device idle for a month.
+
+What holds now (`server/src/auth/session.ts`; pinned by
+`tests/session.rotation.test.ts`):
+
+| Rule | Mechanism |
+|---|---|
+| Rotation is still a compare-and-swap | `rotatedAt` flips null → timestamp for exactly one caller. `revokedAt` is kept for "logged out" so the two states cannot be confused |
+| A just-rotated token is honoured for `REFRESH_REUSE_GRACE_SECONDS` (60 s) | The loser re-reads the row and is issued a live **sibling** pair in the same family (only the successor's *hash* is stored, so the identical pair cannot be re-sent). N concurrent refreshes with one token all succeed; a lost response heals on the next attempt |
+| Past the grace, a replay is a replay | `401 SESSION_INVALID` for that token only — no family revocation, so a legitimately late retry can never sign a device out |
+| Expiry slides | Every successor is issued with a fresh `REFRESH_TOKEN_TTL_DAYS` window (default 730): a token lapses only after two years *without use* |
+| Logout ends the family | `familyId` links every row of a login; `/auth/logout` revokes them all, so a dangling sibling cannot outlive a sign-out. It takes the same rule as refresh: a live token, or one rotated inside the grace (a phone's Sign out racing its own refresh) ends the family; a token rotated past the grace or expired is a no-op (still 200) — a stale token, captured in transit or left in a backup, must not be able to end the owner's live session. Account deletion and the superadmin password change delete rows outright |
+| A row without a family is its own | `familyId` has no database default (Prisma fills it). A build predating the column that is still serving after the migration was applied inserts `''` on a non-strict MySQL — for every user — and fails the INSERT on a strict one (`09_DEPLOYMENT.md` §12 gives the deploy order that avoids both). `session.ts` treats `''` as "root = this row" on rotation and logout, so such rows can never merge into one cross-user family |
+| The reaper never deletes a live row | Only rows past `expiresAt`, or rotated/revoked more than 7 days ago (§5) |
+| `/auth/refresh` and `/auth/logout` have their own limiter | `RATE_LIMIT_REFRESH_MAX_PER_MIN` (600/min per IP) instead of the 60/min OTP bucket — a refresh token is not guessable and costs no SMS, and a NAT'd cell or the panel's single server IP renews far more often than it sends OTPs |
+
+The clients:
+
+- **mobile** (`api_client.dart`, `session.dart`): a refresh is *rejected* — the
+  only path to a logout — on an explicit `401 SESSION_INVALID`; a 429, 5xx,
+  timeout or dropped socket is retried once after 2 s and otherwise left to the
+  next request. The refresh token is persisted before the access token.
+- **web-admin** (`src/lib/refresh.ts`, `src/proxy.ts`, `src/lib/apiClient.ts`):
+  one in-flight refresh per token, shared by every concurrent request; a
+  settled result is not kept (the server's grace covers a straggler still on
+  the old cookie, and a remembered pair would keep being re-issued for a
+  minute after Logout had revoked it). The proxy clears the cookies only on the
+  API's `401 SESSION_INVALID` — by error code, never on a bare 401 or 400 from
+  whatever sits in front of the API — or a refreshed token that is no longer
+  superadmin, and answers an unreachable API with a 503 that retries itself,
+  cookies intact. The refresh cookie is issued for 400 days — the browser cap — on
+  every refresh. Superadmin login mints its pair through the same
+  `createSession`, so the panel follows exactly these rules.
+
+What this trades away: a refresh token on a lost, unlocked phone stays valid
+until that device signs out, the account is deleted, or (superadmin) the
+password is changed — there is no per-device "sign out everywhere" for ordinary
+users yet. The grace is, by design, a 60-second replay window for a token
+captured in transit; rotation plus the 15-minute access TTL keep the exposure
+to that window. A refresh response lost for good (the phone never retried
+inside the grace) leaves a live row whose token nobody holds; the phone's own
+Sign out cannot reach it — by then its token is past the grace and a no-op —
+so it lapses only with the two-year expiry. Unusable, and bounded to one row
+per lost response.
 
 ## 4. Logging
 
@@ -226,7 +348,7 @@ workers and machines, unlike a "only worker 1" convention.
 | Reaped | Rule | Guard |
 |---|---|---|
 | Expired stories + their media files | `expiresAt` older than a 1h grace window | Grace window means a viewer mid-playback at the 24h boundary is never cut off |
-| Sessions | expired, or revoked more than 7 days ago | Revoked rows are kept a while so a replayed old refresh token gets an explicit 401 rather than silently missing |
+| Sessions | past their sliding expiry (`REFRESH_TOKEN_TTL_DAYS` of no use), or rotated away / revoked more than 7 days ago | A live row is never deleted whatever its age — sessions last until logout (§3c). Retired rows are kept far longer than the reuse grace so a replayed token gets an explicit 401 rather than silently missing |
 | OTP codes | expired **and** not under lockout | Deleting a locked row would reset the attempts counter and hand an attacker fresh guesses |
 
 Stories are the biggest win: every one expires after 24h, so without this the
@@ -251,7 +373,10 @@ Fixed during hardening, each with the reasoning that makes it non-obvious:
   bounds abuse of a *single* number, so one IP could pump OTP SMS to thousands of
   different numbers — real money out of the SMS gateway, and a phone-number
   enumeration oracle. Now applied to `/auth/otp/send`, `/auth/otp/verify` and
-  `/auth/refresh`.
+  the superadmin login/password routes. `/auth/refresh` and `/auth/logout`
+  have their own, wider bucket (`RATE_LIMIT_REFRESH_MAX_PER_MIN`, 600/min):
+  sharing the 60/min cap meant a busy carrier NAT — or the one Next.js server
+  IP every admin-panel refresh comes from — got 429 on routine renewals (§3c).
 - **Liveness vs readiness split.** `/health` is public and unthrottled, and used
   to run a DB query — anyone could drain the connection pool by hammering it. It
   is now a pure liveness check; the DB probe moved to `/health/ready`, behind the
@@ -336,20 +461,45 @@ if these counts ever need to be trustworthy.
 ## 6a. Query performance: the feed index
 
 `/feed` — the app's home screen, and the single hottest query in the system —
-filters `type IN ('image','carousel')` and orders by `createdAt`. The
-`(type, createdAt)` index **cannot** serve that: it orders by `createdAt` only
-*within* one type, so spanning two made MariaDB abandon the index entirely.
+is `ORDER BY createdAt DESC LIMIT/OFFSET` over **every** post type (reels
+interleave with photos as inline video cards, since 2026-09), with no `WHERE`
+unless the optional `?type=` filter is given. That unfiltered walk is served
+directly by `posts_createdAt_idx`: `EXPLAIN` on the dev box shows
+`type=index, key=posts_createdAt_idx, rows=20, Using index`, no filesort —
+strictly cheaper than the query the index was added for.
 
-Measured on a 300k-post scratch database (never the live one):
+Why the index exists: `/feed` originally filtered `type IN ('image','carousel')`.
+The `(type, createdAt)` index **cannot** serve that shape — it orders by
+`createdAt` only *within* one type, so spanning two made MariaDB abandon the
+index entirely. Measured on a 300k-post scratch database (never the live one):
 
 | | plan | time |
 |---|---|---|
 | before | `ALL` — full scan of 293k rows + `Using filesort` | **135 ms** |
 | after `@@index([createdAt])` | `rows: 20`, no filesort | **0.2 ms** |
 
-~650× faster, and the old cost grew linearly with total post count. `/reels`
-(single type) and `/stores/:id/posts` already used their indexes correctly and
-were left alone.
+~650× faster, and the old cost grew linearly with total post count. The type
+filter has since been dropped (it was the regression that hid reels from the
+feed), but the index stays: it is the one that makes the unfiltered walk a
+20-row read. `/feed?type=reel`, `/reels` (single type) and
+`/stores/:id/posts` use the `(type, createdAt)` / `(storeId, createdAt)`
+indexes and were left alone. The §7 load-test numbers below were measured with
+the old `IN` filter; the unfiltered query does less work, so they are
+conservative.
+
+**Client-side cost of reels in the feed (media bandwidth, not MySQL):** a feed
+reel tile plays from a whole-file download (`MediaCache`, so a rewatch is served
+from disk — the same treatment as the Reels tab and the story viewer), and a reel
+may be up to 100 MB. The app's home feed is a `ListView` that builds cards past
+the viewport, so a tile that fetched on mount pulled every reel the user
+scrolled anywhere near, in full, on mobile data. The fetch therefore starts only
+when the tile first qualifies to play (>60% on screen, its tab settled, app in
+the foreground — `_FeedReelPlayer._syncPlayback` in
+`mobile/lib/features/shared/widgets/post_card.dart`), and a failed fetch keeps
+the poster and retries on the next scroll-in. Progressive streaming
+(`VideoPlayerController.networkUrl`) for the inline tile would cut this further
+at the cost of the instant rewatch and a second download when the full-screen
+player opens; not done — an owner call on bandwidth vs. rewatch.
 
 **Deliberately not changed:** these endpoints use `LIMIT/OFFSET`, and a deep
 offset still walks the skipped rows (~550 ms at offset 5000). Fixing that means
@@ -672,7 +822,11 @@ an inconvenience.
   OTP does, not less.
 - On success it mints the exact same access/refresh token pair `otp/verify`
   does, through the same `createSession` — nothing downstream (claims,
-  `requireFreshAuth`, revocation on account deletion) needed to change.
+  `requireFreshAuth`, revocation on account deletion) needed to change. The
+  panel session therefore follows §3c like a phone does: it lasts until the
+  Logout button, silently refreshed by `web-admin/src/proxy.ts` (single-flight)
+  behind a 400-day `refresh_token` cookie, and the panel ends it only on the
+  API's own `SESSION_INVALID` — never over a 429, a 5xx or an API restart.
 
 **Before this ships to real users**: rotate the password seeded during initial
 setup for the single superadmin account. The seeded value is a short dictionary

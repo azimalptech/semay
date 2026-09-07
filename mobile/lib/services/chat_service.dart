@@ -6,14 +6,16 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../core/api_client.dart';
+import '../core/chat_cache.dart';
 import '../core/outbox.dart';
 import 'notification_service.dart';
 
 class ChatService {
-  ChatService(this._api, this._outbox);
+  ChatService(this._api, this._outbox, this._cache);
 
   final ApiClient _api;
   final OutboxService _outbox;
+  final ChatCache _cache;
 
   static const _maxVideoBytes = 100 * 1024 * 1024;
 
@@ -114,11 +116,16 @@ class ChatService {
     await _api.post('/chats/$chatId/receipts', body: {'status': 'read'});
   }
 
-  /// Soft per-side "delete from my list" — the server stamps
-  /// hiddenBy{User,Admin}At for the caller's side and zeroes their unread; the
-  /// thread reappears once a newer message arrives (see chat_list filter).
+  /// Per-side delete. The server stamps hiddenBy{User,Admin}At for the
+  /// caller's side, records the newest message id as that side's history
+  /// cutoff (hiddenBy*UpToId) and zeroes their unread; the thread comes back
+  /// on the next incoming message (see chat_list filter) showing only what
+  /// arrived after the cutoff. The local copy of the thread goes with it: the
+  /// server will never return those rows to this side again, and a cached
+  /// row would be painted — and kept — on the next open.
   Future<void> hideChat(String chatId, {required bool asAdmin}) async {
     await _api.delete('/chats/$chatId');
+    await _cache.clearMessages(chatId);
   }
 
   /// This device's currently-open chat. The synchronous local flag is what
@@ -199,5 +206,6 @@ final chatServiceProvider = Provider<ChatService>((ref) {
   return ChatService(
     ref.watch(apiClientProvider),
     ref.watch(outboxServiceProvider),
+    ref.watch(chatCacheProvider),
   );
 });

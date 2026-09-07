@@ -85,8 +85,15 @@ class SecureSessionStore {
   Future<String?> readRefreshToken() => _storage.read(key: _refreshKey);
 
   Future<void> save({required String accessToken, required String refreshToken}) async {
-    await _storage.write(key: _accessKey, value: accessToken);
+    // Refresh token FIRST. These are two separate Keystore/Keychain writes and
+    // the process can die between them (backgrounded and killed mid-refresh).
+    // The refresh token is the one that decides whether the session survives:
+    // if it lands and the access token does not, the next launch 401s once
+    // and refreshes with the new token. The other order left the app holding
+    // a fresh access token and a refresh token the server had already rotated
+    // away — a guaranteed logout ~15 minutes later.
     await _storage.write(key: _refreshKey, value: refreshToken);
+    await _storage.write(key: _accessKey, value: accessToken);
   }
 
   Future<void> clear() async {

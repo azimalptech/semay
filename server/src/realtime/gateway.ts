@@ -193,7 +193,7 @@ export async function realtimeGateway(app: FastifyInstance): Promise<void> {
             }
             unsubscribers.set(channel, unsub);
 
-            const data = await found.handler.snapshot(found.match);
+            const data = await found.handler.snapshot(found.match, ctx);
             send(socket, { channel, type: "snapshot", data });
           } catch {
             if (stillMine()) unsubscribers.delete(channel);

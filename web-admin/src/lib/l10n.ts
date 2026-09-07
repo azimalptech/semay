@@ -72,6 +72,7 @@ export interface Dict {
   sending: string;
   broadcastSentPrefix: string;
   broadcastFailed: string;
+  broadcastPushDisabled: string;
   leaderboard: string;
   leaderboardTitle: string;
   selectStoreForCampaign: string;
@@ -235,6 +236,8 @@ const dict: Record<Lang, Dict> = {
     sending: "Iberilýär...",
     broadcastSentPrefix: "Iberildi:",
     broadcastFailed: "Bildiriş iberip bolmady",
+    broadcastPushDisabled:
+      "Push iberilmedi: API serwerinde FCM sazlanmadyk. Ulanyjylar bu bildirişi diňe programmanyň içindäki bildirişler sanawynda görerler.",
     leaderboard: "Sanaw",
     leaderboardTitle: "Sanaw sazlamalary",
     selectStoreForCampaign: "Dükany saýlaň",
@@ -354,6 +357,8 @@ const dict: Record<Lang, Dict> = {
     sending: "Отправка...",
     broadcastSentPrefix: "Отправлено:",
     broadcastFailed: "Не удалось отправить уведомление",
+    broadcastPushDisabled:
+      "Push не отправлен: на API-сервере не настроен FCM. Пользователи увидят это уведомление только в списке уведомлений внутри приложения.",
     leaderboard: "Рейтинг",
     leaderboardTitle: "Настройки рейтинга",
     selectStoreForCampaign: "Выберите магазин",

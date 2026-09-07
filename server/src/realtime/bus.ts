@@ -15,7 +15,10 @@ export type RealtimeEvent =
   // motivated it. `upToMessageId` is the newest row the server actually stamped
   // (null when it stamped none): a message that reached the socket a moment
   // before the receipt was not in that set, and the client must not show it as
-  // seen.
+  // seen. `fromMessageId` is the exclusive lower bound — the reader's hide
+  // cutoff (chats.hiddenBy*UpToId), null when they have none: rows at or below
+  // it are invisible to the reader, were not stamped, and must not be shown
+  // as seen either.
   | {
       type: "receipts";
       data: {
@@ -23,6 +26,7 @@ export type RealtimeEvent =
         status: "delivered" | "read";
         at: string;
         upToMessageId: string | null;
+        fromMessageId: string | null;
       };
     };
 

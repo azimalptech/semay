@@ -164,8 +164,10 @@ class AuthService {
   }
 
   Future<void> signOut() async {
-    // Best-effort revoke — the server-side session row would otherwise just
-    // age out after 30 days, but there's no reason to wait for that.
+    // Best-effort revoke. Sessions last until logout, so without this the
+    // server-side rows would stay live for up to two idle years; the server
+    // ends the whole login family, dangling siblings from lost refresh
+    // responses included.
     try {
       final refreshToken = await _ref.read(secureSessionStoreProvider).readRefreshToken();
       if (refreshToken != null) {

@@ -20,7 +20,7 @@ import {
   verifyOtp,
 } from "./otpStore.js";
 import { smsProvider } from "./sms.js";
-import { createSession, findActiveSession, revokeSession, rotateSession, SessionInvalidError } from "./session.js";
+import { createSession, findActiveSession, revokeSessionFamily, rotateSession, SessionInvalidError } from "./session.js";
 import { hashPassword, verifyPassword } from "./superadminAuth.js";
 
 const phoneSchema = z.string().regex(/^\+?[1-9]\d{6,14}$/, "Invalid phone number");
@@ -69,6 +69,20 @@ const authRateLimit =
     : {
         config: {
           rateLimit: { max: config.RATE_LIMIT_AUTH_MAX_PER_MIN, timeWindow: "1 minute" },
+        },
+      };
+
+// /auth/refresh and /auth/logout are authenticated by possession of a 256-bit
+// token — nothing to guess, no SMS behind them — so they do not belong in the
+// OTP bucket above. Sharing it meant routine renewals from a busy carrier NAT,
+// or from the one Next.js server IP every admin-panel refresh arrives through,
+// came back 429 (RATE_LIMIT_REFRESH_MAX_PER_MIN in config.ts).
+const refreshRateLimit =
+  process.env.NODE_ENV === "test"
+    ? {}
+    : {
+        config: {
+          rateLimit: { max: config.RATE_LIMIT_REFRESH_MAX_PER_MIN, timeWindow: "1 minute" },
         },
       };
 
@@ -262,7 +276,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
   );
 
-  app.post("/auth/refresh", authRateLimit, async (req, reply) => {
+  app.post("/auth/refresh", refreshRateLimit, async (req, reply) => {
     const body = refreshSchema.safeParse(req.body);
     if (!body.success) {
       return reply.code(400).send({ error: "INVALID_INPUT" });
@@ -282,19 +296,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.post("/auth/logout", async (req, reply) => {
+  app.post("/auth/logout", refreshRateLimit, async (req, reply) => {
     const body = logoutSchema.safeParse(req.body);
     if (!body.success) {
       return reply.code(400).send({ error: "INVALID_INPUT" });
     }
 
-    try {
-      const session = await findActiveSession(body.data.refreshToken);
-      await revokeSession(session.id);
-    } catch (err) {
-      if (!(err instanceof SessionInvalidError)) throw err;
-      // Already invalid/expired/revoked — logout is idempotent either way.
-    }
+    // Family-wide, for a token /auth/refresh would still accept (live, or
+    // rotated inside the grace) — see revokeSessionFamily. Anything else,
+    // unknown tokens included, is a no-op and still ok.
+    await revokeSessionFamily(body.data.refreshToken);
     return reply.send({ ok: true });
   });
 

@@ -1,6 +1,6 @@
-import type { Role } from "@prisma/client";
+import type { Message, Role } from "@prisma/client";
 
-import { listMessages, listStoreChats, listUserChats } from "../chats/service.js";
+import { listMessages, listStoreChats, listUserChats, resolveChatSide } from "../chats/service.js";
 import { prisma } from "../db.js";
 
 export interface ChannelAuthCtx {
@@ -16,7 +16,10 @@ export interface ChannelHandler {
    * cached claims alone for this, since storeIds can go stale for up to the
    * access token's TTL. */
   authorize: (ctx: ChannelAuthCtx, match: RegExpMatchArray) => Promise<boolean>;
-  snapshot: (match: RegExpMatchArray) => Promise<unknown>;
+  /** `ctx` is the identity `authorize` just accepted. A private channel's
+   * snapshot is shaped for that subscriber — a chat's messages stop at their
+   * side's hide cutoff — so it is derived from the same ctx, not re-guessed. */
+  snapshot: (match: RegExpMatchArray, ctx: ChannelAuthCtx) => Promise<unknown>;
 }
 
 const POST_COUNTS_SELECT = {
@@ -33,11 +36,19 @@ async function isChatParticipant(ctx: ChannelAuthCtx, chatId: string): Promise<b
     where: { id: chatId },
     select: { userId: true, storeId: true },
   });
-  if (!chat) return false;
-  if (chat.userId === ctx.userId) return true;
-  if (ctx.role === "superadmin") return true;
-  if (ctx.role === "admin" && ctx.storeIds.includes(chat.storeId)) return true;
-  return false;
+  return chat !== null && resolveChatSide(chat, ctx) !== null;
+}
+
+/** The subscriber's view of the thread — what GET /chats/:id/messages would
+ * return them — never the raw table: the side that deleted the chat must not
+ * get its old history back through the socket. */
+async function chatMessagesSnapshot(chatId: string, ctx: ChannelAuthCtx): Promise<Message[]> {
+  const chat = await prisma.chat.findUnique({ where: { id: chatId } });
+  // authorize passed for this ctx a moment ago; null here means the chat was
+  // cascade-deleted in between, and there is nothing left to show.
+  const side = chat && resolveChatSide(chat, ctx);
+  if (!chat || !side) return [];
+  return listMessages(chat, side, { limit: 200 });
 }
 
 // Ordered by specificity — "chat:{id}:messages" must be tested before the
@@ -51,7 +62,7 @@ const channelHandlers: ChannelHandler[] = [
   {
     pattern: /^chat:([\w-]+):messages$/,
     authorize: (ctx, m) => isChatParticipant(ctx, m[1]!),
-    snapshot: (m) => listMessages(m[1]!, { limit: 200 }),
+    snapshot: (m, ctx) => chatMessagesSnapshot(m[1]!, ctx),
   },
   {
     pattern: /^chat:([\w-]+)$/,

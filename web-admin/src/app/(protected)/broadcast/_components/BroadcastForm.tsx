@@ -6,6 +6,10 @@ import type { ClientDict } from "@/lib/l10n";
 interface BroadcastResult {
   sent: number;
   failed?: number;
+  // Absent from an API older than this form; false means the inbox rows were
+  // written but the API has no FCM credential, so no phone rang.
+  pushEnabled?: boolean;
+  pushDisabledReason?: string;
 }
 
 export function BroadcastForm({ t }: { t: ClientDict }) {
@@ -51,6 +55,12 @@ export function BroadcastForm({ t }: { t: ClientDict }) {
         <p className="text-sm text-green-700">
           {t.broadcastSentPrefix} {result.sent}
           {result.failed && result.failed > 0 ? ` (${result.failed} failed)` : ""}
+        </p>
+      )}
+      {result?.pushEnabled === false && (
+        <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          {t.broadcastPushDisabled}
+          {result.pushDisabledReason ? ` (${result.pushDisabledReason})` : ""}
         </p>
       )}
 
