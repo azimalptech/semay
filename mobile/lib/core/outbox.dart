@@ -103,8 +103,10 @@ class OutboxService {
     this._connectivity, {
     required bool Function() hasSession,
     required MediaUploader uploader,
+    Future<Database> Function()? openDb,
   }) : _hasSession = hasSession,
-       _uploader = uploader;
+       _uploader = uploader,
+       _openDb = openDb;
 
   final ApiClient _api;
   final Connectivity _connectivity;
@@ -114,6 +116,13 @@ class OutboxService {
   // logged in next (see clear()).
   final bool Function() _hasSession;
   final MediaUploader _uploader;
+  /// How the queue's SQLite file is opened — null in the app, overridden by
+  /// tests. [drain] is the one part of this service that has to be driven end
+  /// to end (the completion signal's placement inside it is what fixes the
+  /// Liked/Saved grids), and sqflite rejects a stand-in database factory, so
+  /// this is the seam that lets a test get at it. See
+  /// test/core/outbox_completed_test.dart.
+  final Future<Database> Function()? _openDb;
   final _uuid = const Uuid();
   final _random = Random();
 
@@ -138,8 +147,23 @@ class OutboxService {
   final StreamController<SentMessage> _sent = StreamController<SentMessage>.broadcast();
   Stream<SentMessage> get sentMessages => _sent.stream;
 
+  /// Fires once per item the SERVER has actually accepted, carrying its kind.
+  ///
+  /// Deliberately separate from [changes]: that one also fires on enqueue and
+  /// on every failed attempt, which is the wrong moment for anything that has
+  /// to re-READ server state. `PostsService.toggleLike/toggleSave` return as
+  /// soon as the item is queued (see [enqueue]), so a refetch triggered there
+  /// would ask `/users/me/liked` for the answer before the server had the
+  /// write and cache the pre-toggle list. This fires after the POST/DELETE
+  /// returned and the row is gone — including for a replay that only drains
+  /// minutes later when signal comes back.
+  final StreamController<OutboxKind> _completed = StreamController<OutboxKind>.broadcast();
+  Stream<OutboxKind> get completed => _completed.stream;
+
   Future<Database> _open() async {
     if (_db != null) return _db!;
+    final injected = _openDb;
+    if (injected != null) return _db = await injected();
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'semay_outbox.db'),
@@ -169,6 +193,7 @@ class OutboxService {
     _retryTimer?.cancel();
     _changes.close();
     _sent.close();
+    _completed.close();
     _db?.close();
   }
 
@@ -299,6 +324,11 @@ class OutboxService {
           await _send(item);
           await _remove(item.id, payload: item.payload);
           _bump();
+          // Only here — the send returned and the row is gone. Not on the
+          // drop paths below: an item the server rejected (or whose media
+          // vanished) never became server state, so nothing downstream has
+          // anything new to read.
+          if (!_completed.isClosed) _completed.add(item.kind);
         } on _PermanentSendError catch (e) {
           debugPrint('outbox: dropping ${item.id}: ${e.reason}');
           await _remove(item.id, payload: item.payload);
@@ -415,6 +445,44 @@ final outboxServiceProvider = Provider<OutboxService>((ref) {
   ref.onDispose(service.dispose);
   return service;
 });
+
+/// [OutboxService.completed] behind its own provider, so a screen or a unit
+/// test can drive the signal without standing up the real SQLite-backed
+/// service (see test/core/outbox_refresh_test.dart).
+final outboxCompletedProvider = Provider<Stream<OutboxKind>>(
+  (ref) => ref.watch(outboxServiceProvider).completed,
+);
+
+/// How long [refetchWhenOutboxSends] waits after a completion before
+/// refetching. Tapping five hearts drains as five completions in a row;
+/// without this each one would invalidate a request the previous one had just
+/// started, and the list would flicker through five load cycles.
+const outboxRefetchDebounce = Duration(milliseconds: 400);
+
+/// Call from a provider's body: re-runs THAT provider once the outbox reports
+/// that a write of one of [kinds] actually reached the server.
+///
+/// This is the completion signal, not [OutboxService.changes] and not the
+/// toggle itself — see [OutboxService.completed] for why those two are the
+/// wrong moment. The subscription lives exactly as long as the provider's
+/// current build (cancelled in `onDispose`, which also runs before a re-run),
+/// so an auto-disposed provider stops listening when its screen is popped.
+void refetchWhenOutboxSends(
+  Ref ref,
+  Set<OutboxKind> kinds, {
+  Duration debounce = outboxRefetchDebounce,
+}) {
+  Timer? timer;
+  final sub = ref.watch(outboxCompletedProvider).listen((kind) {
+    if (!kinds.contains(kind)) return;
+    timer?.cancel();
+    timer = Timer(debounce, ref.invalidateSelf);
+  });
+  ref.onDispose(() {
+    timer?.cancel();
+    sub.cancel();
+  });
+}
 
 /// Optimistic pending messages for a chat — re-queried on every outbox change
 /// (enqueue/drain), so a message sent offline shows as a "sending…" bubble

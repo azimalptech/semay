@@ -29,10 +29,19 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
     return Scaffold(
       appBar: AppBar(title: Text(s.topUsers)),
       body: storesAsync.when(
+        // A pull that fails must not take the tabs, the campaign banner and
+        // the ranking with it: `.when` routes an AsyncError to `error` even
+        // when the previous value is still in `.value` (skipError defaults to
+        // false), so before this a failed refresh replaced the whole screen
+        // with one line of error text. _pullLeaderboard reports the failure
+        // instead. A cold load that fails has no previous value and still
+        // shows the error branch.
+        skipError: true,
         data: (stores) {
           if (stores.isEmpty) {
-            return Center(
-              child: Text(s.noLeaderboardYet, style: AppTypography.bodyMedium),
+            return RefreshIndicator(
+              onRefresh: () => _pullLeaderboard(context, ref, null),
+              child: _PullableMessage(message: s.noLeaderboardYet),
             );
           }
           _selectedStoreId ??= stores.first.storeId;
@@ -69,11 +78,9 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stack) => Center(
-          child: Text(
-            '${s.failedToLoad}: $error',
-            style: AppTypography.bodyMedium,
-          ),
+        error: (error, stack) => RefreshIndicator(
+          onRefresh: () => _pullLeaderboard(context, ref, null),
+          child: _PullableMessage(message: '${s.failedToLoad}: $error'),
         ),
       ),
     );
@@ -139,32 +146,83 @@ class _RankedList extends ConsumerWidget {
     final s = ref.watch(l10nProvider);
     final entriesAsync = ref.watch(leaderboardEntriesProvider(storeId));
 
-    return entriesAsync.when(
-      data: (docs) {
-        if (docs.isEmpty) {
-          return Center(
-            child: Text(s.noLeaderboardYet, style: AppTypography.bodyMedium),
+    // Pulling the ranking refreshes the shop tabs above it as well — they are
+    // the same screen to the user, and both are one-shot REST reads.
+    return RefreshIndicator(
+      onRefresh: () => _pullLeaderboard(context, ref, storeId),
+      child: entriesAsync.when(
+        // Same reason as the tabs above: a failed pull keeps the ranking the
+        // user is looking at, and says so in a snackbar.
+        skipError: true,
+        data: (docs) {
+          if (docs.isEmpty) {
+            return _PullableMessage(message: s.noLeaderboardYet);
+          }
+          return ListView.builder(
+            // A ranking shorter than the screen must still be pullable.
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            itemCount: docs.length,
+            itemBuilder: (context, index) {
+              final data = docs[index].data();
+              return _RankRow(
+                rank: index + 1,
+                name: data['userName'] as String? ?? '',
+                quantity: data['quantity'] as int? ?? 0,
+              );
+            },
           );
-        }
-        return ListView.builder(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          itemCount: docs.length,
-          itemBuilder: (context, index) {
-            final data = docs[index].data();
-            return _RankRow(
-              rank: index + 1,
-              name: data['userName'] as String? ?? '',
-              quantity: data['quantity'] as int? ?? 0,
-            );
-          },
-        );
-      },
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (error, stack) => Center(
-        child: Text(
-          '${s.failedToLoad}: $error',
-          style: AppTypography.bodyMedium,
-        ),
+        },
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, stack) =>
+            _PullableMessage(message: '${s.failedToLoad}: $error'),
+      ),
+    );
+  }
+}
+
+/// Pull-to-refresh with a failure that is heard but not destructive: the
+/// screen keeps whatever it was showing (see `skipError`), and a snackbar says
+/// the refresh did not work.
+Future<void> _pullLeaderboard(
+  BuildContext context,
+  WidgetRef ref,
+  String? storeId,
+) async {
+  final ok = await refreshLeaderboard(ref, storeId);
+  if (ok || !context.mounted) return;
+  ScaffoldMessenger.of(
+    context,
+  ).showSnackBar(SnackBar(content: Text(ref.read(l10nProvider).failedToLoad)));
+}
+
+/// A centred message that is still a scrollable, so the empty and error states
+/// can be pulled down to retry exactly like the ranking can.
+class _PullableMessage extends StatelessWidget {
+  const _PullableMessage({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) => ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          SizedBox(
+            height: constraints.maxHeight,
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: Text(
+                  message,
+                  textAlign: TextAlign.center,
+                  style: AppTypography.bodyMedium,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

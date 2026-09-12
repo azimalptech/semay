@@ -6,6 +6,7 @@ import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../profile/notifications_providers.dart';
+import '../shared/story_bar_provider.dart';
 import '../shared/widgets/error_state_view.dart';
 import '../shared/widgets/post_card.dart';
 import '../shared/widgets/story_ring_bar.dart';
@@ -58,8 +59,23 @@ class _FeedViewState extends ConsumerState<FeedView> {
           ),
           Expanded(
             child: RefreshIndicator(
-              onRefresh: () =>
-                  ref.read(feedNotifierProvider.notifier).refresh(),
+              // The ring bar is part of what the user is pulling on — it sits
+              // at the top of this very list — but it is a separate one-shot
+              // provider, so refreshing only the posts left a story that had
+              // expired (or one just posted) showing until the next restart.
+              onRefresh: () => Future.wait([
+                ref.read(feedNotifierProvider.notifier).refresh(),
+                // Bounded on purpose: the gesture is about the posts, and
+                // Future.wait ends only when the SLOWEST member does — a
+                // hung /stories/rings would otherwise hold the spinner up
+                // for the client's full 30 s receive timeout with the feed
+                // already repainted underneath it. The bar repaints on its
+                // own whenever the rings land (StoryRingBar watches the
+                // provider), so nothing is lost by not waiting past this.
+                refreshStoryBar(
+                  ref,
+                ).timeout(const Duration(seconds: 5), onTimeout: () {}),
+              ]),
               // hasValue first (not a bare .when()) — refresh()'s
               // copyWithPrevious keeps the old list in .value while a
               // reload is in flight, so pull-to-refresh's own spinner is

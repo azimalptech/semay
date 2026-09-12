@@ -51,6 +51,12 @@ List<PostDoc> mergeUniquePosts(Iterable<List<PostDoc>> batches) {
 
 /// Every active store, filtered client-side by name as the user types — same
 /// reasoning as searchablePostsProvider. Stores are a small, bounded set.
+///
+/// Like its sibling it is keep-alive (the search screen stays mounted under
+/// the post/reel pagers it pushes), so it is invalidated on every open of the
+/// search screen — see _SearchScreenState.initState. Without that it was
+/// fetched once per app launch and a store created afterwards was unfindable
+/// for the rest of the session.
 final searchableStoresProvider = FutureProvider<List<JsonDoc>>((ref) async {
   final json = await ref.watch(apiClientProvider).get('/stores');
   final list = (json['stores'] as List<dynamic>? ?? const []);
@@ -77,10 +83,14 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
     super.initState();
     // Reshuffle on every open — searchablePostsProvider shuffles its result, so
     // invalidating it here means each visit to the search page presents a fresh
-    // random order (and fresh content). Runs after the first frame so it never
-    // fights the initial build's own watch of the provider.
+    // random order (and fresh content). The store list is refetched with it,
+    // for the same reason and because it has no other refresh point at all.
+    // Runs after the first frame so it never fights the initial build's own
+    // watch of the providers.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) ref.invalidate(searchablePostsProvider);
+      if (!mounted) return;
+      ref.invalidate(searchablePostsProvider);
+      ref.invalidate(searchableStoresProvider);
     });
   }
 
@@ -169,7 +179,10 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         },
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, stack) => ErrorStateView(
-          onRetry: () => ref.invalidate(searchablePostsProvider),
+          onRetry: () {
+            ref.invalidate(searchablePostsProvider);
+            ref.invalidate(searchableStoresProvider);
+          },
         ),
       ),
     );

@@ -33,6 +33,12 @@ class StoryRingInfo {
 /// the own-first/unseen/newest ordering and seen computation server-side
 /// (replaces the old 3-listener client stitch; see stories/service.ts
 /// getStoryRings). Watches the session so it refetches after login/logout.
+///
+/// Deliberately keep-alive (the bar lives inside the always-mounted Home tab,
+/// so auto-dispose would buy nothing): it is refreshed explicitly instead —
+/// on posting a story (add_story_flow.dart) and by the feed's pull-to-refresh
+/// via [refreshStoryBar], which used to refresh only the posts underneath it
+/// and leave the rings showing whatever was there at app start.
 final storyBarProvider = FutureProvider<List<StoryRingInfo>>((ref) async {
   // Depend on auth so it re-runs when the user changes (and so it doesn't
   // fire before there's a token to authenticate the request).
@@ -53,3 +59,15 @@ final storyBarProvider = FutureProvider<List<StoryRingInfo>>((ref) async {
     );
   }).toList();
 });
+
+/// Refetches the ring bar for a pull-to-refresh. Swallows the failure on
+/// purpose — the bar renders as empty on error, and a stories hiccup must not
+/// turn the feed's whole pull gesture into an unhandled exception.
+Future<void> refreshStoryBar(WidgetRef ref) async {
+  final refreshed = ref.refresh(storyBarProvider.future);
+  try {
+    await refreshed;
+  } catch (_) {
+    /* the bar falls back to an empty list */
+  }
+}

@@ -7,6 +7,7 @@ import 'package:visibility_detector/visibility_detector.dart';
 import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
 import '../../core/realtime_client.dart';
+import '../../core/shell_tab.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/chat_service.dart';
@@ -93,6 +94,11 @@ class ChatListScreen extends ConsumerStatefulWidget {
 class _ChatListScreenState extends ConsumerState<ChatListScreen> {
   final _swipeCoordinator = _SwipeCoordinator();
 
+  // The last tab the shell pager actually SETTLED on. Initialised to this
+  // page's own index on the first build — the build that already issues the
+  // initial GET /stores — so arriving here doesn't immediately refetch it.
+  int? _lastSettledTab;
+
   @override
   void dispose() {
     _swipeCoordinator.dispose();
@@ -101,6 +107,34 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Coming back to the Chat tab is this list's refresh point for the half
+    // of it that ISN'T realtime: the chats arrive over the socket, but the
+    // store rows behind "every store you haven't messaged yet" are a one-shot
+    // GET /stores, and this screen is never disposed (router.dart's
+    // _KeepAlivePage), so a store activated or deactivated mid-session used
+    // to need a restart.
+    //
+    // Driven by the pager's own settled-tab signal, NOT by this screen's
+    // VisibilityDetector: shell_tab.dart:17 documents why that detector can't
+    // answer "am I showing" for a kept-alive page — it has a 500 ms reporting
+    // interval that swallows a fast tab round trip entirely (unchanged
+    // visibility between two samples fires no callback at all), and a page
+    // built mid-transit is first reported at a fraction, not at 1.0. It also
+    // publishes null while a PageRoute covers the shell, so opening a chat
+    // thread and popping back is not mistaken for a tab change and costs no
+    // request. The previous rows stay painted while the refetch is in flight
+    // (_UserChatList/_AdminChatList gate on hasValue), so there's no flash.
+    final tabIndex = ShellTabScope.maybeIndexOf(context);
+    _lastSettledTab ??= tabIndex;
+    ref.listen<int?>(settledShellTabProvider, (previous, next) {
+      // null = mid-swipe, or a route sitting over the shell. Neither is a
+      // tab change, and neither should reset what we last settled on.
+      if (next == null || tabIndex == null) return;
+      final cameBack = next == tabIndex && _lastSettledTab != tabIndex;
+      _lastSettledTab = next;
+      if (cameBack) ref.invalidate(activeStoresProvider);
+    });
+
     final role = ref.watch(appRoleProvider).value;
     final isAdmin = role == AppRole.admin || role == AppRole.superadmin;
     final s = ref.watch(l10nProvider);

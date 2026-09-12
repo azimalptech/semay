@@ -58,6 +58,13 @@ final totalUnreadChatCountProvider = Provider<int>((ref) {
 /// Every active store — merged with userChatsProvider in chat_list_screen so a
 /// plain user's chat list shows every store by default (tapping one with no
 /// prior conversation lazily creates the chat).
+///
+/// Unlike the chats themselves this is a plain one-shot REST read with no
+/// realtime channel, and the chat list is a page of the always-mounted shell
+/// pager — so it is refetched whenever the shell settles back on the Chat tab
+/// (see ChatListScreen's listener on settledShellTabProvider). Before that, a
+/// store the superadmin activated or deactivated mid-session only appeared or
+/// disappeared after a full restart of the app.
 final activeStoresProvider = FutureProvider<List<ChatDoc>>((ref) async {
   final json = await ref.watch(apiClientProvider).get('/stores');
   final list = (json['stores'] as List<dynamic>? ?? const []);
