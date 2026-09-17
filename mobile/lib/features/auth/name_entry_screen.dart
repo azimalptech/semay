@@ -4,6 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/l10n.dart';
 import '../../services/auth_service.dart';
 
+// Mirrors the server's `name: max(120)` (users/routes.ts updateMeSchema and
+// the OTP verify body) so an over-long name is named here, not 400'd.
+const _maxNameLength = 120;
+
 /// Collects the name for a FIRST-TIME signup.
 ///
 /// [pendingPhone]/[pendingCode] are set when we arrived here from the OTP
@@ -35,7 +39,14 @@ class _NameEntryScreenState extends ConsumerState<NameEntryScreen> {
 
   Future<void> _submit() async {
     final name = _nameController.text.trim();
-    if (name.isEmpty) return;
+    if (name.isEmpty || _isSubmitting) return;
+    final s = ref.read(l10nProvider);
+    // Mirrors updateMeSchema/otp verify's `name: max(120)` (server/src/users/
+    // routes.ts): named here instead of round-tripping for a bare 400.
+    if (name.length > _maxNameLength) {
+      setState(() => _error = s.nameTooLong(_maxNameLength));
+      return;
+    }
 
     setState(() {
       _isSubmitting = true;
@@ -54,7 +65,10 @@ class _NameEntryScreenState extends ConsumerState<NameEntryScreen> {
         await ref.read(authServiceProvider).completeProfile(name);
       }
     } catch (e) {
-      setState(() => _error = e.toString());
+      // Rendered verbatim in the red slot below: `e.toString()` put
+      // "ApiException(400, INVALID_INPUT)" on the signup screen. Same helper
+      // as the OTP screen, since this finishes the same verify call.
+      if (mounted) setState(() => _error = describeOtpError(s, e));
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
@@ -75,7 +89,11 @@ class _NameEntryScreenState extends ConsumerState<NameEntryScreen> {
               const SizedBox(height: 16),
               TextField(
                 controller: _nameController,
-                decoration: InputDecoration(hintText: s.yourName),
+                maxLength: _maxNameLength,
+                decoration: InputDecoration(
+                  hintText: s.yourName,
+                  counterText: '',
+                ),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 12),

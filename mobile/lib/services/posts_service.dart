@@ -1,3 +1,5 @@
+import 'dart:ui' show Rect;
+
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,6 +11,14 @@ import 'package:video_thumbnail/video_thumbnail.dart';
 import '../core/api_client.dart';
 import '../core/interaction_buffer.dart';
 import '../core/outbox.dart';
+import '../core/share_links.dart';
+
+/// What came of handing the OS a share sheet. Three states, not a bool: a
+/// dismissal and a sheet that never opened look identical to the caller
+/// otherwise, and they need opposite UI — silence for the first (the user
+/// chose to back out), a message naming the reason for the second (the button
+/// appeared to do nothing).
+enum ShareOutcome { shared, dismissed, failed }
 
 class PostsService {
   PostsService(this._api, this._outbox, this._interactions);
@@ -133,15 +143,49 @@ class PostsService {
   /// Shared by every "share" icon (post_card.dart, post_detail_screen.dart,
   /// reel_player_view.dart) — only records the share if the OS share sheet
   /// reports the user actually completed a share (not dismissed/cancelled).
-  /// Returns whether it actually counted, so callers can decide whether to
-  /// show a "Shared" confirmation.
-  Future<bool> shareAndRecord(String postId) async {
-    final result = await SharePlus.instance.share(
-      ShareParams(uri: Uri.parse('semay://post/$postId')),
-    );
-    if (result.status != ShareResultStatus.success) return false;
+  /// Returns [ShareOutcome], so callers can tell a completed share (confirm
+  /// it) from a deliberate dismissal (stay silent) from a sheet that never
+  /// opened (say so, with a reason).
+  ///
+  /// What goes to the sheet is the public https link (share_links.dart) as
+  /// text with [headline] as title/subject — never a bare `uri`: the old
+  /// custom-scheme string (scheme never registered, kind in the URI host — see
+  /// share_links.dart) reached the recipient as inert text no app could open,
+  /// while the sheet still reported success and the share got counted.
+  /// [sharePositionOrigin] is the tapped button's rect (iPad refuses to
+  /// present the popover without one).
+  Future<ShareOutcome> shareAndRecord(
+    String postId, {
+    required bool isReel,
+    required String headline,
+    String caption = '',
+    Rect? sharePositionOrigin,
+  }) async {
+    final url = isReel ? reelShareUrl(postId) : postShareUrl(postId);
+    final ShareResult result;
+    try {
+      result = await SharePlus.instance.share(
+        ShareParams(
+          text: shareText(headline: headline, caption: caption, url: url),
+          title: headline,
+          subject: headline,
+          sharePositionOrigin: sharePositionOrigin,
+        ),
+      );
+    } catch (e) {
+      // Every caller is an onPressed, so an uncaught throw here is an
+      // unhandled async error with no UI at all. Reachable by design: on
+      // iPad share_plus raises a FlutterError when sharePositionOrigin is
+      // null — which shareOriginOf explicitly can return (share_links.dart) —
+      // and the plugin can also fail with a PlatformException. Reported as
+      // `failed`, NOT as a dismissal: the sheet never appeared, so the button
+      // looked like it did nothing and the user has to be told.
+      debugPrint('share: sheet failed for post $postId: $e');
+      return ShareOutcome.failed;
+    }
+    if (result.status != ShareResultStatus.success) return ShareOutcome.dismissed;
     await recordShare(postId);
-    return true;
+    return ShareOutcome.shared;
   }
 
   /// Routed through the offline outbox (Phase 9b) so a like/save toggled with

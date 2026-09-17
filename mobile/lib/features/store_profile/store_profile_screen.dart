@@ -5,17 +5,67 @@ import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/api_client.dart';
 import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
+import '../../core/share_links.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/chat_service.dart';
+import '../../services/posts_service.dart' show ShareOutcome;
 import '../post_composer/add_content_sheet.dart';
+import '../shared/post_interaction_providers.dart' show showShareOutcome;
 import '../shared/widgets/error_state_view.dart';
 import '../shared/widgets/posts_grid_view.dart';
+import '../shared/widgets/story_ring.dart';
 import '../story_composer/add_story_flow.dart';
+import '../story_viewer/story_providers.dart';
+import '../story_viewer/story_viewer_screen.dart' show StoryViewerArgs;
 import 'store_posts_pager_screen.dart';
 import 'store_profile_providers.dart';
+
+/// Both share entry points — the visitor's app-bar icon and the owner's
+/// "Share" pill — hand the OS the same public https store link as text with
+/// a title (share_links.dart; the old bare custom-scheme string reached the
+/// recipient as inert text). Not counted: stores have no share counter
+/// (docs/02). [context] is the tapped control's own, for the iPad popover
+/// anchor — see shareOriginOf.
+Future<void> shareStore(
+  BuildContext context,
+  WidgetRef ref, {
+  required String storeId,
+  required String storeName,
+}) async {
+  final s = ref.read(l10nProvider);
+  final headline = s.shareStoreHeadline(storeName);
+  ShareOutcome outcome;
+  try {
+    final result = await SharePlus.instance.share(
+      ShareParams(
+        text: shareText(headline: headline, url: storeShareUrl(storeId)),
+        title: headline,
+        subject: headline,
+        sharePositionOrigin: shareOriginOf(context),
+      ),
+    );
+    outcome = result.status == ShareResultStatus.success
+        ? ShareOutcome.shared
+        : ShareOutcome.dismissed;
+  } catch (e) {
+    // Called straight from an onTap, so a throw here would be an unhandled
+    // async error and no visible failure. share_plus raises when the iPad
+    // popover has no anchor (shareOriginOf may legitimately return null) and
+    // can throw a PlatformException besides.
+    debugPrint('share: store sheet failed for $storeId: $e');
+    outcome = ShareOutcome.failed;
+  }
+  // Same confirmation the post/reel share icon gives (showShareOutcome). The
+  // two share entry points are the same glyph on adjacent screens; only the
+  // post one used to report back, and a store share that could not present a
+  // sheet at all looked like a button that did literally nothing.
+  if (!context.mounted) return;
+  showShareOutcome(context, s, outcome);
+}
 
 /// Store Detail: header (avatar, tagline, phone, address, actions) +
 /// grid/reels tabs with counts (Figma: grid glyph + posts count, play glyph +
@@ -51,12 +101,17 @@ class StoreProfileScreen extends ConsumerWidget {
                 onPressed: () => context.push('/admin/settings'),
               )
             else
-              IconButton(
-                icon: const Icon(Icons.ios_share_outlined),
-                // Real OS share sheet (same as post/reel share), not a silent
-                // clipboard copy.
-                onPressed: () => SharePlus.instance.share(
-                  ShareParams(uri: Uri.parse('semay://store/$storeId')),
+              // Real OS share sheet (same as post/reel share), not a silent
+              // clipboard copy. Builder: anchored to this button's own box.
+              Builder(
+                builder: (shareContext) => IconButton(
+                  icon: const Icon(Icons.ios_share_outlined),
+                  onPressed: () => shareStore(
+                    shareContext,
+                    ref,
+                    storeId: storeId,
+                    storeName: store?['name'] as String? ?? '',
+                  ),
                 ),
               ),
           ],
@@ -147,10 +202,23 @@ class _StoreHeader extends ConsumerWidget {
   final int reelsCount;
   final int likesCount;
 
+  /// Same viewer route the home bar pushes, under the shell's own prefix —
+  /// chosen by role the way the message button below picks its chat route.
+  Future<void> _openStories(BuildContext context, WidgetRef ref) async {
+    final role = await ref.read(appRoleProvider.future);
+    final isAdmin = role == AppRole.admin || role == AppRole.superadmin;
+    if (!context.mounted) return;
+    context.push(
+      isAdmin ? '/admin/home/story/$storeId' : '/home/story/$storeId',
+      extra: StoryViewerArgs(storeIds: [storeId], initialIndex: 0),
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (store == null) return const SizedBox.shrink();
     final s = ref.watch(l10nProvider);
+    final ringState = ref.watch(storeHasActiveStoriesProvider(storeId));
 
     final avatarUrl = store!['avatarUrl'] as String? ?? '';
     final name = store!['name'] as String? ?? '';
@@ -166,33 +234,51 @@ class _StoreHeader extends ConsumerWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Same gradient-ring treatment as the story bar's avatars
-              // (AppColors.storyGradient) — static here, no spin, since this
-              // isn't indicating unseen-story state.
+              // The ring follows the home bar's rule (story_ring_bar.dart):
+              // gradient while an active story is unseen, muted once all
+              // are watched, no ring at all when the store has none — it
+              // used to draw the gradient unconditionally, which read as
+              // "new story" on every profile, and the avatar opened nothing.
+              // Tap opens the viewer; an own store with no story gets the
+              // add sheet, like its ring on the home bar. The 4 px padding
+              // stays in every state so the header never jumps.
               Stack(
                 clipBehavior: Clip.none,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(4),
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: SweepGradient(colors: AppColors.storyGradient),
-                    ),
+                  GestureDetector(
+                    onTap: ringState.hasStories
+                        ? () => _openStories(context, ref)
+                        : isOwnStore
+                        ? () => showAddStorySheet(context, ref, storeId: storeId)
+                        : null,
                     // radius 41 (→ 82px avatar) + 4px ring = 90px total, matching
                     // the home story-bar ring (story_ring_bar.dart's 90×90 box).
-                    child: CircleAvatar(
-                      radius: 41,
-                      backgroundColor: AppColors.backgroundCard,
-                      backgroundImage: avatarUrl.isNotEmpty
-                          ? CachedNetworkImageProvider(avatarUrl)
-                          : null,
-                      child: avatarUrl.isEmpty
-                          ? Icon(
-                              Icons.storefront,
-                              size: 40,
-                              color: AppColors.textMuted,
-                            )
-                          : null,
+                    child: SizedBox(
+                      width: 90,
+                      height: 90,
+                      child: CustomPaint(
+                        painter: StoryRingPainter(
+                          hasStories: ringState.hasStories,
+                          seen: ringState.seen,
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(4),
+                          child: CircleAvatar(
+                            radius: 41,
+                            backgroundColor: AppColors.backgroundCard,
+                            backgroundImage: avatarUrl.isNotEmpty
+                                ? CachedNetworkImageProvider(avatarUrl)
+                                : null,
+                            child: avatarUrl.isEmpty
+                                ? Icon(
+                                    Icons.storefront,
+                                    size: 40,
+                                    color: AppColors.textMuted,
+                                  )
+                                : null,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                   // Add-story entry point (Figma 223:7107 — see
@@ -276,32 +362,21 @@ class _StoreHeader extends ConsumerWidget {
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: _PillButton(
-                    label: s.share,
-                    onTap: () => SharePlus.instance.share(
-                      ShareParams(uri: Uri.parse('semay://store/$storeId')),
+                  // Builder: the sheet is anchored to this pill's own box.
+                  child: Builder(
+                    builder: (shareContext) => _PillButton(
+                      label: s.share,
+                      onTap: () => shareStore(
+                        shareContext,
+                        ref,
+                        storeId: storeId,
+                        storeName: name,
+                      ),
                     ),
                   ),
                 ),
               ] else ...[
-                Expanded(
-                  child: _PillButton(
-                    label: s.message,
-                    onTap: () async {
-                      final role = await ref.read(appRoleProvider.future);
-                      final isAdmin =
-                          role == AppRole.admin || role == AppRole.superadmin;
-                      final chatId = await ref
-                          .read(chatServiceProvider)
-                          .createOrGetChat(storeId);
-                      if (context.mounted) {
-                        context.push(
-                          isAdmin ? '/admin/chat/$chatId' : '/chat/$chatId',
-                        );
-                      }
-                    },
-                  ),
-                ),
+                Expanded(child: _MessagePill(storeId: storeId)),
                 const SizedBox(width: 12),
                 Expanded(
                   child: _PillButton(
@@ -443,6 +518,54 @@ class _InfoRow extends StatelessWidget {
 /// by default ("Edit Profile" / "Share" / "Message"), solid [callGreen] when
 /// [filled] (the "Call" action specifically — reads as a call button
 /// everywhere else in the app too, deliberately distinct from [brand]).
+/// The visitor's "Message" CTA. Its own widget purely so the in-flight flag
+/// has somewhere to live: `POST /chats` (createOrGetChat) is a plain request
+/// that throws offline or on a 5xx, and this used to be a bare async onTap —
+/// so the failure escaped as an unhandled zone error and the pill simply did
+/// nothing, with no message and no spinner. A slow link could also queue two
+/// chats from two taps.
+class _MessagePill extends ConsumerStatefulWidget {
+  const _MessagePill({required this.storeId});
+
+  final String storeId;
+
+  @override
+  ConsumerState<_MessagePill> createState() => _MessagePillState();
+}
+
+class _MessagePillState extends ConsumerState<_MessagePill> {
+  bool _opening = false;
+
+  Future<void> _open() async {
+    if (_opening) return;
+    final s = ref.read(l10nProvider);
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _opening = true);
+    try {
+      final role = await ref.read(appRoleProvider.future);
+      final isAdmin = role == AppRole.admin || role == AppRole.superadmin;
+      final chatId = await ref
+          .read(chatServiceProvider)
+          .createOrGetChat(widget.storeId);
+      if (mounted) {
+        context.push(isAdmin ? '/admin/chat/$chatId' : '/chat/$chatId');
+      }
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(describeApiError(s, e))));
+    } finally {
+      if (mounted) setState(() => _opening = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _PillButton(
+      label: ref.watch(l10nProvider).message,
+      onTap: _opening ? null : _open,
+    );
+  }
+}
+
 class _PillButton extends StatelessWidget {
   const _PillButton({
     required this.label,

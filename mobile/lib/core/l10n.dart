@@ -45,6 +45,17 @@ class S {
       ? 'Повторная отправка через $secondsс'
       : '$seconds sek. soň gaýtadan ugradyp bolar';
   String get incorrectCode => isRu ? 'Неверный код' : 'Kod nädogry';
+  /// The server's OTP resend cooldown (OTP_RESEND_COOLDOWN_SECONDS, 60 s).
+  /// Used to reach the user as the English sentence AuthService built.
+  String waitBeforeNewCode(int seconds) => isRu
+      ? 'Подождите $secondsс перед повторной отправкой'
+      : 'Täze kod üçin $seconds sekunt garaşyň';
+  String get waitBeforeNewCodeGeneric => isRu
+      ? 'Подождите перед повторной отправкой'
+      : 'Täze kod soramazdan öň biraz garaşyň';
+  String get phoneAlreadyInUse => isRu
+      ? 'Этот номер уже используется'
+      : 'Bu belgi eýýäm ulanylýar';
   String attemptsRemaining(int count) =>
       isRu ? 'Осталось попыток: $count' : 'Galan synanyşyk: $count';
   String get numberLockedTitle =>
@@ -90,6 +101,26 @@ class S {
   String get removedFromSaved =>
       isRu ? 'Удалено из сохранённых' : 'Ýatda saklananlardan aýryldy';
   String get postShared => isRu ? 'Поделились' : 'Paýlaşyldy';
+
+  /// Shown only when the OS sheet could not be PRESENTED at all — share_plus
+  /// throws when the iPad popover has no anchor, and can raise a
+  /// PlatformException besides. A user who opened the sheet and dismissed it
+  /// must stay silent: that is a deliberate cancel, not a failure.
+  String get shareFailed => isRu
+      ? 'Не удалось открыть меню «Поделиться»'
+      : 'Paýlaşmak penjiresi açylmady';
+
+  // OS share sheet — title/subject and first line of the shared text (the
+  // https link follows; see core/share_links.dart shareText).
+  String sharePostHeadline(String storeName) => storeName.isEmpty
+      ? (isRu ? 'Пост в SeMay' : 'SeMay-da post')
+      : (isRu ? 'Пост $storeName в SeMay' : '$storeName — SeMay-da post');
+  String shareReelHeadline(String storeName) => storeName.isEmpty
+      ? (isRu ? 'Reels в SeMay' : 'SeMay-da reels')
+      : (isRu ? 'Reels $storeName в SeMay' : '$storeName — SeMay-da reels');
+  String shareStoreHeadline(String storeName) => storeName.isEmpty
+      ? (isRu ? 'Магазин в SeMay' : 'SeMay-da dükan')
+      : (isRu ? 'Магазин $storeName в SeMay' : '$storeName — SeMay-da dükan');
   String get deletePostTitle => isRu ? 'Удалить пост?' : 'Post pozulsynmy?';
   String get deletePostBody => isRu
       ? 'Вы действительно хотите навсегда удалить этот пост?'
@@ -174,6 +205,36 @@ class S {
   String get phoneNumber => isRu ? 'Номер телефона' : 'Telefon belgisi';
   String get couldNotOpenDialer =>
       isRu ? 'Не удалось открыть набор номера' : 'Nomer ýygnaýjy açylmady';
+
+  // Profile edit feedback (user "Edit profile" and store "Edit Profile"). A
+  // saved edit used to confirm with `save` — the button label — and a failed
+  // one with the raw ApiException; these are the user-facing outcomes, and
+  // describeApiError (api_client.dart) picks between them.
+  String get profileSaved =>
+      isRu ? 'Изменения сохранены' : 'Üýtgeşmeler ýatda saklandy';
+  String get saveFailed =>
+      isRu ? 'Не удалось сохранить' : 'Ýatda saklap bolmady';
+  String get invalidInput =>
+      isRu ? 'Введены некорректные данные' : 'Girizilen maglumat nädogry';
+  String nameTooLong(int max) => isRu
+      ? 'Имя не длиннее $max символов'
+      : 'At $max harpdan uzyn bolmaly däl';
+  String get avatarUploadFailed =>
+      isRu ? 'Не удалось загрузить фото' : 'Surat ýüklenmedi';
+  /// The camera/gallery could not be opened or returned nothing usable —
+  /// image_picker's PlatformException (a denied permission, a broken activity
+  /// result). Not [avatarUploadFailed]: nothing was uploaded, or even picked.
+  String get mediaPickFailed => isRu
+      ? 'Не удалось открыть камеру или галерею'
+      : 'Kamera ýa-da galereýa açylmady';
+  String get tooManyRequests => isRu
+      ? 'Слишком много запросов. Попробуйте позже'
+      : 'Sorag gaty köp. Soňra synanyşyň';
+  /// A 5xx — the phone reached the server and the server failed. Distinct from
+  /// [noConnection] on purpose: telling someone their internet is down while
+  /// the API is 502-ing sends them to toggle airplane mode over and over.
+  String get serverError =>
+      isRu ? 'Сервер не отвечает' : 'Serwer jogap bermedi';
 
   // Chat
   String get chat => isRu ? 'Чат' : 'Çat';

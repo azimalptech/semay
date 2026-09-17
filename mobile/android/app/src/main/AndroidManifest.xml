@@ -7,9 +7,16 @@
     <!-- Explicit (not just merged from plugins) so a release build reliably has
          network access for the REST/WS API + FCM. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- android:name is our own Application subclass instead of Flutter's
+         ${applicationName} placeholder (which is literally
+         android.app.Application, the class SemayApplication extends): it
+         creates the notification channels on every process start, so a push
+         that starts the process without starting MainActivity — the normal
+         case right after a Play Store update — still finds the chat channel
+         and its sound. See SemayApplication.kt. -->
     <application
         android:label="semay"
-        android:name="${applicationName}"
+        android:name=".SemayApplication"
         android:icon="@mipmap/ic_launcher"
         android:networkSecurityConfig="@xml/network_security_config"
         android:enableOnBackInvokedCallback="true">
@@ -31,9 +38,55 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- Explicit, though it is the engine's default: the VIEW intent's
+                 data URI is handed to Flutter as the route (initial route on a
+                 cold start, pushRouteInformation on a warm one — singleTop
+                 above keeps the one activity), and router.dart's redirect
+                 turns it into the linked post/store. -->
+            <meta-data
+                android:name="flutter_deeplinking_enabled"
+                android:value="true" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- semay://open/p|r|s/<id> — the share page's "Open in SeMay"
+                 button (an intent:// link in Chrome). "open" is the fixed
+                 dummy host the app EMITS, so the path the engine forwards is
+                 /p/<id> and not /<id>; see lib/core/share_links.dart.
+
+                 Scheme only, NO android:host. With host="open" the filter
+                 matched nothing else, so the Phase 1 links already in the
+                 wild — semay://post/<id>, semay://store/<id>, whose kind sits
+                 in the host — were never delivered to the app at all: Android
+                 simply did not start the activity. parseIncomingLink still
+                 accepts those shapes and iOS (CFBundleURLSchemes carries no
+                 host constraint) always honoured them, so the two platforms
+                 silently disagreed about a documented behaviour. A
+                 scheme-only <data> matches semay://open/... and the two
+                 legacy hosts alike. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="semay"/>
+            </intent-filter>
+            <!-- App Links: https://semaycollection.com/p|r|s/<id> opens the
+                 app directly once Android has verified
+                 /.well-known/assetlinks.json on both hosts (fetched at
+                 install/update; docs/09_DEPLOYMENT.md §5e). Until then a tapped
+                 link opens the browser page, whose button uses the scheme
+                 above. pathPrefix, not pathPattern: the ids are UUIDs. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https"/>
+                <data android:host="semaycollection.com"/>
+                <data android:host="www.semaycollection.com"/>
+                <data android:pathPrefix="/p/"/>
+                <data android:pathPrefix="/r/"/>
+                <data android:pathPrefix="/s/"/>
             </intent-filter>
         </activity>
         <!-- image_cropper's native crop screen — required manually, its
@@ -45,8 +98,9 @@
             android:screenOrientation="portrait"
             android:theme="@style/Theme.AppCompat.Light.NoActionBar" />
         <!-- Channel FCM uses for a notification that names no channel (or an
-             unknown one). Created at IMPORTANCE_HIGH in MainActivity.kt so
-             chat messages pop as heads-up banners with sound — see there. -->
+             unknown one). Created at IMPORTANCE_HIGH in SemayApplication.kt,
+             with no sound of its own, so chat messages pop as heads-up
+             banners with the phone's default notification sound. -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="chat_messages" />

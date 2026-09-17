@@ -345,9 +345,21 @@ class _ImagePostDetailContentState
               ),
             ),
             Text(formatCount(sentCount)),
-            IconButton(
-              icon: const AppIcon('arrow_share'),
-              onPressed: () => shareAndNotify(context, ref, postId),
+            // Builder: the sheet is anchored to this button's own box (see
+            // shareAndNotify). Always an image/carousel here — reels render
+            // through ReelPlayerView, which has its own share action.
+            Builder(
+              builder: (shareContext) => IconButton(
+                icon: const AppIcon('arrow_share'),
+                onPressed: () => shareAndNotify(
+                  shareContext,
+                  ref,
+                  postId,
+                  isReel: false,
+                  storeName: storeName,
+                  caption: caption,
+                ),
+              ),
             ),
             Text(formatCount(sharesCount)),
             const SizedBox(width: 8),

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:video_player/video_player.dart';
 
+import '../../core/api_client.dart';
 import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
@@ -90,21 +91,36 @@ Future<void> _pick(
   _PickKind kind,
 ) async {
   final navigator = Navigator.of(sheetContext);
+  final messenger = ScaffoldMessenger.of(sheetContext);
+  final s = ref.read(l10nProvider);
   final picker = ImagePicker();
 
+  // Guarded for the same reason the store avatar picker is (see
+  // edit_store_screen.dart _pickAvatar): image_picker throws a
+  // PlatformException when the camera/photo permission is denied (iOS
+  // photo_access_denied, Android 13+ READ_MEDIA_IMAGES) or an activity result
+  // comes back broken. Called straight from the sheet's onTap, so uncaught it
+  // left the handler as a zone error — the sheet just sat there, nothing
+  // opened, and the store owner was told nothing at all.
   List<XFile> files = const [];
-  switch (kind) {
-    case _PickKind.cameraPhoto:
-      final file = await picker.pickImage(source: ImageSource.camera);
-      if (file != null) files = [file];
-    case _PickKind.cameraVideo:
-      final file = await picker.pickVideo(source: ImageSource.camera);
-      if (file != null) files = [file];
-    case _PickKind.gallery:
-      // pickMultipleMedia (not pickMultiImage) — stories mix photos and
-      // videos in the same gallery pick, same as Instagram's own story
-      // composer; pickMultiImage only ever returns images.
-      files = await picker.pickMultipleMedia();
+  try {
+    switch (kind) {
+      case _PickKind.cameraPhoto:
+        final file = await picker.pickImage(source: ImageSource.camera);
+        if (file != null) files = [file];
+      case _PickKind.cameraVideo:
+        final file = await picker.pickVideo(source: ImageSource.camera);
+        if (file != null) files = [file];
+      case _PickKind.gallery:
+        // pickMultipleMedia (not pickMultiImage) — stories mix photos and
+        // videos in the same gallery pick, same as Instagram's own story
+        // composer; pickMultiImage only ever returns images.
+        files = await picker.pickMultipleMedia();
+    }
+  } catch (e) {
+    debugPrint('story: media pick failed: $e');
+    messenger.showSnackBar(SnackBar(content: Text(s.mediaPickFailed)));
+    return;
   }
   if (files.isEmpty || !sheetContext.mounted) return;
 
@@ -168,7 +184,18 @@ class _StoryPreviewScreenState extends ConsumerState<StoryPreviewScreen> {
   }
 
   Future<void> _publish() async {
+    if (_publishing) return;
     final s = ref.read(l10nProvider);
+    // Both captured before the upload: publishing a story is a media upload —
+    // seconds on a mobile link — and the screen stays pop-able throughout. On
+    // a defunct State `ref.invalidate` THROWS (riverpod's _assertNotDisposed),
+    // which the catch below then swallowed, so the two invalidates never ran:
+    // the story WAS published but the home ring bar and the store-profile ring
+    // kept showing "no story" until a pull-to-refresh or the next resume.
+    // There is no realtime event for stories; these two are the only liveness
+    // path a publish has.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final messenger = ScaffoldMessenger.of(context);
     setState(() => _publishing = true);
     try {
       final service = ref.read(storiesServiceProvider);
@@ -186,16 +213,15 @@ class _StoryPreviewScreenState extends ConsumerState<StoryPreviewScreen> {
       // The story bar (home ring row) and the store's own story viewer fetch
       // once with .get(), not a live listener — without invalidating them a
       // freshly published story is invisible until the next manual refresh.
-      ref.invalidate(storyBarProvider);
-      ref.invalidate(storeStoriesProvider(widget.storeId));
+      container.invalidate(storyBarProvider);
+      container.invalidate(storeStoriesProvider(widget.storeId));
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
-      if (mounted) {
-        setState(() => _publishing = false);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('${s.failedToLoad}: $e')));
-      }
+      // Was `'${s.failedToLoad}: $e'` — the raw exception, so a failed publish
+      // read "Ýüklenmedi: ApiException(400, INVALID_INPUT)". describeApiError
+      // is the same helper the three other screens in this pass use.
+      if (mounted) setState(() => _publishing = false);
+      messenger.showSnackBar(SnackBar(content: Text(describeApiError(s, e))));
     }
   }
 

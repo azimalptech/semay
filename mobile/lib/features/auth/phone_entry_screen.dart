@@ -60,7 +60,12 @@ class _PhoneEntryScreenState extends ConsumerState<PhoneEntryScreen> {
         context.push('/auth/otp');
       }
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      // The red slot renders this verbatim, and sendOtp throws OtpExceptions
+      // carrying a bare server code (OTP_COOLDOWN, REQUEST_FAILED) — so this
+      // showed "ApiException(null, REQUEST_FAILED)" to a Turkmen user.
+      if (mounted) {
+        setState(() => _error = describeOtpError(ref.read(l10nProvider), e));
+      }
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }

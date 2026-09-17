@@ -105,10 +105,57 @@ retype it. The ones worth calling out specifically:
   `false` before anyone but you can reach the server.
 - **`MEDIA_DIR` / `MEDIA_PUBLIC_BASE_URL`** — local disk, not object storage.
   Must resolve consistently if you front it with a reverse proxy (§9).
-- **`REDIS_URL` / `CLUSTER_WORKERS`** — leave `REDIS_URL` empty for one process.
-  The moment you run `start:cluster` or more than one machine, `REDIS_URL` is
-  required — without it, realtime messages published on one worker never reach
-  sockets owned by another, and nothing errors to tell you.
+- **`REDIS_URL` / `REDIS_REQUIRED` / `CLUSTER_WORKERS`** — leave `REDIS_URL`
+  empty for one process. The moment you run `start:cluster` or more than one
+  machine, `REDIS_URL` is required — without it, realtime messages published
+  on one worker never reach sockets owned by another. **Set is not the same as
+  reachable.** A `REDIS_URL` pointing at a Redis that is not running (the dev
+  `.env` copied to a box without the service; the service not set to
+  auto-start after a reboot) used to be completely silent: the boot line said
+  "Redis pub-sub", `/health/ready` said ok, and every phone's chat quietly
+  stopped updating until the app was reopened. Now the single-process server
+  boots but logs an error naming the host and delivers in-process
+  (`/health/ready` shows `degraded:true`, `bus.ready:false`); `start:cluster`
+  refuses to fork. Several single-process machines behind a load balancer:
+  set `REDIS_REQUIRED=true`. After 30 s without the bus that box stops serving
+  **realtime** — the gateway refuses new subscribes and closes the sockets it
+  is holding, so phones reconnect to one that works, and `GET /health/realtime`
+  turns 503 for the WebSocket upstream's health check. **`/health/ready` stays
+  200 on purpose**: login, feed, stores, orders, media and chat REST all work
+  perfectly during a Redis outage, and every box sharing one Redis crosses that
+  threshold at the same instant — failing readiness would leave the balancer
+  with zero healthy backends and take the whole API down over a dependency most
+  of it does not use (`08_OPERATIONS.md` §3d). Point the HTTP pool's health
+  check at `/health/ready` and the WebSocket pool's at `/health/realtime`. Run
+  Redis as an auto-starting service like MySQL (§5).
+- **`SHARE_*`** — the public share pages (§5e; what they expose and why,
+  `08_OPERATIONS.md` §6f). All have working defaults; two matter on a real
+  deploy:
+  - **`SHARE_ANDROID_CERT_SHA256`** — comma-separated SHA-256 fingerprints
+    (colon-separated uppercase hex, as `keytool` prints them) of the
+    certificate the **installed** app is signed with. With Play App Signing
+    that is the *app signing* key Play shows, **not** the upload key. Empty
+    (the default) serves a valid but empty `assetlinks.json`, so Android App
+    Links can never verify and a tapped link opens the browser page instead of
+    the app — no other symptom, so this one is easy to miss.
+  - **`SHARE_APPSTORE_URL`** / **`SHARE_PLAY_URL`** — where a recipient without
+    the app is sent. **Both default to empty**, and empty renders a non-link
+    "coming soon" badge (`Ýakynda` / `Скоро`). Set each one only once *that*
+    listing is actually published: a store URL for a listing that does not
+    exist sends the recipient to a store 404, which is worse than the badge.
+    `SHARE_PLAY_URL` does double duty — it is also the Android "Open in SeMay"
+    button's `S.browser_fallback_url`, i.e. where Chrome goes when the app is
+    not installed (§5e).
+  - `SHARE_IOS_APP_ID` (`<TEAM ID>.com.semay.semay`) stays empty until the app
+    ships the associated-domains entitlement — see §5e. While it is empty
+    `/.well-known/apple-app-site-association` answers **404 by design**, not an
+    empty document (Apple's CDN caches what it fetches; §5e explains). Setting
+    it is what turns that route on. `SHARE_PAGE_MODE` (`generic`, the only
+    value), `SHARE_PUBLIC_BASE_URL` (empty = derived from
+    `MEDIA_PUBLIC_BASE_URL`'s origin; **origin only — any path is stripped**,
+    since the variable it is copied from ends in `/media`),
+    `RATE_LIMIT_SHARE_MAX_PER_MIN` (120) and `SHARE_ANDROID_PACKAGE` are
+    correct as they ship.
 
 ## 5. Database
 
@@ -353,8 +400,24 @@ whether push is really on, without reading the boot log:
 If the boot log says enabled and a phone still gets nothing: the device must
 have a row in `user_fcm_tokens` (none = the app never registered — Android 13+
 notification permission denied, or the token sync failed), and on Android the
-app's "Messages" and "Announcements" channels must be enabled in system
-settings.
+app's three channels must be enabled in system settings. **They are labelled in
+the DEVICE's language, not the in-app one** — the app ships Turkmen and Russian
+only, so the rows read:
+
+| channel | Turkmen (`res/values`) | Russian (`res/values-ru`) |
+| --- | --- | --- |
+| chat (`chat_messages`) | Habarlar | Сообщения |
+| announcements | Bildirişler | Уведомления |
+| orders | Sargytlar | Заказы |
+
+All three use the phone's default notification sound. On a handset that ran one
+of the intermediate test builds, "1 deleted category" next to them is the
+retired `chat_messages_v2` channel, which the app deletes at startup —
+expected, see `08_OPERATIONS.md` §3b. If chat is *silent* on such a handset
+after updating (rather than ringing with the default), its `chat_messages`
+channel was created by an intermediate build that pinned a sound file no longer
+shipped: a channel's sound is immutable, so clear the app's data or reinstall.
+Only test handsets can be in this state — no released build ever set a sound.
 
 The Admin SDK talks to the FCM HTTP v1 API. The legacy Cloud Messaging API and
 its server key are deprecated and disabled in the project — leave them so; the
@@ -377,6 +440,135 @@ and no push arrives (`08_OPERATIONS.md` §3b).
   Dynamic Links need them, and this app uses none (auth is the custom OTP
   flow). FCM works without them.
 
+## 5e. Share links & deep links
+
+A share from the app is a public https link (`docs/04` "Share links"):
+`https://semaycollection.com/p/<postId>`, `/r/<postId>` (reel), `/s/<storeId>`,
+answered by the API's own share page — five root-mounted unauthenticated routes
+(`server/src/share/routes.ts`; what they expose, and what they deliberately do
+not, is `docs/08_OPERATIONS.md` §6f). Their env vars are the `SHARE_*` block in
+§4; the only one an operator normally sets is `SHARE_ANDROID_CERT_SHA256`, plus
+`SHARE_PLAY_URL` / `SHARE_APPSTORE_URL` **once each of those listings is
+actually published** (both ship empty and render a "coming soon" badge — do not
+fill one in on the assumption that the listing exists). nginx needs no change —
+`location /` already proxies these paths to the API for both hosts.
+
+Check the server half right after a deploy:
+
+```bash
+ID=00000000-0000-4000-8000-000000000000
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://semaycollection.com/p/$ID    # 200 text/html; charset=utf-8
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://semaycollection.com/p/$ID/   # 200 text/html  (trailing slash too)
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://semaycollection.com/p/nope   # 404 text/html  (NOT the JSON error)
+curl -s https://semaycollection.com/.well-known/assetlinks.json | node -e "let j=JSON.parse(require('fs').readFileSync(0));console.log(j[0].target.package_name, j[0].target.sha256_cert_fingerprints)"
+curl -s -o /dev/null -w '%{http_code}\n' https://semaycollection.com/.well-known/apple-app-site-association   # 404 until SHARE_IOS_APP_ID is set, then 200
+# Where an Android recipient WITHOUT the app actually lands:
+curl -s -A 'Mozilla/5.0 (Linux; Android 14) Chrome/120' https://semaycollection.com/p/$ID | grep -o 'S.browser_fallback_url=[^;]*'
+```
+
+An empty `[]` from the `assetlinks` line (the `node` snippet will throw on
+`j[0]`) means `SHARE_ANDROID_CERT_SHA256` is unset — App Links can never verify
+until it is. The last line must show the URL-encoded `SHARE_PLAY_URL` once that
+is configured; while it is empty it shows the share page's own URL, and the
+page's Play button reads `Ýakynda` instead of linking.
+
+The app registers two ways in (`mobile/lib/core/share_links.dart`,
+`router.dart`, `AndroidManifest.xml`, `Info.plist`):
+
+- `semay://open/p|r|s/<id>` — the custom scheme the share page's "Open in
+  SeMay" button uses. Works on a fresh install with no portal or DNS work.
+- `https://semaycollection.com/…` (and `www.`) — Android App Links / iOS
+  Universal Links, which open the app **directly** from a tapped link, but
+  only once each platform has verified the site.
+
+**What works today, before any verification:** a tapped https link opens the
+browser page, whose button opens the app through the scheme. The app half
+needs nothing else.
+
+**Android App Links — until production serves `assetlinks.json`, a tapped
+link opens the browser.** Android fetches
+`https://semaycollection.com/.well-known/assetlinks.json` (and the `www.`
+one) at install/update and only then routes the link straight into the app.
+The site is unreachable at the time of writing, so every current install is
+"unverified". After cutover, on a phone with the app installed:
+
+```bash
+adb shell pm verify-app-links --re-verify com.semay.semay   # ask Android to fetch again
+adb shell pm get-app-links com.semay.semay                   # both hosts must read "verified"
+curl -s https://semaycollection.com/.well-known/assetlinks.json | node -e "let j=JSON.parse(require('fs').readFileSync(0));console.log(j[0].target.package_name, j[0].target.sha256_cert_fingerprints)"
+```
+
+The fingerprint listed must be the certificate that signs the installed APK —
+Play App Signing's *app signing* key for Play installs, the upload/debug key
+for side-loaded builds (`keytool -printcert -jarfile app-release.apk` shows
+it); a mismatch verifies as "none" with no other symptom.
+
+Drive the app without the site at all — run each once with the app killed
+(cold) and once with it open on another screen (warm). **The warm case has a
+second thing to check:** open the app, go two screens deep (Search → a store
+profile), then fire the link. The linked screen must appear *on top of those
+two*, and back must return to the store profile — not to Home. (go_router's own
+handling of a platform route replaces the whole stack, which is why
+`router.dart` intercepts a warm link before it gets there.)
+
+```bash
+adb shell am start -a android.intent.action.VIEW -d "https://semaycollection.com/p/<postId>" com.semay.semay   # post detail over Home; back returns to Home
+adb shell am start -a android.intent.action.VIEW -d "semay://open/s/<storeId>"                                   # store profile
+adb shell am start -a android.intent.action.VIEW -d "semay://open/r/<postId>"                                    # reel, in the full-screen player
+```
+
+Signed out: the link must survive the login screens — log in, and the linked
+screen opens on top of Home.
+
+**iOS — the scheme works now; Universal Links are portal work.** The app
+declares `semay` in `CFBundleURLTypes` with `FlutterDeepLinkingEnabled`. On a
+simulator or device:
+
+```bash
+xcrun simctl openurl booted "semay://open/p/<postId>"   # post detail over Home
+xcrun simctl openurl booted "semay://open/s/<storeId>"  # store profile
+```
+
+Safari → `https://semaycollection.com/p/<postId>` renders the share page and
+its button opens the app.
+
+**Expect this on an iPhone that does NOT have the app:** tapping "Open in
+SeMay" raises Safari's modal *"Safari cannot open the page because the address
+is invalid"*. The button is a bare `semay://` scheme — the only thing that can
+open the app before the entitlement below exists — and no JS-free page can tell
+in advance whether the scheme is registered. It is not a regression, and the
+App Store button underneath is the route that works for that visitor (once
+`SHARE_APPSTORE_URL` is set; while it is empty that button reads `Ýakynda`).
+Setting up Universal Links, below, is what removes the alert.
+
+For the link itself to open the app (the Universal Link banner / direct open)
+the owner has to, in this order:
+
+1. Apple Developer → Identifiers → `com.semay.semay` → enable **Associated
+   Domains**, then regenerate the provisioning profiles (Codemagic picks them
+   up on the next build).
+2. Only then add `com.apple.developer.associated-domains` =
+   `applinks:semaycollection.com` (and `applinks:www.semaycollection.com`) to
+   `mobile/ios/Runner/Runner.entitlements`. **Not before:** an entitlement the
+   App ID lacks fails signing and the archive never builds — which is why it
+   is deliberately absent from the repo today.
+3. Set **`SHARE_IOS_APP_ID`** in `server/.env` to the same `<TEAM ID>.<bundle
+   id>` and restart. Until it is set the route answers **404 on purpose**;
+   setting it is what makes it serve the document
+   (`curl -sI https://semaycollection.com/.well-known/apple-app-site-association | grep -i content-type`
+   → `application/json`). Apple fetches it through its own CDN at install time,
+   so the site has to be reachable from the internet, not just from the office.
+4. **Then allow for Apple's cache.** The AASA is fetched via
+   `app-site-association.cdn-apple.com`, not from this origin directly, and the
+   result is cached — which is exactly why an empty document is never
+   published. After setting `SHARE_IOS_APP_ID`, delete and re-install the app
+   (or use Settings → Developer → Associated Domains Development to force a
+   direct fetch) before concluding Universal Links are broken.
+
+The scene-based iOS runner (`SceneDelegate: FlutterSceneDelegate`) has not
+been exercised with a URL from this Windows box — `xcrun simctl openurl`
+above is the check to run before the first TestFlight build goes out.
+
 ## 6. Build & run
 
 ```bash
@@ -395,9 +587,12 @@ npm run smoke          # boots src/index.ts on port 18080 with the local .env
 ```
 
 Logs in as the demo account (so `OTP_TEST_PHONE`/`OTP_TEST_CODE` must be set),
-opens a WebSocket, checks ping/pong, subscribes to the chat list, sends one
-message to the first store and watches it echo over the socket, then checks a
-bad token is closed with 4401. This is the "verify by booting" check from
+checks that `/health/ready` reports the realtime bus live when `REDIS_URL` is
+set (`bus.ready:true` — the message round-trip below runs on one process and
+would pass with a dead Redis) and that `/health/realtime` answers,
+opens a WebSocket, checks ping/pong, subscribes
+to the chat list, sends one message to the first store and watches it echo
+over the socket, then checks a bad token is closed with 4401. This is the "verify by booting" check from
 `CLAUDE.md` rule 9 made repeatable — `inject()`-based tests never exercise the
 listener. It writes one message into a real chat, so use it on dev/staging
 data only.
@@ -470,9 +665,26 @@ competing with API requests for the event loop.
 ## 10. Health checks & triage
 
 ```bash
-curl http://localhost:8080/health         # liveness — always cheap, no DB query
-curl http://localhost:8080/health/ready   # readiness — probes the DB, rate-limited, ~2s cache
+curl http://localhost:8080/health          # liveness — always cheap, no DB query
+curl http://localhost:8080/health/ready    # readiness — probes the DB, reports the realtime bus; rate-limited, ~2s cache
+curl http://localhost:8080/health/realtime # realtime readiness — fails closed where the bus is required
 ```
+
+`/health/ready` answers `{ ok, db, degraded, realtime, bus: { mode, ready,
+droppedPublishes } }` — `bus` is the realtime pub-sub (`08_OPERATIONS.md` §3d).
+It is the **HTTP** load balancer's health check and its status code follows the
+**database** only: a Redis outage shows up as `degraded:true` /
+`realtime:false` and a 200, because everything but realtime fan-out still
+works.
+
+`/health/realtime` answers `{ ok, required, degraded, bus }` and is the one
+that **fails closed** — 503 once the bus has been gone past the grace period
+where Redis is required (a cluster worker, or `REDIS_REQUIRED=true`). Point the
+**WebSocket** upstream's health check and your alerting at this one.
+
+Neither endpoint takes authentication, so the Redis host:port and the raw
+ioredis error text are deliberately kept off both; they are in the log line the
+triage step below points at.
 
 If the mobile app or web-admin can't reach the API:
 
@@ -483,8 +695,43 @@ If the mobile app or web-admin can't reach the API:
    the `adb reverse tcp:8080 tcp:8080` tunnel, which has to be re-run every
    time the phone reconnects over USB (`mobile/README.md`) — or, for a device
    on the same Wi-Fi rather than USB, the firewall rule in §8.
-3. `/health` succeeds but `/health/ready` fails → MySQL is unreachable or out
-   of connections (`Max_used_connections` in `SHOW GLOBAL STATUS`).
+3. `/health` succeeds but `/health/ready` fails with `db:false` → MySQL is
+   unreachable or out of connections (`Max_used_connections` in
+   `SHOW GLOBAL STATUS`).
+
+If chat messages stop arriving live (sent ones appear, incoming ones only
+after reopening the thread):
+
+4. `/health/ready` is 200 but `degraded:true` / `bus.ready:false` →
+   `REDIS_URL` is set and Redis is not answering. **For the host and the
+   reason, grep the log, not the endpoint** — the readiness body carries no
+   error text on purpose (it is unauthenticated):
+
+   ```powershell
+   # LOG_DIR is from server/.env and defaults to server/logs
+   Select-String -Path "LOG_DIR\app.*.log" -Pattern "realtime: Redis"
+   ```
+
+   The `realtime: Redis error` lines carry `redis:` (the host:port) and `err:`
+   (the reason); `realtime: Redis connection lost` is when it went, and
+   `realtime: Redis reconnected` (with `downMs` and `droppedPublishes`) is when
+   it came back. Chat still works for sockets on this process, and NOT across
+   workers or machines — `bus.droppedPublishes` counts the events that stayed
+   in-process. Start the Redis service (and make it auto-start), or empty
+   `REDIS_URL` if this really is a single process.
+5. `/health/realtime` is 503 while `/health/ready` is still 200 → the bus has
+   been down for over 30 s on a cluster worker (or with `REDIS_REQUIRED=true`).
+   Same fix as 4. The split is deliberate: the REST API keeps serving (nothing
+   but realtime fan-out needs Redis, and every box sharing one Redis would
+   otherwise go out of rotation at the same instant, taking the whole site
+   down), while the WebSocket upstream stops routing here. That process
+   **also closes the WebSockets it is already holding** (close code 4503, one
+   `realtime: the bus this process needs has been down past the grace period`
+   line per sweep) and answers new subscribes `SUBSCRIBE_FAILED` — so expect a
+   burst of reconnects and phones showing "Connecting…" while it is in this
+   state; that is the design, not a second fault (`08_OPERATIONS.md` §3d).
+   `start:cluster` itself refuses to boot when Redis is unreachable at start —
+   the console names the host.
 
 ## 11. Backups
 
@@ -577,10 +824,40 @@ not just real testing:
       prove it end to end: send a broadcast from the panel — no amber
       "push disabled" warning, `broadcast push done` in the log with
       `sent > 0`, and a phone with the app OPEN on the feed shows a heads-up
-      notification with sound on the "Announcements" channel (tap opens the
-      inbox); a chat message sent to that phone while it is on another screen
-      does the same on "Messages" and opens the thread; the thread that is on
-      screen stays quiet.
+      notification with the system default sound on the announcements channel
+      (**Bildirişler** / ru **Уведомления** — Android labels channels in the
+      DEVICE's language; tap opens the inbox); a chat message sent to that
+      phone while it is on another screen — chat list, inbox, another thread,
+      backgrounded, killed — rings with the phone's default notification sound
+      on the chat channel (**Habarlar** / **Сообщения**) and opens the thread;
+      the thread that is on screen stays quiet (badge only on iOS) and its
+      pending notification disappears from the shade / Notification Center as
+      it opens; a "New order" to a superadmin uses the default sound on the
+      orders channel (**Sargytlar** / **Заказы**) (`08_OPERATIONS.md` §3b).
+      **Deploy the server before or with the app release**: only the server
+      names the `orders` channel, so a new app taking an order push from an old
+      server falls through to the manifest default, which is the chat channel
+      (same sound, wrong category). iOS additionally: a foreground push on any
+      screen but the thread it belongs to shows a banner with the default
+      sound.
+- [ ] **No custom notification sound ships.** The bundled chat sound was
+      removed at the owner's request; all three channels take the phone's
+      default. After `flutter build apk --release`, neither the sound asset nor
+      any reference to it may be left in the APK:
+
+      ```bash
+      cd mobile
+      python -c "import zipfile;z=zipfile.ZipFile('build/app/outputs/flutter-apk/app-release.apk');print([n for n in z.namelist() if 'semay_message' in n or (n.startswith('res/') and z.read(n)[:3]==b'ID3')])"
+      # -> []   (any entry means an asset came back)
+
+      python -c "import zipfile;z=zipfile.ZipFile('build/app/outputs/flutter-apk/app-release.apk');print([n for n in z.namelist() if n.endswith('.dex') and b'semay_message' in z.read(n)])"
+      # -> []   (a hit means Dart or Kotlin still names the resource)
+      ```
+
+      If a custom sound is ever brought back, read the release-build shrinker
+      trap in `08_OPERATIONS.md` §3b FIRST — a name-only reference is invisible
+      to AGP's shrinker, which stripped the asset once and left background chat
+      pushes silent, and a channel's sound cannot be changed after creation.
 - [ ] iOS push chain (§5d): APNs auth key uploaded to the Firebase project
       (Project settings → Cloud Messaging → Apple app configuration) and the
       Push Notifications capability enabled on the `com.semay.semay` App ID. The
@@ -594,6 +871,21 @@ not just real testing:
       toggle airplane mode on/off with the thread open; leave the app open 20+
       minutes (past the access-token TTL) and confirm messages still arrive;
       tap a push with the app killed and confirm it opens that thread.
+- [ ] Read receipts and unread, with the account on ONE phone at a time. The
+      same account signed in on a second device is a legitimate reader: when
+      that device opens a thread it posts the read receipt — the sender sees
+      two blue ticks and "Seen HH:MM", this phone's badge for the chat clears,
+      and a message can show as read before this phone was touched. That is
+      correct behaviour, not a receipts bug (the owner has two phones — sign
+      the other one out, or leave its thread closed, before judging receipt
+      timing on this one). What to check, store phone on the thread and
+      customer phone on Home: a store message shows one grey tick, then two
+      grey within a second (the customer's chat list stamped it delivered);
+      the customer's Chat tab badge and the row's pill show the count; two
+      blue ticks plus "Seen HH:MM" under the newest message appear only when
+      the customer opens the thread, and the badge clears then. Then the same
+      with the roles swapped. A stalled socket shows "Connecting…" under the
+      title and the ticks catch up on the reconnect.
 - [ ] Chat cache / scroll-back / media (docs/07 Phase 9d): open a thread,
       kill the app, turn on airplane mode, reopen — the list and the thread's
       recent messages must be there with "Connecting…" under the title; in a
@@ -638,3 +930,26 @@ not just real testing:
       real handset to prove it end to end.
 - [ ] Reverse proxy + TLS in front of the API (§9), firewall only exposing
       *that* port to the internet (§8).
+- [ ] Share links (§5e): share a post from a phone — the sheet shows a title
+      and the message carries `https://semaycollection.com/p/<id>` (never a
+      `semay://` string); tapped on a phone WITHOUT the app it opens the share
+      page — on Android "Open in SeMay" lands on Google Play once
+      `SHARE_PLAY_URL` is set (check `S.browser_fallback_url` per §5e), on
+      iPhone it raises Safari's "address is invalid" alert by design and the
+      App Store button below is the working route; either store button reads
+      "coming soon" while its URL is empty, which is how both ship. On a
+      phone WITH the app the post opens over Home (through the page's button
+      until App Links verify), and back returns to Home; a warm link fired
+      while two screens deep leaves those two screens underneath; the same for
+      a reel (`/r/`) and a store (`/s/`), cold, warm and signed out.
+      **A mangled link must cost nothing:** forward `…/p/<id>/extra`,
+      `…/p/abc123` or a link with trailing punctuation to a phone with the app
+      — it must be a no-op over whatever was on screen (warm) or land on Home
+      (cold), never go_router's empty "Page Not Found".
+      Every share button must also report back: a completed share shows
+      "Paýlaşyldy", a dismissed sheet shows nothing, and a sheet that cannot
+      open (iPad with no anchor) shows the failure string — from the store
+      icon as well as the post/reel one.
+      `adb shell pm get-app-links com.semay.semay` reads "verified" for both
+      hosts once production serves `assetlinks.json`; iOS Universal Links need
+      the portal steps in §5e before the entitlement is added.

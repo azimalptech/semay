@@ -4,6 +4,7 @@ import { stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import { prisma } from "./db.js";
+import { withRetry } from "./lib/withRetry.js";
 import {
   deleteMediaByUrls,
   keyForPublicUrl,
@@ -60,10 +61,19 @@ async function acquireLease(): Promise<boolean> {
     // Already exists — fall through to the conditional claim.
   }
 
-  const { count } = await prisma.maintenanceLease.updateMany({
-    where: { name: REAPER_LEASE, lockedUntil: { lte: now } },
-    data: { lockedUntil: until },
-  });
+  // Every worker on every host fires this within the same tick, all aimed at
+  // the one lease row — the textbook case for the retry the rest of the
+  // codebase's contended writes use. Losing the CAS is the normal outcome and
+  // returns false; losing the *connection race* (a rolled-back write conflict,
+  // or a pool that had nothing free within maxWait) used to throw instead, and
+  // a throw here takes down the whole cycle — including the media sweep — for
+  // an hour.
+  const { count } = await withRetry(() =>
+    prisma.maintenanceLease.updateMany({
+      where: { name: REAPER_LEASE, lockedUntil: { lte: now } },
+      data: { lockedUntil: until },
+    })
+  );
   return count === 1;
 }
 
@@ -88,7 +98,16 @@ async function reapExpiredStories(log: FastifyBaseLogger): Promise<void> {
     });
     if (batch.length === 0) return;
 
-    await prisma.story.deleteMany({ where: { id: { in: batch.map((s) => s.id) } } });
+    // Retried, like every other write that contends with live traffic: this
+    // batch DELETE takes row and gap locks across stories a store is posting
+    // into and viewers are stamping story_views on, so MySQL can and does roll
+    // it back as a write conflict. Unretried, one such rollback aborted the
+    // whole cycle from runReapCycle's `finally` — the remaining reaps (dead
+    // sessions, expired OTPs, orphaned media) never ran, and the next attempt
+    // was an hour away. The reap is idempotent: a re-run re-reads the batch.
+    await withRetry(() =>
+      prisma.story.deleteMany({ where: { id: { in: batch.map((s) => s.id) } } })
+    );
     // Files only after the rows are gone — the DB stays the source of truth, and
     // a crash in between leaves a recoverable stray file rather than a story row
     // pointing at nothing.
@@ -107,28 +126,36 @@ async function reapDeadSessions(log: FastifyBaseLogger): Promise<void> {
   // hits an explicit dead row (401) rather than silently missing.
   const now = new Date();
   const retiredCutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const { count } = await prisma.session.deleteMany({
-    where: {
-      OR: [
-        { expiresAt: { lte: now } },
-        { revokedAt: { lte: retiredCutoff } },
-        { rotatedAt: { lte: retiredCutoff } },
-      ],
-    },
-  });
+  // Contends head-on with rotateSession, which UPDATEs and INSERTs into this
+  // same table on every refresh in the fleet — retried for the same reason it
+  // is there.
+  const { count } = await withRetry(() =>
+    prisma.session.deleteMany({
+      where: {
+        OR: [
+          { expiresAt: { lte: now } },
+          { revokedAt: { lte: retiredCutoff } },
+          { rotatedAt: { lte: retiredCutoff } },
+        ],
+      },
+    })
+  );
   if (count > 0) log.info({ sessions: count }, "reaped dead sessions");
 }
 
 async function reapExpiredOtps(log: FastifyBaseLogger): Promise<void> {
   const now = new Date();
-  const { count } = await prisma.otpCode.deleteMany({
-    // Never delete a row still serving a lockout — that would hand a brute-force
-    // attacker a free reset of the attempts counter.
-    where: {
-      expiresAt: { lte: now },
-      OR: [{ lockedUntil: null }, { lockedUntil: { lte: now } }],
-    },
-  });
+  // Same again: otp_codes is written by every login attempt in flight.
+  const { count } = await withRetry(() =>
+    prisma.otpCode.deleteMany({
+      // Never delete a row still serving a lockout — that would hand a
+      // brute-force attacker a free reset of the attempts counter.
+      where: {
+        expiresAt: { lte: now },
+        OR: [{ lockedUntil: null }, { lockedUntil: { lte: now } }],
+      },
+    })
+  );
   if (count > 0) log.info({ otpCodes: count }, "reaped expired OTP codes");
 }
 

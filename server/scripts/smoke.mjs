@@ -125,7 +125,28 @@ try {
   step("server boots and /health answers", healthy, healthy ? "" : bootLog.slice(-800));
   if (!healthy) throw new Error("boot failed");
   const ready = await fetch(`${BASE}/health/ready`);
-  step("/health/ready (DB reachable)", ready.status === 200, `status ${ready.status}`);
+  const readyBody = await ready.json().catch(() => null);
+  step("/health/ready (DB reachable)", ready.status === 200 && readyBody?.db === true, `status ${ready.status}`);
+  // A REDIS_URL pointing at nothing used to pass every step here — the boot
+  // line said "Redis pub-sub", readiness said ok, and the message round-trip
+  // below only ever runs on this one process. The bus field is what tells.
+  const redisUrl = "REDIS_URL" in process.env ? process.env.REDIS_URL : readEnv("REDIS_URL");
+  step(
+    redisUrl ? "/health/ready: Redis bus is live (REDIS_URL is set)" : "/health/ready: in-process bus (REDIS_URL empty)",
+    redisUrl ? readyBody?.bus?.mode === "redis" && readyBody?.bus?.ready === true : readyBody?.bus?.mode === "local",
+    `bus=${JSON.stringify(readyBody?.bus)}`
+  );
+  // The fail-closed half, on its own path (docs/08 §3d): /health/ready must
+  // never go 503 over the bus — that would take login, feed, stores, orders
+  // and media out of rotation for a dependency none of them use — so the
+  // WebSocket upstream polls this one instead.
+  const realtime = await fetch(`${BASE}/health/realtime`);
+  const realtimeBody = await realtime.json().catch(() => null);
+  step(
+    "/health/realtime answers (the WebSocket upstream's probe)",
+    realtime.status === 200 && realtimeBody?.ok === true,
+    `status ${realtime.status} body=${JSON.stringify(realtimeBody)}`
+  );
   // Informational only: the logger flushes through a worker thread, so these
   // lines may not have reached our pipe yet — never a failure by themselves.
   await sleep(1000);

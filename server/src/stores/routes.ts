@@ -8,7 +8,11 @@ import { publish } from "../realtime/bus.js";
 import { deleteStoreCascade, setStoreAdmin } from "./service.js";
 
 const createStoreSchema = z.object({
-  name: z.string().min(1).max(120),
+  // trim() before min(1), for the reason updateMeSchema gives (users/routes.ts):
+  // "   " otherwise passes min(1) and the store renders nameless in the chat
+  // header, the chat list, order rows and its own profile. The mobile client
+  // trims too, but it must not be the only thing that does.
+  name: z.string().trim().min(1).max(120),
   tagline: z.string().max(255).optional(),
   phone: z.string().max(20).optional(),
   address: z.string().max(255).optional(),
@@ -20,7 +24,9 @@ const createStoreSchema = z.object({
 // admin may change on their own store. NOT `active` or `leaderboardOrder`
 // (superadmin-only concerns).
 const updateStoreSchema = z.object({
-  name: z.string().min(1).max(120).optional(),
+  // Same trim() as createStoreSchema and updateMeSchema — a whitespace-only
+  // rename used to 200 and blank the store's display name everywhere.
+  name: z.string().trim().min(1).max(120).optional(),
   tagline: z.string().max(255).optional(),
   phone: z.string().max(20).optional(),
   address: z.string().max(255).optional(),

@@ -43,8 +43,11 @@ Future<void> main() async {
   // and badge — so a chat message or a broadcast is heard on any screen, the
   // way it is on Android from the app's own local notification (see
   // notification_service.dart, which posts nothing on iOS for that reason).
-  // Badge has to be included regardless, or the badge-only correction the
-  // server sends after a read never reaches the icon. No-op on Android.
+  // These are global; the one per-message exception — a message for the
+  // thread on screen, badge only — is made natively in AppDelegate.swift's
+  // willPresent override, because Dart is never asked. Badge has to be
+  // included regardless, or the badge-only correction the server sends after
+  // a read never reaches the icon. No-op on Android.
   await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
     alert: true,
     badge: true,

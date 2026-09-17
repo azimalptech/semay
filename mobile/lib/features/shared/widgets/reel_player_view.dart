@@ -566,12 +566,24 @@ class _ReelPlayerViewState extends ConsumerState<ReelPlayerView> {
                             toggleSaveAndNotify(context, ref, widget.postId),
                       ),
                       const SizedBox(height: 20),
-                      _RailAction(
-                        iconName: 'arrow_share',
-                        color: Colors.white,
-                        label: sharesCount > 0 ? formatCount(sharesCount) : null,
-                        onTap: () =>
-                            shareAndNotify(context, ref, widget.postId),
+                      // Builder: the sheet is anchored to this action's own
+                      // box (see shareAndNotify).
+                      Builder(
+                        builder: (shareContext) => _RailAction(
+                          iconName: 'arrow_share',
+                          color: Colors.white,
+                          label: sharesCount > 0
+                              ? formatCount(sharesCount)
+                              : null,
+                          onTap: () => shareAndNotify(
+                            shareContext,
+                            ref,
+                            widget.postId,
+                            isReel: true,
+                            storeName: store?['name'] as String? ?? '',
+                            caption: caption,
+                          ),
+                        ),
                       ),
                       const SizedBox(height: 20),
                       _RailAction(

@@ -38,6 +38,12 @@ class AppColors {
   static const Color textOnPrimary = Colors.white;
   static const Color error = Color(0xFFF44F3E);
 
+  /// The read ("seen") tick under a sent message — blue, not [brand]: read
+  /// has to register as a different state from delivered at a glance, and
+  /// brand purple beside the grey delivered tick, under a purple bubble, did
+  /// not. Every messenger the users know draws this one blue.
+  static const Color readTick = Color(0xFF34B7F1);
+
   /// Store Detail's "Call" button — deliberately not [brand]; a call action
   /// reads as green everywhere else in the app (dialer icons, etc.) too.
   // Figma state-colors/success. Was 0xFF22C55E, which did not match the design.

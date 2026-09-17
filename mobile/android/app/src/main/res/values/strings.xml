@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Turkmen is the product's default language (lib/core/l10n.dart: the app
+     ships tk/ru only, deliberately no English), so it is the default resource
+     folder; res/values-ru carries the Russian. These three names and
+     descriptions are the only app strings Android itself renders — Settings ->
+     Apps -> SeMay -> Notifications lists one row per channel (see
+     SemayApplication.kt, and docs/09_DEPLOYMENT.md's device checklist, which
+     sends the owner to exactly that screen). Android picks the folder by
+     DEVICE locale, which can differ from the in-app language; a channel's
+     name and description are the two things a re-created channel does update,
+     so this stays correctable. -->
+<resources>
+    <string name="channel_chat_name">Habarlar</string>
+    <string name="channel_chat_description">Täze çat habarlary</string>
+    <string name="channel_announcements_name">Bildirişler</string>
+    <string name="channel_announcements_description">SeMay-dan bildirişler</string>
+    <string name="channel_orders_name">Sargytlar</string>
+    <string name="channel_orders_description">Täze sargytlar</string>
+</resources>

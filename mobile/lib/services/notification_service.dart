@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -5,6 +6,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -21,15 +23,29 @@ import 'auth_service.dart';
 //   flutter build web --dart-define=FCM_VAPID_KEY=...
 const _webVapidKey = String.fromEnvironment('FCM_VAPID_KEY');
 
-// Android notification channels, created at IMPORTANCE_HIGH by MainActivity.kt
-// (ids and names must match there and on the server: CHAT_PUSH_CHANNEL in
-// chats/service.ts, BROADCAST_PUSH_CHANNEL in notifications/service.ts). A
+// Android notification channels, created at IMPORTANCE_HIGH by
+// SemayApplication.kt on every process start (ids must match there and on the
+// server: CHAT_PUSH_CHANNEL in chats/service.ts, BROADCAST_PUSH_CHANNEL in
+// notifications/service.ts, ORDER_PUSH_CHANNEL in orders/service.ts). A
 // backgrounded app's push lands on them via FCM; a foreground one is posted
 // here on the same channel, so the user's per-channel settings apply to both.
+// No channel carries a sound of its own: all three play the phone's default
+// notification sound, which is what the owner asked for. Nothing here passes a
+// sound override, so on API 26+ the channel's sound (the system default)
+// applies, and below 26 the plugin falls back to the same default.
+//
+// The names below are a fallback the user should never see: the plugin only
+// creates a channel when one with that id does not exist, and the Application
+// has already created all three by the time any Dart runs. They are the
+// Turkmen strings from res/values/strings.xml all the same — the product
+// ships tk/ru only (core/l10n.dart), so an English channel name has no
+// business being reachable at all.
 const _chatChannelId = 'chat_messages';
-const _chatChannelName = 'Messages';
+const _chatChannelName = 'Habarlar';
 const _announcementsChannelId = 'announcements';
-const _announcementsChannelName = 'Announcements';
+const _announcementsChannelName = 'Bildirişler';
+const _ordersChannelId = 'orders';
+const _ordersChannelName = 'Sargytlar';
 
 final messagingProvider = Provider<FirebaseMessaging>(
   (ref) => FirebaseMessaging.instance,
@@ -44,7 +60,57 @@ final messagingProvider = Provider<FirebaseMessaging>(
 // foreground handler below, which runs outside any BuildContext/ProviderScope
 // — same "simple global mutable flag" convention as AppColors._isDark.
 String? _activeChatId;
-void setLocallyActiveChatId(String? chatId) => _activeChatId = chatId;
+
+/// THE rule for a chat push, the same on both platforms: a chat push is
+/// silent ONLY when its chatId equals the thread on screen with the app
+/// resumed; everything else — the chat list, the inbox, any other tab, a
+/// message for chat B while in chat A, a backgrounded or killed app — shows
+/// normally, with the phone's default notification sound; broadcasts (no
+/// chatId) are never suppressed. Android
+/// applies it in _showForegroundNotification; iOS applies the same `==` in
+/// AppDelegate.swift's willPresent override, fed by the mirror below, because
+/// there the OS presents the push and Dart is never asked.
+bool shouldPresentPush({
+  required String? chatId,
+  required String? activeChatId,
+}) => chatId == null || chatId != activeChatId;
+
+/// What [setLocallyActiveChatId] last stored, for the one caller that has to
+/// know whether the thread on screen is still ITS thread: ChatThreadScreen's
+/// dispose only clears the flag when it still names that screen's chat.
+/// Thread B stacked over thread A is disposed AFTER A's didPopNext has
+/// already claimed the flag back (a pop's route callbacks run when the pop
+/// starts, the disposal when its animation ends), so an unconditional clear
+/// there left A on screen with the flag at null — and every further message
+/// for the chat the user was staring at rang.
+String? get locallyActiveChatId => _activeChatId;
+
+/// Set by ChatThreadScreen when it is the thread on screen (the id) and
+/// cleared when it is not — left, covered by another route, or the app
+/// backgrounded — so "on screen with the app resumed" is exactly when this
+/// holds a value.
+void setLocallyActiveChatId(String? chatId) {
+  _activeChatId = chatId;
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+    unawaited(_mirrorActiveChatToIos(chatId));
+  }
+}
+
+// iOS decides foreground presentation natively (see
+// _postsForegroundNotifications), so the active chat is mirrored to
+// AppDelegate.swift, which keeps its own copy for the willPresent override.
+// Fire-and-forget: the screen must not wait on it, and a failure (a native
+// build without the handler) only means that iOS user hears the sound inside
+// the open thread — the behaviour before the mirror existed, never a crash.
+const _iosNotificationsChannel = MethodChannel('com.semay.semay/notifications');
+
+Future<void> _mirrorActiveChatToIos(String? chatId) async {
+  try {
+    await _iosNotificationsChannel.invokeMethod<void>('setActiveChat', chatId);
+  } catch (e) {
+    debugPrint('setActiveChat mirror failed: $e');
+  }
+}
 
 // Anchors notification-tap navigation outside any single screen's widget tree
 // — router.dart wires this into MaterialApp.router's navigatorKey, the same
@@ -56,7 +122,7 @@ final rootNavigatorKey = GlobalKey<NavigatorState>();
 
 // What a push is about, read off its data payload. The server sets `type`
 // ('chat_message' with a chatId, or 'broadcast'); anything else — an order
-// notice, say — has nowhere to route and no channel of its own.
+// notice — has nowhere to route and is posted on the orders channel.
 class _PushKind {
   _PushKind(Map<String, dynamic> data)
     : chatId = data['chatId'] as String?,
@@ -130,15 +196,15 @@ Future<void> setUpForegroundNotifications(
 // order notice: no chatId, no type) gets no tag and its own id instead, so it
 // stacks the way FCM's background delivery does — with tag 'broadcast' it
 // would silently overwrite a pending announcement, and vice versa. Skipped
-// entirely when the recipient is already looking straight at this exact chat
-// (the local _activeChatId check — the server sends the push regardless, by
-// design; see that flag).
+// entirely when shouldPresentPush says the recipient is already looking
+// straight at this exact chat (the server sends the push regardless, by
+// design; see _activeChatId).
 Future<void> _showForegroundNotification(
   RemoteMessage message,
   _PushKind kind,
 ) async {
   if (!_postsForegroundNotifications) return;
-  if (kind.chatId != null && kind.chatId == _activeChatId) {
+  if (!shouldPresentPush(chatId: kind.chatId, activeChatId: _activeChatId)) {
     debugPrint('foreground push: suppressed, chat ${kind.chatId} is on screen');
     return;
   }
@@ -146,39 +212,96 @@ Future<void> _showForegroundNotification(
   final body = message.notification?.body ?? '';
   if (title.isEmpty && body.isEmpty) return;
 
-  final channelId = kind.isBroadcast ? _announcementsChannelId : _chatChannelId;
-  final channelName = kind.isBroadcast
+  final isChat = kind.chatId != null;
+  final channelId = isChat
+      ? _chatChannelId
+      : kind.isBroadcast
+      ? _announcementsChannelId
+      : _ordersChannelId;
+  final channelName = isChat
+      ? _chatChannelName
+      : kind.isBroadcast
       ? _announcementsChannelName
-      : _chatChannelName;
+      : _ordersChannelName;
   final tag = kind.chatId ?? (kind.isBroadcast ? 'broadcast' : null);
-  await _localNotifications.show(
-    // messageId is set by FCM's Android SDK on every delivery; its String
-    // hashCode fits the 32-bit id the plugin requires.
-    id: tag == null ? message.messageId.hashCode : 0,
-    title: title,
-    body: body,
-    notificationDetails: NotificationDetails(
-      android: AndroidNotificationDetails(
-        channelId,
-        channelName,
-        // Matches the channel MainActivity.kt created; the plugin would
-        // otherwise create a default-importance one under the same id on a
-        // device where the activity has not run yet, and a channel's
-        // importance is fixed at creation.
-        importance: Importance.high,
-        priority: Priority.high,
-        tag: tag,
+  // messageId is set by FCM's Android SDK on every delivery; its String
+  // hashCode fits the 32-bit id the plugin requires.
+  final id = tag == null ? message.messageId.hashCode : 0;
+  final payload = jsonEncode(message.data);
+
+  // No `sound:` anywhere: every channel plays the phone's default
+  // notification sound, so there is nothing to override. Leaving it unset is
+  // also what keeps the plugin from ever raising `invalid_sound` — it only
+  // validates a raw resource that was actually named.
+  //
+  // The plugin THROWS rather than degrading (a bad small icon, or
+  // POST_NOTIFICATIONS revoked mid-session), and this Future is deliberately
+  // not awaited by the onMessage listener, so an unguarded throw became an
+  // unhandled async error. Caught here: a failed post must cost the banner,
+  // never the app.
+  try {
+    await _localNotifications.show(
+      id: id,
+      title: title,
+      body: body,
+      notificationDetails: NotificationDetails(
+        android: AndroidNotificationDetails(
+          channelId,
+          channelName,
+          // Matches the channel SemayApplication.kt created; the plugin would
+          // otherwise create a default-importance one under the same id on a
+          // device where it somehow has not run yet, and a channel's
+          // importance is fixed at creation.
+          importance: Importance.high,
+          priority: Priority.high,
+          tag: tag,
+        ),
       ),
-    ),
-    payload: jsonEncode(message.data),
-  );
+      payload: payload,
+    );
+  } catch (e) {
+    debugPrint('foreground notification failed: $e');
+  }
+}
+
+/// Clears the shade entry for [chatId] once its thread is on screen — the
+/// one FCM's SDK posted for a background delivery or the one posted here.
+/// A notification for a conversation the user is reading right now is stale
+/// the moment they open it; WhatsApp and Instagram both clear it, and leaving
+/// it makes the user swipe away a notice for a message they have already read.
+///
+/// Both platforms, by different routes, because the identity differs:
+/// Android's is the plugin's (tag = chat id, id 0 — the same identity FCM's
+/// own Android SDK uses, which _showForegroundNotification mirrors); iOS has
+/// no local-notification plugin here (the OS presents foreground pushes
+/// itself), so AppDelegate.swift matches delivered notifications on the
+/// push's `chatId` and removes them.
+///
+/// The launcher NUMBER is a separate thing: on Android the count is derived
+/// from the notifications themselves, so this call is what drops it; on iOS
+/// the server corrects the icon number with a badge-only push after the read
+/// receipt (chats/service.ts syncLauncherBadges).
+Future<void> dismissChatNotification(String chatId) async {
+  if (kIsWeb) return;
+  try {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      await _iosNotificationsChannel.invokeMethod<void>('dismissChat', chatId);
+      return;
+    }
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    await _localNotifications.cancel(id: 0, tag: chatId);
+  } catch (e) {
+    // Never fatal: a native build without the handler (or a revoked
+    // permission) only means one stale notice stays in the shade.
+    debugPrint('dismissChatNotification failed: $e');
+  }
 }
 
 // Marks the message the push refers to as "delivered" — the double-gray-
-// check state (see chat_thread_screen.dart's _MessageBubble), meaning the
-// recipient's device actually received it, independent of whether they ever
-// open the thread. The server's sendChatPush attaches chatId/messageId as
-// the FCM data payload specifically so this has something to write to;
+// check state (see chat_thread_screen.dart's MessageStatusTicks), meaning
+// the recipient's device actually received it, independent of whether they
+// ever open the thread. The server's sendChatPush attaches chatId/messageId
+// as the FCM data payload specifically so this has something to write to;
 // notification-only fields (title/body) carry nothing identifying which
 // message this was.
 Future<void> _markMessageDelivered(RemoteMessage message) async {

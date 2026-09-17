@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Russian channel names/descriptions; the Turkmen defaults are in
+     res/values/strings.xml. Wording matches lib/core/l10n.dart (Сообщения /
+     Уведомления / Заказы). -->
+<resources>
+    <string name="channel_chat_name">Сообщения</string>
+    <string name="channel_chat_description">Новые сообщения в чате</string>
+    <string name="channel_announcements_name">Уведомления</string>
+    <string name="channel_announcements_description">Уведомления от SeMay</string>
+    <string name="channel_orders_name">Заказы</string>
+    <string name="channel_orders_description">Новые заказы</string>
+</resources>

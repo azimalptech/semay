@@ -1,12 +1,19 @@
 import type { AddressInfo } from "node:net";
 
 import type { FastifyInstance } from "fastify";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
+import {
+  FRAME_BUCKET_CAPACITY,
+  FRAME_FLOOD_CLOSE,
+  FRAME_REFILL_PER_SEC,
+  MAX_CHANNELS_PER_SOCKET,
+} from "../src/realtime/gateway.js";
 import { createOrGetChat, hideChat, markReceipts, sendMessage } from "../src/chats/service.js";
 import { prisma } from "../src/db.js";
+import * as channels from "../src/realtime/channels.js";
 import {
   cleanupStores,
   cleanupUsers,
@@ -237,6 +244,35 @@ describe("realtime gateway over a real socket", () => {
     }
   });
 
+  it("store:{id}: subscribe gets the store row, and a PATCH delivers the rename live", async () => {
+    // Before this pass the channel did not exist: every store-profile open
+    // sent this subscribe and was answered UNKNOWN_CHANNEL, and PATCH
+    // /stores/:id published into a channel nobody could hold — so a rename
+    // reached only the admin who made it (edit_store_screen invalidates its
+    // own provider), and every other open profile/chat header kept the old
+    // name until it was torn down.
+    const { ws, next } = await connect(port, userToken);
+    const channel = `store:${storeId}`;
+    ws.send(JSON.stringify({ type: "subscribe", channel }));
+
+    const snapshot = await next((f) => f.channel === channel && f.type === "snapshot");
+    expect((snapshot.data as { id: string }).id).toBe(storeId);
+
+    const renamed = `Gateway Test Store ${Date.now()}`;
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/stores/${storeId}`,
+      headers: { authorization: `Bearer ${await refreshedToken(adminId)}` },
+      payload: { name: renamed },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const upsert = await next((f) => f.channel === channel && f.type === "upsert");
+    expect((upsert.data as { name: string }).name).toBe(renamed);
+    ws.close();
+    await prisma.store.update({ where: { id: storeId }, data: { name: "Gateway Test Store" } });
+  });
+
   // Last in the file on purpose: it hides the shared chat for the customer.
   it("chat-delete: the snapshot after a delete stops at that side's cutoff; the other side's does not", async () => {
     // The snapshot used to call listMessages with the chat id alone — no
@@ -265,4 +301,316 @@ describe("realtime gateway over a real socket", () => {
     expect(adminIds).toContain(after.id.toString());
     admin.ws.close();
   });
+});
+
+describe("a subscribe that fails is reported, never silent", () => {
+  let app: FastifyInstance;
+  let port: number;
+  let userId: string;
+  let userToken: string;
+
+  beforeAll(async () => {
+    app = await buildApp();
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    port = (app.server.address() as AddressInfo).port;
+    ({ userId, token: userToken } = await createUserWithToken("user"));
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await cleanupUsers([userId]);
+  });
+
+  it("a snapshot that throws yields SUBSCRIBE_FAILED and rolls the attempt back so a retry works", async () => {
+    // Before: the catch deleted the placeholder and sent nothing, so the
+    // client sat on a subscribe with no snapshot and no error — forever, with
+    // the socket looking healthy. The bus listener it had installed leaked
+    // too. Now the client is told, and the same channel can be subscribed
+    // again (the attempt is gone from the per-socket map, so it is not a
+    // "already subscribed" no-op).
+    const real = channels.findChannelHandler;
+    const spy = vi.spyOn(channels, "findChannelHandler").mockImplementationOnce((name) => {
+      const found = real(name);
+      if (!found) return found;
+      return {
+        ...found,
+        handler: {
+          ...found.handler,
+          snapshot: async () => {
+            throw new Error("snapshot exploded");
+          },
+        },
+      };
+    });
+    try {
+      const { ws, next } = await connect(port, userToken);
+      const channel = "post:no-such-post";
+      ws.send(JSON.stringify({ type: "subscribe", channel }));
+      const err = await next((f) => f.channel === channel && f.type === "error");
+      expect(err.error).toBe("SUBSCRIBE_FAILED");
+
+      ws.send(JSON.stringify({ type: "subscribe", channel }));
+      const snapshot = await next((f) => f.channel === channel && f.type === "snapshot");
+      expect(snapshot.data).toBeNull(); // a public post channel: no such row, no error
+      ws.close();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a subscribe whose account is gone answers FORBIDDEN, not silence", async () => {
+    // authContext() resolves undefined for a missing or soft-deleted user —
+    // a token still inside its 15-minute TTL for an account deleted
+    // mid-session. This branch used to delete the placeholder and return
+    // WITHOUT sending anything, which the client's silence deadline reads as
+    // "the server is not delivering": drop the socket, reconnect (the token
+    // still verifies), subscribe, silence again, forever, with "Connecting…"
+    // pinned on screen and a REST re-seed on every cycle. FORBIDDEN rather
+    // than SUBSCRIBE_FAILED, because a missing account is final: the client
+    // hands it to the consumer instead of retrying.
+    const { userId: goneId, token: goneToken } = await createUserWithToken("user");
+    try {
+      await prisma.user.update({ where: { id: goneId }, data: { deletedAt: new Date() } });
+      const { ws, next, frames } = await connect(port, goneToken);
+      const channel = "post:no-such-post";
+      ws.send(JSON.stringify({ type: "subscribe", channel }));
+      const err = await next((f) => f.channel === channel && f.type === "error");
+      expect(err.error).toBe("FORBIDDEN");
+      expect(frames.filter((f) => f.type === "snapshot")).toEqual([]);
+      ws.close();
+    } finally {
+      await prisma.user.update({ where: { id: goneId }, data: { deletedAt: null } });
+      await cleanupUsers([goneId]);
+    }
+  }, 20_000);
+
+  it("a superseded attempt never reports SUBSCRIBE_FAILED for a channel that is working", async () => {
+    // The failure path guarded the state rollback with mine() but sent the
+    // error frame unconditionally. A subscribe → unsubscribe → subscribe burst
+    // on one socket (leaving and re-entering a thread, a Riverpod consumer
+    // rebuilding) leaves attempt A hanging while attempt B installs its
+    // listener and delivers its snapshot; A then hitting the 10 s deadline
+    // told the client a working channel had failed — and the client answers
+    // SUBSCRIBE_FAILED by re-subscribing and, on a second one, dropping the
+    // WHOLE socket, costing every other channel on it a reconnect plus a REST
+    // re-seed.
+    const real = channels.findChannelHandler;
+    const spy = vi.spyOn(channels, "findChannelHandler").mockImplementationOnce((name) => {
+      const found = real(name);
+      if (!found) return found;
+      return {
+        ...found,
+        // Never settles: the attempt can only end at SUBSCRIBE_DEADLINE_MS.
+        handler: { ...found.handler, snapshot: () => new Promise<never>(() => {}) },
+      };
+    });
+    try {
+      const { ws, next, frames } = await connect(port, userToken);
+      const channel = "post:no-such-post";
+      ws.send(JSON.stringify({ type: "subscribe", channel }));
+      // Give A time to install its bus listener before superseding it.
+      await new Promise((r) => setTimeout(r, 300));
+      ws.send(JSON.stringify({ type: "unsubscribe", channel }));
+      ws.send(JSON.stringify({ type: "subscribe", channel }));
+      const snapshot = await next((f) => f.channel === channel && f.type === "snapshot");
+      expect(snapshot.data).toBeNull();
+
+      // Past the server's own subscribe deadline, so A has certainly given up.
+      await new Promise((r) => setTimeout(r, 11_000));
+      expect(frames.filter((f) => f.type === "error")).toEqual([]);
+      ws.close();
+    } finally {
+      spy.mockRestore();
+    }
+  }, 30_000);
+});
+
+// A `receipts` frame whose upToMessageId is null says "I stamped nothing", and
+// there is no useful thing a client can do with it. markReceipts used to
+// publish it anyway, because its publish gate counted the unread counter being
+// cleared as a change: a read receipt that stamped no message but zeroed a
+// non-zero unread — reachable when a sendMessage commits between the message
+// updateMany and the chat updateMany — emitted a null-bounded roll-up. The
+// client read the null bound as "no upper bound" and stamped the whole window
+// blue (chat_providers.dart _applyReceipts, now guarded on both sides).
+describe("a receipts roll-up that stamped no message is not published", () => {
+  let app: FastifyInstance;
+  let port: number;
+  let userId: string;
+  let userToken: string;
+  let adminId: string;
+  let storeId: string;
+  let chatId: string;
+
+  beforeAll(async () => {
+    app = await buildApp();
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    port = (app.server.address() as AddressInfo).port;
+    ({ userId, token: userToken } = await createUserWithToken("user"));
+    ({ userId: adminId } = await createUserWithToken("admin"));
+    const store = await createStore("Null Bound Store", adminId);
+    storeId = store.id;
+    await prisma.storeAdmin.create({ data: { userId: adminId, storeId } });
+    chatId = (await createOrGetChat(userId, storeId)).id;
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await cleanupStores([storeId]);
+    await cleanupUsers([userId, adminId]);
+  });
+
+  it("clears the unread on the chat document without a null-bounded frame on the thread", async () => {
+    const messages = `chat:${chatId}:messages`;
+    const doc = `chat:${chatId}`;
+    const { ws, next, frames } = await connect(port, userToken);
+    ws.send(JSON.stringify({ type: "subscribe", channel: messages }));
+    await next((f) => f.channel === messages && f.type === "snapshot");
+    ws.send(JSON.stringify({ type: "subscribe", channel: doc }));
+    await next((f) => f.channel === doc && f.type === "snapshot");
+
+    // Every message already read, but the counter is not zero — exactly the
+    // state the race leaves behind (the message updateMany saw no new row;
+    // the chat updateMany's locking read saw the increment).
+    const sent = await sendMessage(
+      await prisma.chat.findUniqueOrThrow({ where: { id: chatId } }),
+      "admin",
+      adminId,
+      { text: "read me" }
+    );
+    await next((f) => f.channel === messages && f.type === "upsert");
+    await markReceipts(
+      await prisma.chat.findUniqueOrThrow({ where: { id: chatId } }),
+      "user",
+      "read"
+    );
+    await next((f) => f.channel === messages && f.type === "receipts");
+    expect(
+      (await prisma.message.findUniqueOrThrow({ where: { id: sent.id } })).readAt
+    ).not.toBeNull();
+    await prisma.chat.update({ where: { id: chatId }, data: { unreadByUser: 1 } });
+    await next((f) => f.channel === doc && f.type === "upsert").catch(() => undefined);
+    frames.length = 0;
+
+    await markReceipts(
+      await prisma.chat.findUniqueOrThrow({ where: { id: chatId } }),
+      "user",
+      "read"
+    );
+    // The chat document still carries the unread change — the receipt did
+    // something, it just did not stamp a message.
+    const upsert = await next((f) => f.channel === doc && f.type === "upsert");
+    expect((upsert.data as { unreadByUser: number }).unreadByUser).toBe(0);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(frames.filter((f) => f.channel === messages)).toEqual([]);
+
+    ws.close();
+  }, 30_000);
+});
+
+// What ONE authenticated socket is allowed to cost this process.
+//
+// Neither of these was bounded before: the channel map grew without limit, and
+// every frame on it was JSON.parsed synchronously inside ws's receiver and
+// could carry a subscribe (an authorize plus a snapshot — 200 rows for a chat
+// thread). ws's 4 KiB maxPayload (app.ts) bounds the SIZE of a frame and
+// nothing else. The `store:{id}` handler added in this pass widened the
+// reachable set again: like `post:{id}` it authorizes every authenticated
+// user, so one account can walk the whole store table and hold a channel for
+// each row. Both bounds are deliberately far above anything the app does.
+describe("realtime gateway: per-socket bounds", () => {
+  let app: FastifyInstance;
+  let port: number;
+  let userId: string;
+  let userToken: string;
+
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  /** Sends `frames` paced so the token bucket is never the thing that fails —
+   * the cap test must exercise the CHANNEL ceiling, not the rate limit. */
+  async function sendPaced(ws: WebSocket, frames: unknown[]): Promise<void> {
+    const chunk = Math.floor(FRAME_BUCKET_CAPACITY * 0.8);
+    for (let i = 0; i < frames.length; i += chunk) {
+      for (const f of frames.slice(i, i + chunk)) ws.send(JSON.stringify(f));
+      if (i + chunk < frames.length) {
+        // Refill the chunk we just spent, plus slack.
+        await sleep((chunk / FRAME_REFILL_PER_SEC) * 1_000 + 500);
+      }
+    }
+  }
+
+  beforeAll(async () => {
+    app = await buildApp();
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    port = (app.server.address() as AddressInfo).port;
+    ({ userId, token: userToken } = await createUserWithToken("user"));
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await cleanupUsers([userId]);
+  });
+
+  it(`serves ${MAX_CHANNELS_PER_SOCKET} channels and answers the next one CHANNEL_LIMIT`, async () => {
+    const { ws, next, frames } = await connect(port, userToken);
+    const channels = Array.from({ length: MAX_CHANNELS_PER_SOCKET }, (_, i) => `post:cap-${i}`);
+    await sendPaced(
+      ws,
+      channels.map((channel) => ({ type: "subscribe", channel }))
+    );
+    // Every one of them served — the ceiling is a ceiling, not a throttle.
+    // Polled rather than awaited on the LAST channel: the subscribes are
+    // handled concurrently and their snapshots come back in whatever order
+    // their queries finish, so the last one asked for is routinely not the
+    // last one answered.
+    const served = new Set<string | undefined>();
+    const deadline = Date.now() + 30_000;
+    while (served.size < MAX_CHANNELS_PER_SOCKET && Date.now() < deadline) {
+      for (const f of frames) if (f.type === "snapshot") served.add(f.channel);
+      if (served.size < MAX_CHANNELS_PER_SOCKET) await sleep(100);
+    }
+    expect(served.size).toBe(MAX_CHANNELS_PER_SOCKET);
+    expect([...served].sort()).toEqual([...channels].sort());
+
+    const overflow = "post:cap-overflow";
+    ws.send(JSON.stringify({ type: "subscribe", channel: overflow }));
+    const refused = await next((f) => f.channel === overflow);
+    expect(refused.type).toBe("error");
+    expect(refused.error).toBe("CHANNEL_LIMIT");
+    // Refusing one channel must not cost the socket: the app treats
+    // CHANNEL_LIMIT like FORBIDDEN (a per-channel verdict), not like
+    // SUBSCRIBE_FAILED, and every other channel on this connection keeps
+    // working.
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.send(JSON.stringify({ type: "ping" }));
+    expect((await next((f) => f.type === "pong")).type).toBe("pong");
+
+    // And it bounds what is HELD, not what was ever asked for: free one and
+    // the next subscribe is served again.
+    ws.send(JSON.stringify({ type: "unsubscribe", channel: channels[0]! }));
+    ws.send(JSON.stringify({ type: "subscribe", channel: overflow }));
+    const served2 = await next((f) => f.channel === overflow);
+    expect(served2.type).toBe("snapshot");
+    ws.close();
+  }, 120_000);
+
+  it("closes a socket that outruns the frame budget with 4429, and leaves a normal burst alone", async () => {
+    // A launch-sized salvo is well inside the bucket and must be untouched.
+    const calm = await connect(port, userToken);
+    for (let i = 0; i < Math.floor(FRAME_BUCKET_CAPACITY / 2); i++) {
+      calm.ws.send(JSON.stringify({ type: "ping" }));
+    }
+    expect((await calm.next((f) => f.type === "pong")).type).toBe("pong");
+    await sleep(300);
+    expect(calm.ws.readyState).toBe(WebSocket.OPEN);
+    calm.ws.close();
+
+    // A flood is not.
+    const flood = await connect(port, userToken);
+    const closed = new Promise<number>((resolve) => flood.ws.on("close", (c) => resolve(c)));
+    for (let i = 0; i < FRAME_BUCKET_CAPACITY + 20; i++) {
+      flood.ws.send(JSON.stringify({ type: "ping" }));
+    }
+    expect(await closed).toBe(FRAME_FLOOD_CLOSE);
+  }, 60_000);
 });

@@ -1,19 +1,73 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/api_client.dart';
+import '../core/l10n.dart';
 import '../core/session.dart';
 
 /// Thrown by [AuthService.sendOtp]/[AuthService.verifyOtp] for anything the
 /// OTP screen needs to react to specifically (wrong code, lockout) rather
 /// than just display as a generic error string.
+///
+/// [message] is ALWAYS a server error CODE (SCREAMING_SNAKE), never prose:
+/// three of these used to be English sentences built here ("Invalid code",
+/// "Please wait 45s before requesting another code", "That phone number is
+/// already in use") and the screens render the message verbatim — so English
+/// landed on a Turkmen/Russian-only app, directly above Turkmen copy. Screens
+/// go through [describeOtpError] instead.
 class OtpException implements Exception {
-  OtpException(this.message, {this.attemptsRemaining});
+  OtpException(
+    this.message, {
+    this.attemptsRemaining,
+    this.retryAfterSeconds,
+    this.statusCode,
+  });
 
+  /// The server's error code, e.g. OTP_INVALID / OTP_COOLDOWN / REQUEST_FAILED.
   final String message;
   final int? attemptsRemaining;
 
+  /// OTP_COOLDOWN only: seconds left on the server's resend cooldown.
+  final int? retryAfterSeconds;
+
+  /// Carried so [describeOtpError] can tell a 429 or a 5xx apart from an
+  /// application error. It matters because a rate-limited or 5xx response does
+  /// NOT come back in the API's `{error: "CODE"}` shape — fastify-rate-limit
+  /// answers `{error: "Too Many Requests", ...}`, so `message` would be
+  /// English prose, which is the exact thing this class must never display.
+  final int? statusCode;
+
   @override
   String toString() => message;
+}
+
+/// What to SHOW for a failed OTP/phone step, in the user's language. Every
+/// screen that displays an auth failure (login OTP, phone entry, the profile's
+/// change-phone flow, the signup name screen) must use this: [OtpException]
+/// carries a bare code and [ApiException]'s toString is for logs.
+String describeOtpError(S s, Object e) {
+  if (e is! OtpException) return describeApiError(s, e);
+  switch (e.message) {
+    case 'OTP_INVALID':
+      return s.incorrectCode;
+    case 'OTP_COOLDOWN':
+      final retryAfter = e.retryAfterSeconds;
+      return retryAfter != null
+          ? s.waitBeforeNewCode(retryAfter)
+          : s.waitBeforeNewCodeGeneric;
+    case 'PHONE_ALREADY_IN_USE':
+      return s.phoneAlreadyInUse;
+    case 'REQUEST_FAILED':
+      // No answer at all from the API — the one code worth naming as such.
+      return s.noConnection;
+    case 'INVALID_INPUT':
+      return s.invalidInput;
+    default:
+      // Same ladder describeApiError uses, for the same reasons.
+      final status = e.statusCode;
+      if (status == 429) return s.tooManyRequests;
+      if (status != null && status >= 500) return s.serverError;
+      return s.saveFailed;
+  }
 }
 
 /// The phone is locked out (5 wrong attempts) until [lockedUntil].
@@ -135,7 +189,7 @@ class AuthService {
       await _api.post('/auth/change-phone', body: {'phone': phone, 'code': code});
     } on ApiException catch (e) {
       if (e.error == 'PHONE_ALREADY_IN_USE') {
-        throw OtpException('That phone number is already in use');
+        throw OtpException('PHONE_ALREADY_IN_USE', statusCode: e.statusCode);
       }
       throw _mapOtpException(e);
     }
@@ -187,15 +241,15 @@ class AuthService {
         final lockedUntil = lockedUntilStr != null ? DateTime.tryParse(lockedUntilStr) : null;
         return OtpLockedException(lockedUntil ?? DateTime.now().add(const Duration(hours: 1)));
       case 'OTP_COOLDOWN':
-        final retryAfter = body?['retryAfterSeconds'] as int?;
+        // The CODE, with the number alongside it — the screens localise both
+        // through describeOtpError. This used to build an English sentence.
         return OtpException(
-          retryAfter != null
-              ? 'Please wait ${retryAfter}s before requesting another code'
-              : 'Please wait before requesting another code',
+          'OTP_COOLDOWN',
+          retryAfterSeconds: body?['retryAfterSeconds'] as int?,
         );
       case 'OTP_INVALID':
         return OtpException(
-          'Invalid code',
+          'OTP_INVALID',
           attemptsRemaining: body?['attemptsRemaining'] as int?,
         );
       case 'NAME_REQUIRED':
@@ -203,7 +257,10 @@ class AuthService {
         // before the account can be created. The OTP is still valid.
         return NameRequiredException();
       default:
-        return OtpException(e.error);
+        // e.error is only a CODE when the body was the API's {error} shape;
+        // a 429 from fastify-rate-limit or an nginx 502 page is not, so the
+        // status is carried along and describeOtpError decides from it.
+        return OtpException(e.error, statusCode: e.statusCode);
     }
   }
 

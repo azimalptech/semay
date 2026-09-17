@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { generateRefreshToken, hashToken } from "../lib/crypto.js";
+import { withRetry } from "../lib/withRetry.js";
 
 export class SessionInvalidError extends Error {
   constructor() {
@@ -94,7 +95,15 @@ export async function findActiveSession(refreshToken: string): Promise<Session> 
 export async function rotateSession(
   oldSession: Session
 ): Promise<{ session: Session; refreshToken: string }> {
-  return prisma.$transaction(async (tx) => {
+  // withRetry like every other contended write in the codebase. N refreshes
+  // arriving on one token all queue on the same row, so this is exactly the
+  // shape that makes MySQL roll a side back and makes Prisma give up waiting
+  // for a pooled connection — and the answer was a 500, which the app treats
+  // as "refresh failed" and turns into a logout. The retried transaction
+  // re-runs the compare-and-swap from scratch, which is what makes it safe:
+  // the rolled-back or never-started attempt left nothing behind, and a
+  // SessionInvalidError is not retryable and propagates unchanged.
+  return withRetry(() => prisma.$transaction(async (tx) => {
     const now = new Date();
     const claimed = await tx.session.updateMany({
       where: { id: oldSession.id, rotatedAt: null, revokedAt: null },
@@ -119,7 +128,7 @@ export async function rotateSession(
       },
     });
     return { session, refreshToken };
-  });
+  }));
 }
 
 /** Logout. Ends every row of the presented token's family, not just the row

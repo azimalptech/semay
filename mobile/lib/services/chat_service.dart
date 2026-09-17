@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -133,10 +134,58 @@ class ChatService {
   /// the server copy (users.activeChatId) is kept up to date as a diagnostic
   /// hint only — it no longer gates pushes or unread counts, because a killed
   /// app left it stuck and silenced the chat (see server chats/service.ts).
-  Future<void> setActiveChat(String? chatId) async {
+  ///
+  /// The local flag is set NOW; the server mirror is debounced and collapsed.
+  /// Every route pushed over or popped off a thread, and every
+  /// background/resume, runs through here (chat_thread_screen.dart's
+  /// _claimActiveChat), so opening a store profile from a thread and coming
+  /// back used to be four `PATCH /users/me` round trips — for a field the
+  /// server itself documents as diagnostic-only and reads nowhere. Only the
+  /// value it comes to REST on matters, so a burst of transitions sends at
+  /// most one write, and a burst that ends where it started sends none.
+  void setActiveChat(String? chatId) {
     setLocallyActiveChatId(chatId);
-    await _api.patch('/users/me', body: {'activeChatId': chatId});
+    _activeChatMirror?.cancel();
+    // Already what the server holds — nothing to say.
+    if (_activeChatMirrored && chatId == _mirroredActiveChatId) return;
+    _activeChatMirror = Timer(activeChatMirrorDelay, () {
+      _activeChatMirror = null;
+      final value = locallyActiveChatId;
+      if (_activeChatMirrored && value == _mirroredActiveChatId) return;
+      _activeChatMirrored = true;
+      _mirroredActiveChatId = value;
+      // Fire and forget, exactly as before: a failed diagnostic write must
+      // never surface, and the next transition re-sends anyway.
+      unawaited(
+        _api.patch('/users/me', body: {'activeChatId': value}).catchError((
+          Object _,
+        ) {
+          // Not mirrored after all — let the next transition try again.
+          _activeChatMirrored = false;
+          return <String, dynamic>{};
+        }),
+      );
+    });
   }
+
+  /// Long enough to swallow a push/pop pair and a background/resume pair,
+  /// short enough that a thread left open is mirrored well before anyone
+  /// reads the field off the row.
+  static const activeChatMirrorDelay = Duration(seconds: 2);
+  Timer? _activeChatMirror;
+
+  /// Drops the pending mirror write. Wired to the provider's onDispose: a
+  /// logout rebuilds this service, and a timer left behind would fire against
+  /// the previous session's ApiClient.
+  void dispose() {
+    _activeChatMirror?.cancel();
+    _activeChatMirror = null;
+  }
+
+  /// False until a write has actually landed, so the first call always sends:
+  /// `null` is itself a value the server may or may not already hold.
+  bool _activeChatMirrored = false;
+  String? _mirroredActiveChatId;
 
   /// Marks everything the other side sent in this chat as delivered — called
   /// by the chat-list providers the moment a chat's unread count rises on
@@ -203,9 +252,14 @@ class ChatService {
 }
 
 final chatServiceProvider = Provider<ChatService>((ref) {
-  return ChatService(
+  final service = ChatService(
     ref.watch(apiClientProvider),
     ref.watch(outboxServiceProvider),
     ref.watch(chatCacheProvider),
   );
+  // The activeChatId mirror is the only thing here that owns a timer; a
+  // logout rebuilds this provider and the old instance must not still be
+  // holding one pointed at the previous session's ApiClient.
+  ref.onDispose(service.dispose);
+  return service;
 });

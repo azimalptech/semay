@@ -1,9 +1,17 @@
-import { Prisma, type Chat, type Order } from "@prisma/client";
+import { Prisma, type Chat, type Language, type Order } from "@prisma/client";
 
 import { sendMessage } from "../chats/service.js";
 import { prisma } from "../db.js";
+import { copyFor } from "../lib/copy.js";
 import { withRetry } from "../lib/withRetry.js";
-import { sendPushToUsers } from "../notifications/push.js";
+import { sendLocalizedPushToUsers } from "../notifications/push.js";
+
+/** Android notification channel for order notices — created at IMPORTANCE_HIGH
+ * with the system default sound by the app's SemayApplication.kt. Named rather
+ * left to the manifest default, because that default is the chat channel and an
+ * order notice would otherwise be filed under Messages — where a user muting
+ * chat would silence it too (docs/08 §3b). */
+const ORDER_PUSH_CHANNEL = "orders";
 
 /** Posts the order's system message into the chat, exactly once.
  *
@@ -11,10 +19,23 @@ import { sendPushToUsers } from "../notifications/push.js";
  * publish stay in sync the same way a normal message would. The clientKey is
  * derived from the order id rather than random, which is what makes this safe to
  * call again on a retried accept: the second call dedupes against the first
- * inside sendMessage instead of posting "Order accepted ✅" twice. */
-async function ensureOrderMessage(chat: Chat, adminId: string, order: Order): Promise<void> {
+ * inside sendMessage instead of posting the confirmation twice.
+ *
+ * The text is written in the CUSTOMER's language: it is one persisted row that
+ * both sides read, so it cannot follow the reader, and of the two it is the
+ * customer the message informs — the admin is only reading back the tap they
+ * just made. Wording matches the app's own `l10n.dart` orderAccepted, and it
+ * doubles as the chat push's body (sendMessage → sendChatPush), which is why an
+ * English literal here would have reached a Turkmen/Russian-only product's
+ * notification shade. */
+async function ensureOrderMessage(
+  chat: Chat,
+  adminId: string,
+  order: Order,
+  customerLanguage: Language
+): Promise<void> {
   await sendMessage(chat, "admin", adminId, {
-    text: "Order accepted ✅",
+    text: copyFor(customerLanguage).orderAccepted,
     orderId: order.id,
     clientKey: `order:${order.id}`,
   });
@@ -31,7 +52,7 @@ export async function acceptOrder(
 ): Promise<Order> {
   const customer = await prisma.user.findUniqueOrThrow({
     where: { id: chat.userId },
-    select: { phone: true, name: true },
+    select: { phone: true, name: true, language: true },
   });
 
   // Idempotency fast-path, mirroring sendMessage: a retried accept (lost
@@ -44,7 +65,7 @@ export async function acceptOrder(
       // creating the order and posting its chat message, this retry is what
       // finally posts it. sendMessage's own clientKey dedup makes it a no-op
       // when the message already exists.
-      await ensureOrderMessage(chat, adminId, existing);
+      await ensureOrderMessage(chat, adminId, existing, customer.language);
       return existing;
     }
   }
@@ -104,23 +125,29 @@ export async function acceptOrder(
     ) {
       const winner = await prisma.order.findUnique({ where: { clientKey } });
       if (winner) {
-        await ensureOrderMessage(chat, adminId, winner);
+        await ensureOrderMessage(chat, adminId, winner, customer.language);
         return winner;
       }
     }
     throw err;
   }
 
-  await ensureOrderMessage(chat, adminId, order);
+  await ensureOrderMessage(chat, adminId, order, customer.language);
 
   const superadmins = await prisma.user.findMany({
     where: { role: "superadmin" },
     select: { id: true },
   });
-  await sendPushToUsers(
+  // Localized per superadmin (lib/copy.ts): the whole notice is server-written
+  // copy, and the product has no English.
+  await sendLocalizedPushToUsers(
     superadmins.map((s) => s.id),
-    "New order",
-    `${customer.name || customer.phone} placed an order (${itemQuantity})`
+    (copy) => ({
+      title: copy.newOrder,
+      body: copy.orderPlaced(customer.name || customer.phone, itemQuantity),
+    }),
+    undefined,
+    { channelId: ORDER_PUSH_CHANNEL }
   );
 
   return order;

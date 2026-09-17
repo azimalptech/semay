@@ -27,7 +27,13 @@ function isDeletableAvatarUrl(url: string): boolean {
 }
 
 const updateMeSchema = z.object({
-  name: z.string().max(120).optional(),
+  // trim() before min(1): "" and "   " both 400 instead of blanking the
+  // display name, which then renders as an empty chat header / order row
+  // everywhere. Mirrors updateStoreSchema's `name: trim().min(1).max(120)`
+  // (stores/routes.ts, which gained the same trim for the same reason) — the
+  // mobile client guards this too, but it must not be the only thing that
+  // does (an older build, a replay, the panel).
+  name: z.string().trim().min(1).max(120).optional(),
   avatarUrl: z
     .string()
     .max(512)

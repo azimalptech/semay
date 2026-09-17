@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:video_player/video_player.dart';
 
+import '../../core/api_client.dart';
 import '../../core/app_icon.dart';
 import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
@@ -11,6 +12,7 @@ import '../../core/theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/chat_service.dart';
 import '../../services/stories_service.dart';
+import '../shared/story_bar_provider.dart';
 import '../shared/widgets/confirm_delete_dialog.dart';
 import '../store_profile/store_profile_providers.dart';
 import 'story_providers.dart';
@@ -184,17 +186,102 @@ class _StoreStoryPageState extends ConsumerState<_StoreStoryPage>
   // Drives the swipe-down-to-dismiss spring-back — the drag itself just
   // sets _dragDistance directly (1:1 with the finger, same as the nav
   // bar's PageView), this only animates the release-without-dismissing case.
-  late final AnimationController _dismissSpring = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 220),
-  );
+  //
+  // Built in initState, NOT as a lazy `late final`: build() never touches it,
+  // only a dismiss drag does, so on every viewer closed the ordinary way the
+  // first touch of the field was dispose() — which then constructed an
+  // AnimationController on a defunct element and threw out of dispose
+  // ("Looking up a deactivated widget's ancestor is unsafe") — before
+  // super.dispose(), so the State was never finalised and the framework
+  // reported the error on every close.
+  late final AnimationController _dismissSpring;
+
+  @override
+  void initState() {
+    super.initState();
+    _dismissSpring = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+  }
 
   /// "Seen" = watched through to the end — recorded the moment the last story
   /// in the sequence starts playing, so the ring greys out on return.
   void _maybeMarkSeen() {
     if (_markedSeen || _index != _stories.length - 1) return;
     _markedSeen = true;
-    ref.read(storiesServiceProvider).markStoreSeen(widget.storeId);
+    // The home bar and the store profile ring read `seen` from the one-shot
+    // rings GET; re-read it once the server holds the mark so they grey out
+    // on return rather than after the next pull-to-refresh. Through the
+    // container, not `ref`: the POST can land after this page is gone.
+    final container = ProviderScope.containerOf(context, listen: false);
+    container
+        .read(storiesServiceProvider)
+        .markStoreSeen(widget.storeId)
+        .then((_) => container.invalidate(storyBarProvider))
+        // Best-effort by design — but it must not ESCAPE: markStoreSeen is a
+        // plain POST that throws ApiException offline, and an un-erred `.then`
+        // on a future nobody awaits raised an unhandled async error every
+        // time a story set was watched through on a flaky link. Clearing the
+        // latch lets a second pass over the last slide try again, so a mark
+        // lost to one dropped request doesn't leave the ring lit for good.
+        .catchError((Object e) {
+          _markedSeen = false;
+          debugPrint('story: markStoreSeen failed: $e');
+        });
+  }
+
+  /// Deletes the slide on screen, then re-reads this store's list and the
+  /// home rings — both are one-shot GETs, so without that the viewer kept
+  /// playing the deleted slide and the ring stayed lit until the next
+  /// pull-to-refresh. Restarts on whichever slide now sits at this index, or
+  /// closes the viewer when that was the store's last story.
+  Future<void> _deleteCurrent(String storyId) async {
+    _pause();
+    // Everything after the awaits goes through the container, not `ref`: the
+    // close X and the swipe-down dismiss stay live while the DELETE is in
+    // flight, and `ref.invalidate` on a defunct State throws — which both
+    // raised an unhandled error AND skipped the two invalidates, leaving a
+    // deleted story in the bar and on the ring until a pull-to-refresh.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final messenger = ScaffoldMessenger.of(context);
+    final s = ref.read(l10nProvider);
+    void fail(Object e) {
+      if (!mounted) return;
+      _resumeFromHold();
+      messenger.showSnackBar(SnackBar(content: Text(describeApiError(s, e))));
+    }
+
+    try {
+      await container.read(storiesServiceProvider).deleteStory(storyId);
+    } catch (e) {
+      // Was `rethrow` into an async onPressed: an offline or 5xx delete
+      // escaped as a zone error and the owner saw the story simply carry on,
+      // with no way to tell whether it had been deleted.
+      fail(e);
+      return;
+    }
+    container.invalidate(storeStoriesProvider(widget.storeId));
+    container.invalidate(storyBarProvider);
+    final List<JsonDoc> remaining;
+    try {
+      remaining = await container.read(
+        storeStoriesProvider(widget.storeId).future,
+      );
+    } catch (e) {
+      // The delete succeeded but the re-read did not (network dropped in
+      // between). Unguarded this threw as well, and _pause() above was never
+      // undone — the viewer froze on a slide that no longer exists.
+      fail(e);
+      return;
+    }
+    if (!mounted) return;
+    if (remaining.isEmpty) {
+      widget.onDismiss();
+      return;
+    }
+    setState(() => _index = _index.clamp(0, remaining.length - 1));
+    _startFor(remaining[_index].data(), storyId: remaining[_index].id);
   }
 
   bool get _isOwnStore =>
@@ -212,7 +299,19 @@ class _StoreStoryPageState extends ConsumerState<_StoreStoryPage>
     _maybeMarkSeen();
     // Owner watching their own story shouldn't count toward "seen by N".
     if (storyId != null && !_isOwnStore) {
-      ref.read(storiesServiceProvider).recordStoryView(storyId);
+      // Best-effort like markStoreSeen above, and guarded for the same
+      // reason: this is a plain POST that nobody awaits, so offline, on a
+      // 5xx, on the global 429 limiter, or on a story deleted from another
+      // device (findUniqueOrThrow) the rejection escaped the widget entirely
+      // and was reported to the enclosing Zone — one uncaught async error per
+      // slide, every time a story set was watched on a flaky link. A view
+      // count is not worth a SnackBar; it just must not escape.
+      ref
+          .read(storiesServiceProvider)
+          .recordStoryView(storyId)
+          .catchError(
+            (Object e) => debugPrint('story: recordStoryView failed: $e'),
+          );
     }
     _controller?.dispose();
     _videoController?.dispose();
@@ -231,6 +330,14 @@ class _StoreStoryPageState extends ConsumerState<_StoreStoryPage>
       // Caching the file (not just streaming it) makes a revisit instant
       // from disk instead of re-downloading, and gives the same "wait for
       // it to actually be ready" gate as the image branch below.
+      // Both futures below carry an `onError` for the same reason as the
+      // image precache's catchError: nobody awaits them, so a video that
+      // cannot be fetched (offline, a 404 after the media was reaped, a
+      // broken cache entry) or cannot be decoded escaped as an unhandled
+      // async error AND left the slide with no AnimationController at all,
+      // freezing the viewer on it. `onError:` rather than `.catchError`
+      // because getSingleFile is a Future<File>, whose catchError handler
+      // would have to produce a File.
       MediaCache.instance.getSingleFile(mediaUrl).then((file) {
         if (!mounted || _loadToken != loadToken || !widget.isActive) return;
         final vc = VideoPlayerController.file(file);
@@ -251,22 +358,43 @@ class _StoreStoryPageState extends ConsumerState<_StoreStoryPage>
                   ..addStatusListener(_onStatusChanged)
                   ..forward();
           });
+        }, onError: (Object e) {
+          debugPrint('story: video init failed for $mediaUrl: $e');
+          _startTimedSlide(loadToken);
         });
+      }, onError: (Object e) {
+        debugPrint('story: video fetch failed for $mediaUrl: $e');
+        _startTimedSlide(loadToken);
       });
     } else {
-      precacheImage(CachedNetworkImageProvider(mediaUrl), context).then((_) {
-        if (!mounted || _loadToken != loadToken || !widget.isActive) return;
-        setState(() {
-          _controller =
-              AnimationController(
-                  vsync: this,
-                  duration: const Duration(seconds: 5),
-                )
-                ..addStatusListener(_onStatusChanged)
-                ..forward();
-        });
-      });
+      precacheImage(CachedNetworkImageProvider(mediaUrl), context)
+          // A story image that cannot be fetched (offline, a 404 after the
+          // media was reaped, a broken cache entry) rejects this future, and
+          // an un-erred `.then` on a future nobody awaits raised an unhandled
+          // async error — while leaving the slide with no AnimationController
+          // at all, so the viewer froze on it forever. Swallowed and then
+          // timed anyway: the slide shows its error placeholder for the
+          // normal 5 s and the sequence moves on, same as markStoreSeen's
+          // catchError above.
+          .catchError((Object e) {
+            debugPrint('story: image precache failed for $mediaUrl: $e');
+          })
+          .then((_) => _startTimedSlide(loadToken));
     }
+  }
+
+  /// Runs the slide on the standard 5 s image timer. Also the fallback for a
+  /// video that could not be fetched or decoded, so a slide whose media is
+  /// broken shows its error placeholder for the normal beat and the sequence
+  /// moves on, instead of sitting there with no AnimationController forever.
+  void _startTimedSlide(Object loadToken) {
+    if (!mounted || _loadToken != loadToken || !widget.isActive) return;
+    setState(() {
+      _controller =
+          AnimationController(vsync: this, duration: const Duration(seconds: 5))
+            ..addStatusListener(_onStatusChanged)
+            ..forward();
+    });
   }
 
   void _onStatusChanged(AnimationStatus status) {
@@ -385,6 +513,10 @@ class _StoreStoryPageState extends ConsumerState<_StoreStoryPage>
   Future<void> _sendReply() async {
     final text = _replyController.text.trim();
     if (text.isEmpty || _sendingReply) return;
+    // Captured before the awaits, like _deleteCurrent's: the viewer can be
+    // dismissed while the POST is in flight.
+    final messenger = ScaffoldMessenger.of(context);
+    final s = ref.read(l10nProvider);
     setState(() => _sendingReply = true);
     try {
       final role = await ref.read(appRoleProvider.future);
@@ -414,11 +546,15 @@ class _StoreStoryPageState extends ConsumerState<_StoreStoryPage>
             mediaUrl: storyMediaUrl,
           );
       _replyController.clear();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(ref.read(l10nProvider).messageSent)),
-        );
-      }
+      messenger.showSnackBar(SnackBar(content: Text(s.messageSent)));
+    } catch (e) {
+      // createOrGetChat is a plain POST /chats — NOT the outbox path — so it
+      // throws offline or on a 5xx. Uncaught (this was try/finally only) that
+      // escaped the async onPressed as a zone error: the send button did
+      // nothing at all, the text stayed, and nothing was said. Same treatment
+      // as _deleteCurrent above; the text is deliberately left in the field so
+      // the reply can be sent again.
+      messenger.showSnackBar(SnackBar(content: Text(describeApiError(s, e))));
     } finally {
       if (mounted) setState(() => _sendingReply = false);
     }
@@ -597,9 +733,7 @@ class _StoreStoryPageState extends ConsumerState<_StoreStoryPage>
                                         body: s.deleteStoryBody,
                                       );
                                       if (confirmed) {
-                                        await ref
-                                            .read(storiesServiceProvider)
-                                            .deleteStory(docs[_index].id);
+                                        await _deleteCurrent(docs[_index].id);
                                       }
                                     },
                                   ),

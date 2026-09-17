@@ -64,7 +64,7 @@ These are ordered by what breaks first if ignored.
 
 | # | Requirement | Why it matters | Where |
 |---|---|---|---|
-| 1 | **`REDIS_URL` set** whenever more than one process serves traffic | A Node process only shares realtime events with sockets it owns. Without Redis, two users on different workers never see each other's messages — the app looks fine and silently loses chat delivery. `start:cluster` refuses to boot without it. | `server/src/realtime/bus.ts` |
+| 1 | **`REDIS_URL` set** whenever more than one process serves traffic | A Node process only shares realtime events with sockets it owns. Without Redis, two users on different workers never see each other's messages — the app looks fine and silently loses chat delivery. `start:cluster` refuses to boot without it — or with one that does not answer (§3d). | `server/src/realtime/bus.ts` |
 | 2 | **Run in cluster mode** (`npm run start:cluster`) | One Node process = one CPU core. On an 8-core box, single-process mode wastes 7/8 of the machine and is a single point of failure. | `server/src/cluster.ts` |
 | 3 | **`connection_limit` × `CLUSTER_WORKERS` < MySQL `max_connections`** | This is the most common way a correctly-written app falls over under load: workers each open their own pool, exhaust `max_connections` (default 151), and every request starts failing while CPU sits idle. | `DATABASE_URL` |
 | 4 | **Serve `/media/*` from Caddy/Nginx**, not Node | Media is the highest-bandwidth traffic in the app. A static file server does it with near-zero CPU; Node does it while competing with API requests for the event loop. | point `file_server` at `MEDIA_DIR` |
@@ -124,9 +124,12 @@ report of "messages don't arrive", and each has a specific fix:
 | Failure | Fix | Where |
 |---|---|---|
 | Half-open socket looks connected forever; nothing arrives | Heartbeats both ways: the app pings every 20 s (dart:io `pingInterval`, closes on a missed pong); the server pings every 30 s and `terminate()`s a peer that misses a whole interval | `realtime_client.dart`, `gateway.ts` |
-| Reconnect after 15 min reused the expired access token → server `4401` → retry every 2 s with the same dead token, forever | A fresh token is obtained *before* every connect (`AccessTokenSource.validToken`, refreshing when < 60 s remain); a `4401` close forces a refresh on the next attempt | `api_client.dart`, `realtime_client.dart` |
+| Reconnect after 15 min reused the expired access token → server `4401` → retry every 2 s with the same dead token, forever | A fresh token is obtained *before* every connect (`AccessTokenSource.validToken`, refreshing when less than `min(60 s, TTL/3)` remains — read from the token's own `iat`/`exp`); a `4401` close forces a refresh on the next attempt | `api_client.dart`, `realtime_client.dart` |
 | A connect that threw never scheduled a retry | Exponential backoff with ±50 % jitter (1 s → 30 s); a connection that lived ≥ 5 s resets it so the first retry after a real drop is immediate | `realtime_client.dart` |
 | Nothing reconnected on app resume, network change, or login/logout | On resume/online: an application-level `{type:"ping"}` with a 5 s deadline, reconnect on silence. On session change: new socket (the old one authenticated as the old user) | `main.dart`, `realtime_client.dart`, `gateway.ts` |
+| A same-user token refresh looked like a login. The session-change guard compared against the uid of the *attached* socket, unknown until the handshake — and `_connect` refreshes the token *before* it opens the socket — so every connect that refreshed bumped the session epoch, discarded the socket it had just opened and reconnected. One wasted handshake + refresh per reconnect at the production TTL; with a TTL below the old flat 60 s refresh margin (test/ops configs) a loop of ~600 refreshes in 6 s, ended only by the `/auth/refresh` rate limiter | The guard keys on the *session's* uid (seeded from the stored session at start-up, so a stored session's first refresh is not a "login" either); the refresh margin follows the TTL (`min(60 s, TTL/3)`); and a circuit breaker refuses a sixth refresh inside one minute for 30 s — reported as *unreachable*, so nothing logs out | `realtime_client.dart`, `api_client.dart` |
+| The server accepts the socket and answers pings but never delivers — its Redis bus down or unreachable (the server side of this is documented with the bus in this file). The phone showed `connected`: no caption, no retry. Sent messages appeared (the POST response), incoming ones only after reopening the thread (the REST seed) — the "messages stop after a couple, I have to reopen the app" report | The client measures SILENCE, not elapsed time since a subscribe: a socket with at least one subscribe outstanding that delivers **nothing for 25 s** (`RealtimeClient.snapshotDeadline`, evaluated on a 5 s sweep — any delivered frame resets it for every channel, so one slow channel on a working socket never trips it) — or a **second** `SUBSCRIBE_FAILED` for one channel on one socket — puts the client in `stalled` ("Connecting…" shows), closes the socket and reconnects through the normal backoff (never a tight loop: 25 s deadline + up to ~45 s jittered backoff, so ~70 s worst case per attempt). A per-channel stopwatch armed at subscribe time was the first attempt and had to be replaced: an app launch subscribes to ~20 channels whose snapshots serialise over one connection, so it fired on healthy-but-slow servers and never converged. The separate **10 s** bound is the SERVER's (`SUBSCRIBE_DEADLINE_MS`, `gateway.ts`), after which it answers `SUBSCRIBE_FAILED` rather than nothing. Every reconnect announces the channels it re-subscribed (`RealtimeClient.resyncs`), on which the open thread and both chat lists re-fetch over REST (`GET /chats/:id/messages`, `GET /chats`), so a snapshot that never comes cannot freeze them; the chat list, previously cache + socket only, gained that REST copy (an empty list on a fresh install with a dead bus was the other symptom). That re-seed is rate-limited per channel (`RealtimeClient.resyncInterval`, 10 s — shorter than the 25 s stall cycle, so it drops only the redundant announcement from a reconnect that DID get its snapshot) so a flapping server cannot turn every phone's reconnect into DB-backed REST calls aimed at the component already failing. The socket supersedes REST: an answer that a frame overtook while in flight is dropped, not merged | `realtime_client.dart`, `chat_providers.dart` |
+| **`REDIS_URL` set but Redis dead or unreachable** — not running after a reboot, wrong host, a dev `.env` copied to a box without the service. ioredis queued every publish in process memory, `SUBSCRIBE` never settled so the gateway never sent a snapshot, every error event was swallowed, the boot line still said "Redis pub-sub" and `/health/ready` only asked the DB. Sockets open, pings answered, nothing delivered — on every phone at once, and nothing on the server said so | The bus routes through Redis only while both connections are confirmed live and otherwise delivers in-process (complete for one process); a `SUBSCRIBE` is bounded at 3 s and never waits on a Redis ioredis is backing off from, so the snapshot goes out regardless; the gateway bounds the whole subscribe at 10 s and answers `SUBSCRIBE_FAILED` instead of nothing; boot logs an error naming the host; `/health/ready` reports `bus.ready:false` + `degraded:true`; `start:cluster` refuses to fork. Details in §3d | `bus.ts`, `gateway.ts`, `index.ts`, `cluster.ts`, `app.ts` |
 
 Related fixes in the same pass:
 
@@ -185,9 +188,13 @@ Related fixes in the same pass:
   only.
 - **Chat payload** (`notifications/push.ts`, set by `chats/service.ts`):
   `android.priority=high` (wakes a dozing device), `channelId=chat_messages`
-  (a channel the app creates at IMPORTANCE_HIGH — heads-up banner + sound;
-  FCM's default "Miscellaneous" channel is silent), `tag=<chatId>` (one
-  notification per conversation, newest replaces oldest; iOS `thread-id`
+  (a channel the app creates at IMPORTANCE_HIGH with no sound of its own —
+  heads-up banner + the phone's default notification sound; FCM's default
+  "Miscellaneous" channel is silent — see "Notification sound" below),
+  `sound=default` on both platforms (Android `android.notification.sound`,
+  only consulted below API 26, where there are no channels; from 26 on the
+  channel's sound wins — and iOS `aps.sound`), `tag=<chatId>`
+  (one notification per conversation, newest replaces oldest; iOS `thread-id`
   groups them), `contentAvailable` (iOS wakes the app to post the delivered
   receipt), and `data:{type:"chat_message",chatId,messageId,senderRole}` —
   `chatId` is what a notification tap routes to.
@@ -195,7 +202,8 @@ Related fixes in the same pass:
   `channelId=announcements` (a second IMPORTANCE_HIGH channel the app creates
   next to the chat one, so a user can silence announcements in system settings
   without silencing chats; an app older than the channel falls back to the
-  manifest default, `chat_messages`, so the server side shipped first),
+  manifest default — today `chat_messages` — so
+  the server side could ship first),
   `tag=broadcast` (a newer unread announcement replaces the older one in the
   shade — the inbox keeps every one), `data:{type:"broadcast"}` (routes a tap
   to the inbox and tells an open app to refetch it), and **no**
@@ -204,10 +212,74 @@ Related fixes in the same pass:
   and its tally is logged as `broadcast push done {users, sent, failed}` (or
   `broadcast push failed`). The response carries `pushEnabled` and, when false,
   `pushDisabledReason`, and the panel shows both — `sent` counts inbox rows,
-  never pushes. Order notices (`orders/service.ts`) pass no channel or tag and
-  land on the manifest default; posted by the app in the foreground they get
-  no tag and their own id, so they stack instead of overwriting a pending
-  announcement (or being overwritten by the next one).
+  never pushes. Order notices (`orders/service.ts`) go on `channelId=orders`
+  (a third IMPORTANCE_HIGH channel, default sound — so a superadmin can
+  silence order notices without silencing chats, and an order notice does not
+  land in the chat category by falling through to the manifest default) with
+  no tag; posted by the app in the foreground they get no tag and their own
+  id, so they stack instead of overwriting a pending announcement (or being
+  overwritten by the next one). **That holds only once the server that
+  names `orders` is live, so redeploy the server before (or with) the app
+  release.** This is the one ship order that is not symmetric: only the server
+  names the `orders` channel, so a NEW app taking an order push from an OLD
+  server (which sends no `channelId`) falls through to the manifest default —
+  the chat channel. All three channels sound the same (the device default), so
+  the cost is a miscategorised notice, not a wrong noise. Backgrounded/killed
+  superadmins only; a foreground order notice is posted on `orders` by the app
+  regardless of the server. See docs/09 §14.
+- **Every string the server writes for a person is Turkmen or Russian, never
+  English** — `src/lib/copy.ts`, the server-side counterpart of the app's
+  `mobile/lib/core/l10n.dart` (the product ships tk/ru only, by decision; the
+  Android channel names live in `res/values` + `res/values-ru` for the same
+  reason). A push takes the **recipient's** `users.language`:
+  `sendLocalizedPushToUsers` (`notifications/push.ts`) groups the recipients by
+  language and sends one multicast per group — at most two — because a payload
+  carries a single title/body for the whole batch; `badgeByUser` is a per-user
+  map, so it survives the split, and a recipient whose row is gone falls back to
+  `tk`, the schema default. The copy this covers is the chat push's fallback
+  title (seen only when neither the sender's name nor the store's is set), the
+  order notice's title and body, and the confirmation message `orders/service.ts`
+  posts into the chat. That last one is **one persisted row both sides read**, so
+  it cannot follow the reader: it is written in the CUSTOMER's language (the
+  message informs the customer; the admin is reading back their own tap) and it
+  doubles as that push's body. A chat push's body is the message itself and is
+  never translated (`[media]` for a media-only message is a language-neutral
+  placeholder, and a broadcast's title/body is whatever the superadmin typed).
+  Pinned by `tests/push.localized-copy.test.ts`.
+- **Broadcast recipients are `deletedAt: null`.** `DELETE /users/me` is a
+  scrub, not a row delete (the row survives so orders keep a valid FK —
+  `users/service.ts` `deleteAccount`), so an unfiltered fan-out kept writing a
+  `user_notifications` row per broadcast, forever, for accounts that had been
+  told their data was removed, and counted them in the `sent` the panel shows.
+  Nothing rang — their FCM tokens are deleted — but it was retention against a
+  deleted account. Pinned by "skips accounts that have been deleted" in
+  `tests/notifications.broadcast.test.ts`.
+
+  Filtering the recipient list is necessary but not sufficient, because the
+  list is read seconds before the rows are written. `insertChunk` therefore
+  writes each chunk as a single **`INSERT … SELECT … FROM users WHERE
+  deletedAt IS NULL AND id IN (…)`** instead of reading ids and then
+  `createMany`-ing them. That one statement closes both races at once:
+  - a **hard**-deleted id selects no row, so there is no `P2003` to turn into
+    a 409 — one deletion used to cost all 5000 users in that chunk their
+    announcement;
+  - a **soft** delete is beaten by the SELECT being a *locking* read inside the
+    insert: `deleteAccount` runs in a transaction whose `deleteMany` gap-locks
+    the `user_notifications` index range, so a plain insert blocks and then
+    lands *after* the commit, leaving one row on a just-scrubbed account. The
+    locking read blocks on the same lock and then re-reads, sees `deletedAt`
+    set, and inserts nothing. (This was reproducible: it made
+    `tests/account.deletion.test.ts` red in most full suite runs.)
+
+  `sent` is the number of rows actually written, so the panel's count is
+  recipients reached, never ids attempted; a shortfall is logged at **info** as
+  `broadcast: recipient(s) deleted mid fan-out, skipped {listed, written}`.
+  Info, not warn: the recipient list is one statement — several seconds at 100K
+  users — ahead of the inserts, so at any real scale a broadcast overlapping a
+  single `DELETE /users/me` lands there. Nothing is lost and nothing is
+  actionable; the two numbers are recorded only so `sent` can be reconciled
+  against the list it came from.
+  Covered by `tests/notifications.broadcast-race.test.ts`.
 - **While the app is open** FCM shows nothing by itself: on Android the SDK
   hands a foreground push to Dart and the heads-up a backgrounded app gets for
   free never appears, and on iOS the OS asks the app what to present. The app
@@ -218,15 +290,132 @@ Related fixes in the same pass:
   `default_notification_icon` in the manifest — the adaptive launcher icon is
   rejected as a small icon by Android 8.0, which kills the posting process)
   and on iOS asks the OS to present alert + sound + badge
-  (`setForegroundNotificationPresentationOptions` in `main.dart` — which
-  cannot be decided per message, so an iOS user in a thread also hears a push
-  for that thread). The previous in-app overlay banner is gone: it called
+  (`setForegroundNotificationPresentationOptions` in `main.dart` — global
+  options; the one per-message exception, the thread on screen, is made in
+  `AppDelegate.swift`, see "Notification sound" below). The previous in-app overlay
+  banner is gone: it called
   `SystemSound.play(SystemSoundType.alert)`, which Flutter documents as ignored
   on Android and iOS, so it was silent by construction. A foreground broadcast
   also invalidates the REST-only inbox provider, which is what moves the
   feed's bell badge without a restart; the inbox screen marks read every list
   the server returns (not once per open), so the row its own refetch brings
   in — a broadcast that arrived while the app was away — is marked too.
+- **Notification sound, and the one silent case.** Every push — chat,
+  announcement, order notice — rings with the **phone's own default
+  notification sound**. A bundled chat sound shipped in one round of local test
+  builds (`res/raw/semay_message.mp3`, `Runner/semay_message.wav`) and the
+  owner had it removed: *"normal notification with the phone's default sound"*.
+  Both assets, the channel's `setSound` call, the Dart
+  `RawResourceAndroidNotificationSound`, `res/raw/keep.xml` and the server's
+  `androidSound`/`iosSound` options are gone; `notifications/push.ts` now sends
+  a flat `sound: "default"` on both platforms. **Do not reintroduce a custom
+  sound without re-reading the Android trap below** — it is why this section is
+  long. What did *not* change is the suppression rule, the same on both
+  platforms and stated once in code (`shouldPresentPush` in
+  `notification_service.dart`): **a chat push is silent ONLY when its `chatId`
+  equals the thread on screen with the app resumed; everything else — the chat
+  list, the inbox, any other tab, a message for chat B while in chat A, a
+  backgrounded or killed app — shows normally, with the default sound;
+  broadcasts are never suppressed.** `ChatThreadScreen` sets the active chat on
+  enter/resume and clears it on pause/dispose, which is what "on screen with
+  the app resumed" means.
+  - *Android.* All three channels are created with **no `setSound` call at
+    all**, which is what gives them the system default sound — a channel
+    created without one is not silent. Chat is on the original id
+    `chat_messages`: every device running the last released build already has
+    that channel, with the default sound, so there is nothing to migrate and no
+    immutable-sound trap. `chat_messages_v2` — minted only because a channel's
+    sound is fixed at creation, and only ever created by the intermediate test
+    builds that carried the bundled sound — is **deleted** on every start
+    (`deleteNotificationChannel(RETIRED_CHAT_CHANNEL_ID)`), so it does not sit
+    in those handsets' notification settings as a stale, unused category. On
+    one of those handsets `chat_messages` had itself been deleted by the
+    intermediate build; re-creating a deleted channel restores its original
+    settings, which were the default sound — the right outcome either way. All
+    three channels are created in **`SemayApplication.kt`** — an `Application`
+    subclass registered as `android:name=".SemayApplication"` in the manifest,
+    in place of Flutter's `${applicationName}` placeholder (that placeholder is
+    literally `android.app.Application`, the class this extends; it is also the
+    hook the Flutter Gradle plugin uses to inject `FlutterMultiDexApplication`,
+    which minSdk 24 does not need). **Not `MainActivity`**: FCM draws a
+    backgrounded app's notification from inside `FirebaseMessagingService`,
+    which starts the process — so `Application.onCreate` runs — but never
+    starts `MainActivity`. Straight after a Play Store update the app has
+    usually not been opened yet, so a channel created from the Activity would
+    not exist when the first notification of the new version is drawn, and the
+    SDK would post it on its own auto-created `fcm_fallback_notification_channel`
+    ("Miscellaneous", IMPORTANCE_DEFAULT): no heads-up, no user-silenceable
+    category of its own, and a stray one left in the app's notification
+    settings for good. That is exactly the "an upgrade must not go silent"
+    requirement, so keep channel creation in the Application.
+    `SemayApplication.kt` also creates the `announcements` and `orders`
+    channels. The manifest default
+    (`com.google.firebase.messaging.default_notification_channel_id`) is
+    `chat_messages`, the same id the server sends, so either side can ship
+    first (the one exception is the `orders` channel — see §3b's broadcast
+    bullet). A backgrounded app gets the channel's sound from FCM; the app's
+    own foreground notification passes **no** sound, so the plugin never
+    validates a raw resource and `invalid_sound` cannot happen. Its `show()` is
+    still wrapped in a `try`, because the plugin throws rather than degrading
+    (a bad small icon, `POST_NOTIFICATIONS` revoked mid-session) and that
+    Future is deliberately not awaited by the `onMessage` listener — an
+    unguarded throw became an unhandled async error
+    (`test/services/foreground_notification_test.dart`).
+    - **If a custom sound ever comes back, this is the trap it fell into.**
+      Kept because the next person to try will hit it again. Flutter turns AGP
+      resource shrinking on for *every* release build (`flutter_tools`'
+      `FlutterPlugin.kt`:
+      `releaseBuildType.isShrinkResources = isBuiltAsApp(project)`), and
+      `res/raw/semay_message.mp3` was referenced by NAME from three places the
+      shrinker cannot see: the Dart `RawResourceAndroidNotificationSound`, the
+      FCM payload's `android.notification.sound` (resolved with
+      `getIdentifier`), and a string-built
+      `android.resource://…/raw/semay_message` channel URI. It therefore
+      stripped the file from the release APK — release-only, and invisible to
+      `flutter test`, `flutter analyze` and the server payload tests: the
+      channel pointed at a resource that did not exist (backgrounded chat push
+      = **silent**, worse than the default it replaced) and the foreground path
+      threw `invalid_sound` and posted nothing at all. The two guards were
+      `R.raw.semay_message` read from Kotlin (as the argument to
+      `getResourceEntryName`, so the int constant stays in dex where the
+      shrinker follows it) plus `res/raw/keep.xml` with
+      `tools:keep="@raw/semay_message"`. The two requirements pull in opposite
+      directions and both must hold: the shrinker needs the **id** referenced
+      from code, the channel needs the **name** in the persisted URI, because
+      aapt2 renumbers `res/raw` entries by position and Android persists the
+      channel URI verbatim — an unresolvable channel sound is silent, and the
+      channel can only be replaced (a `chat_messages_v3`), never repaired. All
+      of that is gone with the sound; a future custom sound needs the whole
+      construction back, plus a release-build check, not just a `setSound`.
+  - *iOS.* The OS presents a foreground push itself and asks the
+    `UNUserNotificationCenter` delegate what to show; Dart is never consulted,
+    so the rule is mirrored natively. `AppDelegate.swift` makes itself that
+    delegate **before** `super.application(_:didFinishLaunchingWithOptions:)`
+    — required: `firebase_messaging` otherwise installs itself as the delegate
+    and answers every `willPresent` with the global options, and
+    `flutter_local_notifications` never takes the delegate at all (it stays
+    Android-only here) — keeps the active chat that `setLocallyActiveChatId`
+    mirrors over the `com.semay.semay/notifications` method channel
+    (`setActiveChat`, fire-and-forget), and overrides `willPresent`: the
+    thread on screen completes with `.badge` only, still through `super` so
+    the FCM plugin fires `Messaging#onMessage` (the delivered receipt);
+    anything else is forwarded unchanged, so the push's own `aps.sound` plays.
+    This Swift is verified by the Codemagic build and on a device, not on the
+    Windows dev box.
+  - *Opening a thread clears its notification, on BOTH platforms.* A notice for
+    a conversation the user is reading is stale the moment they open it, and
+    leaving it makes them swipe away a banner for a message they have already
+    read — which is neither what WhatsApp nor Instagram does.
+    `dismissChatNotification(chatId)` is called from `ChatThreadScreen`; the
+    identity differs per platform, so the routes do too. Android:
+    `flutter_local_notifications.cancel(id: 0, tag: chatId)` — the same
+    identity FCM's Android SDK uses, and what also drops the launcher count,
+    which Android derives from the notifications themselves. iOS: the same
+    `com.semay.semay/notifications` channel carries a `dismissChat` call, and
+    `AppDelegate.swift` removes the delivered notifications whose
+    `userInfo["chatId"]` matches (there is no local-notification plugin on
+    iOS — the OS presents foreground pushes itself). The iOS app-icon NUMBER
+    is separate and stays the server's job (`syncLauncherBadges`).
 - **`push skipped: FCM disabled {reason, recipients, skipped}`** — logged (warn,
   at most once a minute) by every notification push path — chat, broadcast,
   order notice — when the server has no usable service account.
@@ -322,13 +511,136 @@ Sign out cannot reach it — by then its token is past the grace and a no-op —
 so it lapses only with the two-year expiry. Unusable, and bounded to one row
 per lost response.
 
+### 3d. Bus health: a dead Redis is loud, degraded, and never a frozen thread
+
+The realtime bus (`realtime/bus.ts`) has two states worth knowing about beyond
+"Redis or not":
+
+- **Live** — `REDIS_URL` set, both connections `ready`, every subscribed
+  channel confirmed. Publishes go to Redis only; the echo on this process's own
+  subscriber connection performs local delivery, exactly once per socket.
+- **Degraded** — `REDIS_URL` set but Redis unreachable, flapping, or just
+  restarted and not yet re-subscribed. Publishes are delivered **in-process**
+  (counted as `droppedPublishes`): complete for a single process, partial for
+  a cluster (sockets on other workers miss them). ioredis's offline queue is
+  disabled, so nothing piles up in memory to burst out — or not — later.
+
+The transitions are the part that used to be missing:
+
+- **Boot** probes Redis for up to 5 s, **without holding the listener shut**.
+  Unreachable → an error-level line, `realtime: REDIS_URL is set but Redis is
+  unreachable — falling back to in-process delivery…`, with `redis: host:port`.
+  The single-process server boots degraded (it still serves every one of its
+  own sockets correctly). The probe is deliberately NOT awaited before
+  `app.listen()` (`index.ts`): while it was, an unreachable Redis put its whole
+  5 s in front of every start — measured, "Server listening" 5.03 s after boot
+  against a blackholed `REDIS_URL` — so a Redis outage was also a deploy
+  outage, for a verdict that gates nothing (the process boots degraded either
+  way and `publish()` always serves its own sockets first).
+  **`start:cluster` still awaits it and refuses to fork**: there it is the
+  fail-closed gate, the primary serves no traffic, and a degraded cluster is
+  exactly the silent loss requirement §2.1 exists to prevent.
+- **Drop** → warn `Redis connection lost`; each refused reconnect → error
+  `Redis error` (once per distinct message, then once a minute — ioredis
+  retries forever with a 1 s → 30 s backoff). **Recovery** → warn `Redis
+  reconnected`, with how long it was down and how many publishes stayed
+  local. Every channel with a listener is re-`SUBSCRIBE`d on recovery: ioredis
+  only re-subscribes channels it had confirmed before the drop, so one whose
+  `SUBSCRIBE` was refused while Redis was down would otherwise never be
+  subscribed at all.
+- **Two health paths, because they answer different questions.**
+  `/health/ready` answers `{ ok, db, degraded, realtime, bus: { mode, ready,
+  droppedPublishes } }` and its **status code follows the database only**.
+  `/health/realtime` answers `{ ok, required, degraded, bus }` and is the one
+  that **fails closed** — 503 after 30 s of no bus where Redis is *required*
+  (a cluster worker — a re-forked worker boots degraded rather than
+  crash-looping — or `REDIS_REQUIRED=true`, one process per machine sharing a
+  Redis). 30 s so a Redis restart is a blip, not a flap.
+
+  The fail-closed verdict used to live on `/health/ready`, and that was wrong
+  in the exact topology §2 recommends: several single-process boxes behind a
+  load balancer sharing ONE Redis all cross the threshold at the same instant,
+  so the balancer is left with **zero** healthy backends and login, feed,
+  stores, orders, media and chat REST go dark — every one of which works
+  perfectly during a Redis outage. Only cross-process realtime fan-out does
+  not. So: the HTTP pool's health check points at `/health/ready`, the
+  WebSocket pool's (and alerting) at `/health/realtime`, and a Redis outage
+  costs realtime instead of everything.
+
+  The Redis host:port and the raw ioredis message (`busHealth().lastError` /
+  `lastErrorAt`) are deliberately NOT on either body — neither endpoint takes
+  authentication. They are in the `realtime: Redis error` log line instead
+  (`redis:` is the host:port, `err:` the reason).
+- **The sockets already attached go too — and this is the half that matters.**
+  A health check alone is half a fix, and the missing half was the reported
+  defect itself: taking a worker out of rotation stops NEW connections landing
+  on it, but does not close the WebSockets it is already holding — and those
+  are the phones with a chat thread open. They cannot tell either: the
+  client's stall rule measures silence only while a subscribe is outstanding
+  (§3a), and on a worker whose bus dies *after* its snapshots went out, nothing
+  is outstanding, so it sits on `connected` with a frozen thread and no
+  "Connecting…" — forever. So the same condition that turns `/health/realtime`
+  503 (`isBusUnavailable()`, one definition in `bus.ts` for both) also makes
+  the gateway sweep its own sockets every 5 s: each is closed with
+  **4503 `BUS_UNAVAILABLE`**, and a
+  subscribe arriving in that state is answered `SUBSCRIBE_FAILED` rather than
+  served a snapshot that will never move. The client reconnects through its
+  backoff, lands on a worker that works, and shows "Connecting…" until it
+  does. Single-process without `REDIS_REQUIRED` is untouched — there is no
+  other worker to miss, and `publish()` always delivers locally first.
+- **Subscribe never hangs.** The bus bounds a `SUBSCRIBE` at 3 s and does not
+  wait at all on a connection ioredis is backing off from, so the gateway's
+  snapshot goes out within milliseconds against a dead Redis; the gateway
+  bounds the whole authorize → subscribe → snapshot at 10 s and sends
+  `{type:"error", error:"SUBSCRIBE_FAILED"}` on any failure (it used to send
+  nothing), which the client treats as "stalled: reconnect" (§3a).
+  All concurrent waits on one connection attempt share **one** promise and
+  attach **no** listener to the ioredis client. Each used to attach its own
+  pair of `events.once` handlers — ~6 listeners per in-flight subscribe on the
+  one shared client — so a Redis that is reachable and HUNG (a firewall DROP, a
+  swapping box: the precise case this design exists for) printed
+  `MaxListenersExceededWarning` into the log an operator was reading, and cost
+  O(N²) in `EventEmitter` array churn at the scale §2 plans for. Reproduced on
+  a booted server: one socket, 12 channels in a burst against a blackholed
+  `REDIS_URL`, three warning lines. Pinned by
+  `tests/realtime.bus-waiter.test.ts`. `closeBus()` bounds its `QUIT` for the
+  same reason — a hung Redis must not hold SIGTERM open.
+- **What one socket may cost is bounded** (`realtime/gateway.ts`). At most
+  **256 channels held at a time** — a further subscribe is answered
+  `{error:"CHANNEL_LIMIT"}`, a per-channel verdict the client handles like
+  `FORBIDDEN` rather than tearing the socket down — and a **token bucket of 120
+  frames refilling at 30/s**, past which the socket is closed with **4429
+  `TOO_MANY_FRAMES`**. Neither was bounded before: `ws`'s 4 KiB `maxPayload`
+  (`app.ts`) caps a frame's size and nothing else, while every frame is
+  `JSON.parse`d synchronously inside ws's receiver and may carry a subscribe
+  (an authorize plus a snapshot — 200 rows for a chat thread). Both ceilings
+  are far above anything the app does: the client refcounts channels and
+  unsubscribes when the last listener goes, and every consumer is autoDispose,
+  so a socket holds the chat list, the open threads and what is on screen —
+  tens. Pinned over a real socket in `tests/realtime.gateway.test.ts`.
+
+Pinned by `tests/chat.liveness.test.ts` over a real listener and real sockets:
+20 upserts live across two access-token expiries (TTL 3 s — expiry across an
+open socket was the first suspect, and is not it); a Redis outage mid-stream,
+simulated through a killable TCP relay in front of the real Redis, loses no
+message and resumes over Redis; a `REDIS_URL` pointing at a closed port gets
+its snapshot in under 3 s, live upserts, and a `bus.ready:false` readiness
+body; `REDIS_REQUIRED` flips `/health/realtime` to 503 after the grace period
+*while `/health/ready` keeps answering 200*, and the same worker then refuses a
+new subscribe with `SUBSCRIBE_FAILED` and closes the socket it was already
+holding with 4503. The gateway's `SUBSCRIBE_FAILED` frame, the per-socket
+channel ceiling and frame budget, and the `receipts` roll-up (including that a
+receipt which stamped no message publishes no frame at all) are covered in
+`tests/realtime.gateway.test.ts`; the shared connection waiter in
+`tests/realtime.bus-waiter.test.ts`.
+
 ## 4. Logging
 
 Newline-delimited JSON to `LOG_DIR/app.<date>.log`, rotated daily and pruned to
 `LOG_RETENTION_DAYS` files (default 14) so disk use is bounded. Console output is
 pretty-printed outside production only. `LOG_LEVEL` controls verbosity.
 
-Boot logs two things worth alerting on:
+Boot logs three things worth alerting on:
 
 - `FCM push is DISABLED` — the service-account file is missing, unreadable, not
   a service-account key, or belongs to a different Firebase project than
@@ -338,6 +650,11 @@ Boot logs two things worth alerting on:
   against the app's `firebase_options.dart` (`09_DEPLOYMENT.md` §5d).
 - `realtime: in-process only` — `REDIS_URL` is unset. Fine for one process,
   **wrong for more than one** (see §2.1).
+- `realtime: REDIS_URL is set but Redis is unreachable` (error level) — the
+  process delivers in-process only (§3d): fine for one process, an outage for
+  a cluster or a second machine. While it lasts the log carries
+  `realtime: Redis error` (rate-limited); `realtime: Redis reconnected` marks
+  the recovery. `start:cluster` does not log this — it refuses to start.
 
 ## 5. Scheduled maintenance
 
@@ -441,6 +758,140 @@ Recording these so a future audit doesn't re-litigate them:
   read back for the *owning* user's own push suppression, so setting a foreign
   id affects nobody else.
 - **Deep `LIMIT/OFFSET` pagination** — see §6a.
+
+## 6f. The public share pages — the API's only unauthenticated HTML
+
+A share button in the app produces `https://semaycollection.com/p/<postId>`
+(`/r/` reel, `/s/` store). Whoever receives it may have no account and no app,
+so five routes are served at the **root**, outside `/api/v1`, with **no
+authentication at all** (`server/src/share/routes.ts`, registered in `app.ts`
+after the rate limiter and before the API groups):
+
+| Route | Returns |
+|---|---|
+| `GET /p/:id`, `/r/:id`, `/s/:id` (and each with a trailing slash) | `text/html; charset=utf-8` — the share page |
+| `GET /share-assets/semay.png` | the 1200×630 `og:image`, read into memory once at boot |
+| `GET /.well-known/assetlinks.json` | `application/json` — Android App Links |
+| `GET /.well-known/apple-app-site-association` | `application/json`, **no file extension** — iOS Universal Links; **404 while `SHARE_IOS_APP_ID` is empty**, see below |
+
+Both spellings of each page route are registered deliberately. Fastify's
+`ignoreTrailingSlash` is false, so `/p/<id>/` would otherwise miss them and fall
+to the API-wide JSON not-found handler — a person in a browser would be shown
+`{"error":"NOT_FOUND"}`. And `/p/<id>/` is genuinely reachable: the
+AndroidManifest `pathPrefix` claims it and the app's own parser accepts it, so
+every URL those two accept has to be answered here.
+
+**What the page exposes: nothing from the database.** `SHARE_PAGE_MODE` is
+`generic` and that is the only supported value. The page renders the same copy
+for every id of a given kind — a headline, an "Open in SeMay" button, and the
+store links — and `share/routes.ts` imports neither Prisma nor anything under
+`auth/`. Two properties follow, and both are the reason the mode exists:
+
+- **No existence oracle.** A stranger cannot use a share link to learn whether a
+  post or store id exists, whether a store is active, or anything about either.
+  A "content" page that rendered the post would leak exactly that, for free, to
+  anyone who can guess or enumerate an id.
+- **No unauthenticated DB load.** These are the only routes a stranger holding a
+  link can reach; none of them can put a query in front of MySQL.
+
+If a content variant is ever wanted, it needs its own review: `Post.caption`,
+`Post.price`, the media URLs and `Store.name/avatarUrl/coverUrl/tagline` would
+become public to anyone with the link, and `Store.phone`, `Store.address`,
+`Store.geoLat/geoLng`, `Store.createdById`, `Store.leaderboardOrder`,
+`Store.campaign*`, every counter and every `User` field must stay out of it.
+`tests/authz.matrix.test.ts` ("public share routes") already asserts a real
+store's phone, address, name and creator id appear nowhere in the page.
+
+Other properties, each pinned by `tests/share.pages.test.ts`:
+
+- **Reachable with no token, and unchanged with one.** No role sees a different
+  page; a garbage `Authorization` header is ignored rather than rejected,
+  because no auth code path runs at all.
+- **Own rate limit.** `RATE_LIMIT_SHARE_MAX_PER_MIN` (default 120/min per IP) on
+  top of the global 3000, applied per route with the `config.rateLimit` idiom
+  from `auth/routes.ts`. The global cap is deliberately generous for carrier
+  NAT; that generosity is wrong for a public HTML surface a stranger can
+  hammer. Verified against a booted server, since the limiter is disabled under
+  `NODE_ENV=test`. **The 429 body is an HTML page too**, in the reader's
+  language and carrying the store buttons — `@fastify/rate-limit` *throws* what
+  its `errorResponseBuilder` returns, so the JSON default cannot be replaced at
+  the route; `share/routes.ts` sets an error handler scoped to its own plugin
+  instead (the rest of the API keeps `lib/errors.ts` untouched). This matters
+  because Turkmen mobile traffic sits behind heavy carrier NAT: a link
+  forwarded into a large group chat can put several genuine recipients into one
+  IP bucket within a minute.
+- **Own CSP, tightened per reply — helmet's global policy is not loosened.** The
+  page carries no `<script>` and no inline handler, and says so:
+  `default-src 'none'; img-src 'self' https: data:; style-src 'unsafe-inline';
+  base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. helmet's default
+  allows `script-src 'self'`, which would be enough to run an injected tag if
+  escaping ever broke; every interpolated value is HTML-escaped as the primary
+  defense and this CSP is the second. Set with `reply.header` on these replies
+  only, so the rest of the API keeps helmet's defaults untouched.
+- **Ids are shape-validated** as UUIDs. Anything else gets a 404 **HTML** page
+  (`Cache-Control: no-store`), not the API's `{"error":"NOT_FOUND"}` JSON — the
+  reader is a person in a browser. `mobile/lib/core/share_links.dart` enforces
+  the **same** UUID shape, and that parity is load-bearing: once App Links
+  verify, a hand-typed `…/p/abc123` is intercepted by the app, so a looser
+  client parser would push a detail screen for a post that cannot exist instead
+  of letting the browser show the page that explains the link is wrong.
+- **Cacheable, and `Vary`s on what the body depends on**: `User-Agent` (the
+  Open button is `intent://…` on Android and `semay://open/…` everywhere else)
+  and `Accept-Language` (tk default, ru/en; `?lang=` overrides). A shared cache
+  that ignored those would hand an iPhone Android's intent URL.
+- **`noindex`.** Every page is the same generic copy; indexing one per post id
+  would be thousands of duplicates.
+
+**Why the well-known files matter operationally.** The app ships an
+`autoVerify="true"` https intent-filter for both hosts, and Android fetches
+`assetlinks.json` at install/update to decide. Until `SHARE_ANDROID_CERT_SHA256`
+is set to the **Play App Signing** certificate's fingerprint (not the upload
+key), the document is served empty-but-valid, verification reports `none`, and a
+tapped https link opens the browser instead of the app — with no other symptom.
+
+iOS has no associated-domains entitlement yet by decision (portal work), so
+`SHARE_IOS_APP_ID` is empty and `/.well-known/apple-app-site-association`
+answers **404, not an empty document**. That asymmetry with the Android file is
+deliberate: Apple does not fetch the AASA from this origin, it fetches through
+`app-site-association.cdn-apple.com` and **caches** the result, so publishing
+`{"applinks":{"apps":[],"details":[]}}` today would leave the CDN answering
+"this site delegates nothing" for days after the entitlement and
+`SHARE_IOS_APP_ID` finally land — Universal Links would look broken with no
+error anywhere. A 404 is not cached as a negative delegation the same way and
+makes the missing configuration visible in the operator's own curl. The Android
+half keeps its 200 + empty array, where an empty document merely fails
+verification, harmlessly.
+
+**In both states the share page's own "Open in SeMay" button still opens the
+app**, which is why that button — not link verification — is the guaranteed
+path in. What it does for a recipient **without** the app differs by platform:
+
+- **Android.** The button is an `intent://` URL carrying
+  `S.browser_fallback_url`, which is where Chrome goes when it cannot resolve
+  the package — i.e. exactly the no-app case. That fallback is
+  **`SHARE_PLAY_URL`** whenever it is configured, per the owner decision
+  ("iPhone → App Store, Android → Google Play"). It previously pointed at the
+  share page itself, which made the primary button a silent reload for its only
+  audience. With `SHARE_PLAY_URL` empty ("no listing yet" — the page then shows
+  a `Google Play · Ýakynda` badge instead of a link) the fallback stays the
+  canonical page URL: staying put beats Chrome's own Play-Store-for-package
+  redirect to a listing nobody has confirmed exists.
+- **iPhone.** The button is the bare `semay://` scheme, which is the *only*
+  thing that can open the app before the entitlement exists. On an iPhone
+  **without** the app, Safari answers an unhandled scheme with a modal
+  *"Safari cannot open the page because the address is invalid"*. No JS-free
+  page can detect that in advance, and the page is deliberately script-free, so
+  this is accepted and mitigated by the App Store button below it. Expect it on
+  device; it is not a regression.
+
+Both `SHARE_PLAY_URL` and `SHARE_APPSTORE_URL` **default to empty**, and empty
+renders the "coming soon" badge. The symmetry is intentional: whether either
+listing is published is an owner fact, not something to assume in a config
+default — a Play 404 is strictly worse for a recipient than an honest
+`Ýakynda`.
+
+nginx needs no change: `location /` already proxies these paths to the API, for
+`semaycollection.com` and `www.` alike.
 
 ## 6b. Interaction counters are client-authoritative by design
 
@@ -556,6 +1007,38 @@ and `cluster.ts` now **refuses to boot** when `workers × connection_limit + 40
 reserved` exceeds the server's actual `max_connections`, printing the three ways
 to fix it. A server that starts and then fails a fraction of requests is worse
 than one that refuses to start.
+
+**3. Transactions the pool refused to START were not retried** (found later,
+while making the test suite deterministic; same class as 1, one layer out).
+`withRetry` only re-ran `P2034` — a transaction MySQL rolled back. It did not
+re-run one that never began: when every pooled connection is busy, Prisma gives
+up after `maxWait` (2 s) and raises `P2028 "Unable to start a transaction in the
+given time."`, and `P2024` when `pool_timeout` elapses fetching a connection.
+Defect 1's own fix makes this *more* likely, not less — the up-front
+`SELECT … FOR UPDATE` is what turns a deadlock into a queue, and every waiter in
+that queue holds its connection while it waits. So the same hot post that used
+to deadlock now parks 15 connections on one row, and caller 16 gets a 500 for
+nothing but being popular. `POST /auth/refresh` had the sharper version: N
+refreshes on one token queue on one `sessions` row, and `rotateSession` had no
+retry wrapper at all, so the loser answered **500 — which the app treats as a
+failed refresh and turns into a logout**.
+
+Fixed in `server/src/lib/withRetry.ts`: both acquire failures are retried, on
+their own small budget (3 attempts — each has already cost its `maxWait`, and
+eight would turn a saturated pool into a 16 s request). Retrying is safe
+precisely because *no statement of the transaction reached the database*; the
+other `P2028`, an interactive-transaction execution timeout, is matched out by
+message and still propagates. `rotateSession` (`auth/session.ts`) and the
+maintenance reaper's bulk deletes (`maintenance.ts` — `stories`, `sessions` and
+`otp_codes`, every one of them contending with live traffic, and an unretried
+rollback there aborted the *whole* cycle including the media sweep for an hour)
+now use `withRetry` like every other contended write. Pinned by
+`server/tests/tx.retry.test.ts`.
+
+Reproduced and verified by loading the box deliberately (12 busy CPU threads
+alongside `npm test`): before, 3 files / 5 tests red, every one of them
+`Unable to start a transaction in the given time`; after, 37 files green under
+the same load.
 
 ### Throughput (8 workers, tuned MySQL, zero failed requests)
 

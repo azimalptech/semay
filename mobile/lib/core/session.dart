@@ -45,15 +45,30 @@ class SessionClaims {
 /// which the interceptor in api_client.dart can retry with a refreshed header,
 /// a WebSocket handed an expired token is simply closed by the server (4401)
 /// and there is nothing to retry — the token has to be fresh going in.
-DateTime? jwtExpiresAt(String accessToken) {
+DateTime? jwtExpiresAt(String accessToken) => _jwtClaimTime(accessToken, 'exp');
+
+/// Lifetime (`exp` − `iat`) the server issued this access JWT with, or null
+/// when either claim can't be read. Lets the refresh margin in
+/// api_client.dart follow the TTL the server actually uses instead of
+/// assuming the 15-minute production value — a short test TTL against a
+/// fixed margin made every token "about to expire" from the moment it was
+/// issued.
+Duration? jwtLifetime(String accessToken) {
+  final exp = _jwtClaimTime(accessToken, 'exp');
+  final iat = _jwtClaimTime(accessToken, 'iat');
+  if (exp == null || iat == null) return null;
+  return exp.difference(iat);
+}
+
+DateTime? _jwtClaimTime(String accessToken, String claim) {
   try {
     final parts = accessToken.split('.');
     if (parts.length != 3) return null;
     final payload =
         jsonDecode(_decodeBase64Segment(parts[1])) as Map<String, dynamic>;
-    final exp = payload['exp'];
-    if (exp is! num) return null;
-    return DateTime.fromMillisecondsSinceEpoch(exp.toInt() * 1000, isUtc: true);
+    final seconds = payload[claim];
+    if (seconds is! num) return null;
+    return DateTime.fromMillisecondsSinceEpoch(seconds.toInt() * 1000, isUtc: true);
   } catch (_) {
     return null;
   }

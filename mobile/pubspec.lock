@@ -314,7 +314,7 @@ packages:
     source: hosted
     version: "16.4.2"
   firebase_messaging_platform_interface:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: firebase_messaging_platform_interface
       sha256: "7e8dc65dfbd8c97d8f88031bfc0896947ee9cbb47940a5bba5edb343a70919a7"
@@ -945,7 +945,7 @@ packages:
     source: hosted
     version: "11.1.0"
   share_plus_platform_interface:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: share_plus_platform_interface
       sha256: "88023e53a13429bd65d8e85e11a9b484f49d4c190abbd96c7932b74d6927cc9a"

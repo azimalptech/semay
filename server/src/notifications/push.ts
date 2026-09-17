@@ -1,7 +1,9 @@
+import type { Language } from "@prisma/client";
 import type { FastifyBaseLogger } from "fastify";
 import type { MulticastMessage } from "firebase-admin/messaging";
 
 import { prisma } from "../db.js";
+import { copyFor, DEFAULT_LANGUAGE, type Copy } from "../lib/copy.js";
 import { getFcmDisabledReason, getFcmMessaging } from "../lib/firebaseAdmin.js";
 
 const DEAD_TOKEN_ERROR_CODES = new Set([
@@ -64,15 +66,21 @@ function warnPushSkipped(recipients: number): void {
 
 /** Presentation hints for a push. Everything here is optional — the order path
  * passes none and gets the plain title/body it always did. Chat messages pass
- * all three so the OS treats them like a messenger would; broadcasts pass a
- * channel and a tag (notifications/service.ts). */
+ * a channel, a tag and wakeApp so the OS treats them like a messenger would;
+ * broadcasts pass a channel and a tag (notifications/service.ts).
+ *
+ * There is deliberately no sound option: every push type rings with the
+ * device's DEFAULT notification sound (`sound: "default"` below, on both
+ * platforms). A bundled chat sound was tried and removed at the owner's
+ * request — see docs/08_OPERATIONS.md §3b. */
 export interface PushOptions {
   /** Android notification channel. Must already exist on the device — the app
-   * creates `chat_messages` and `announcements` at IMPORTANCE_HIGH in
-   * MainActivity.kt, which is what makes a message pop as a heads-up banner
-   * with sound instead of landing silently in the shade under FCM's default
-   * "Miscellaneous" channel. An unknown id (an app older than the channel)
-   * falls back to the manifest default, `chat_messages`. */
+   * creates `chat_messages`, `announcements` and `orders` at
+   * IMPORTANCE_HIGH in SemayApplication.kt, which is what makes a message pop as
+   * a heads-up banner with sound instead of landing silently in the shade
+   * under FCM's default "Miscellaneous" channel. An unknown id (an app older
+   * than the channel) falls back to the manifest default, `chat_messages`
+   * — the chat channel, which is why an order notice must name its own. */
   channelId?: string;
   /** Collapses notifications per conversation: Android `tag` (a newer
    * notification with the same tag REPLACES the older one, so five messages
@@ -223,6 +231,52 @@ export async function sendPushToUsers(
         },
       },
     }));
+    result.sent += r.sent;
+    result.failed += r.failed;
+  }
+  return result;
+}
+
+/** The same send, with the title and body written in each recipient's own
+ * language (`users.language`, tk or ru — the product ships no English, see
+ * lib/copy.ts).
+ *
+ * The notification payload carries ONE title/body for the whole multicast, so
+ * the recipients are grouped by language and each group gets its own send —
+ * two at most. `opts` is shared: `badgeByUser` is a per-user map, so it keeps
+ * working across the split, and `tag`/`channelId`/sounds do not vary by
+ * language. A recipient with no row (deleted between lookup and send) falls
+ * back to Turkmen rather than being dropped.
+ *
+ * Callers here pass a handful of ids (the admins of one store, the
+ * superadmins); a fan-out the size of a broadcast should keep using
+ * sendPushToUsers with copy the superadmin typed. */
+export async function sendLocalizedPushToUsers(
+  userIds: string[],
+  text: (copy: Copy) => { title: string; body: string },
+  data?: Record<string, string>,
+  opts: PushOptions = {}
+): Promise<PushResult> {
+  if (userIds.length === 0) return { sent: 0, failed: 0 };
+
+  const rows = await prisma.user.findMany({
+    where: { id: { in: userIds } },
+    select: { id: true, language: true },
+  });
+  const languageOf = new Map(rows.map((r) => [r.id, r.language]));
+
+  const groups = new Map<Language, string[]>();
+  for (const id of userIds) {
+    const language = languageOf.get(id) ?? DEFAULT_LANGUAGE;
+    const list = groups.get(language);
+    if (list) list.push(id);
+    else groups.set(language, [id]);
+  }
+
+  const result: PushResult = { sent: 0, failed: 0 };
+  for (const [language, ids] of groups) {
+    const { title, body } = text(copyFor(language));
+    const r = await sendPushToUsers(ids, title, body, data, opts);
     result.sent += r.sent;
     result.failed += r.failed;
   }

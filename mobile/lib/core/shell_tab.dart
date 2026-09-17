@@ -58,6 +58,11 @@ final appInForegroundProvider = NotifierProvider<AppForeground, bool>(
 /// over (and taken off) the shell. PageRoute, not ModalRoute, on purpose:
 /// dialogs and bottom sheets are PopupRoutes and don't count as covering, so
 /// a reel keeps playing behind the send-to-chat sheet as it always has.
+///
+/// ChatThreadScreen subscribes to it too, for the same question about itself:
+/// a covered thread is not "the thread on screen", so a message arriving
+/// while the user is on a screen pushed from it must ring (see
+/// notification_service.dart's rule).
 final shellRouteObserver = _ShellRouteObserver();
 
 class _ShellRouteObserver extends RouteObserver<PageRoute<dynamic>> {

@@ -134,10 +134,27 @@ class _DeliveryMarker {
   }
 }
 
+/// How long the socket gets to answer a list subscribe before the REST copy
+/// is fetched as a fallback.
+///
+/// The fallback exists for one failure only — the socket is open, the
+/// subscribe was accepted, and the server never delivers (the dead-bus class
+/// in docs/08_OPERATIONS.md §3a), where a fresh install showed an empty chat
+/// list for good. Firing it unconditionally made every launch, and every
+/// reconnect, pay a `GET /chats` (and one per store for an admin) that the
+/// socket snapshot then immediately overwrote — a full chat-list query per
+/// launch per user, for a case that almost never happens. Waiting first costs
+/// the failure case a few seconds it spends showing "Connecting…" anyway, and
+/// costs the normal case nothing. Comfortably longer than a snapshot (a
+/// handful of indexed queries, bounded at 10 s by the gateway only in the
+/// pathological case) and far shorter than the client's own 25 s stall rule.
+const chatListRestSeedGrace = Duration(seconds: 3);
+
 /// Maintains a keyed list from a single realtime list-channel's snapshot/
 /// upsert/remove events, sorted by last activity, filtered by hide-state.
 /// Paints from the local cache first, so the list is on screen at launch (and
-/// offline) before the socket has even connected.
+/// offline) before the socket has even connected, and from a REST copy of
+/// the same list when the socket is up but its server is not delivering.
 ///
 /// An explicit `.listen` cancelled synchronously in `ref.onDispose`, not an
 /// `async*` generator: a generator's cancel only lands at its next yield, so
@@ -154,12 +171,59 @@ Stream<List<ChatDoc>> _chatListChannel(
   final byId = <String, Map<String, dynamic>>{};
   final delivery = _DeliveryMarker(ref);
   final cache = ref.read(chatCacheProvider);
-  var live = false; // a server snapshot has replaced the cached seed
+  final client = ref.watch(realtimeClientProvider);
+  var live = false; // a server list (snapshot or REST) has replaced the cached seed
+  var socketGen = 0; // bumped on every frame the channel delivers
 
   void emit() {
     final visible = byId.values.where((c) => _visibleFor(c, admin: admin)).toList()
       ..sort(_byLastMessageDesc);
     if (!controller.isClosed) controller.add(visible.map((c) => ChatDoc(c)).toList());
+  }
+
+  // A full server list replaces whatever is held. The socket snapshot and
+  // the REST answer are the same query (listUserChats), so both land here.
+  void replaceAll(List<Map<String, dynamic>> rows) {
+    live = true;
+    byId.clear();
+    for (final chat in rows) {
+      byId[chat['id'] as String] = chat;
+      delivery.observe(chat, admin: admin);
+    }
+    unawaited(cache.replaceChats(rows));
+    emit();
+  }
+
+  // The REST copy (GET /chats), so the list exists when the socket is open
+  // but its server delivers nothing — subscribed, no snapshot, no upserts:
+  // the dead-Redis class in docs/08_OPERATIONS.md §3a, which on a fresh
+  // install with nothing cached showed an empty list for good. The socket
+  // supersedes it: a frame that lands while the fetch is in flight means the
+  // channel is live and already fresher than this answer, which is then
+  // dropped rather than merged over it.
+  Future<void> seedFromRest() async {
+    final gen = socketGen;
+    try {
+      final json = await ref.read(apiClientProvider).get('/chats');
+      if (controller.isClosed || socketGen != gen) return;
+      replaceAll((json['chats'] as List<dynamic>? ?? const []).cast<Map<String, dynamic>>());
+    } catch (_) {
+      // The cache (if any) stays on screen; the snapshot covers it when the
+      // socket comes up, and "Connecting…" says why until then.
+    }
+  }
+
+  // Armed at launch and re-armed on every reconnect (`resyncs`), but only
+  // SPENT when the socket has still said nothing by the time it fires — see
+  // chatListRestSeedGrace.
+  Timer? restSeed;
+  void armRestSeed() {
+    final gen = socketGen;
+    restSeed?.cancel();
+    restSeed = Timer(chatListRestSeedGrace, () {
+      if (controller.isClosed || socketGen != gen) return;
+      unawaited(seedFromRest());
+    });
   }
 
   unawaited(cache.chats().then((rows) {
@@ -172,20 +236,17 @@ Stream<List<ChatDoc>> _chatListChannel(
     }
     emit();
   }));
+  armRestSeed();
+  final resyncSub = client.resyncs.where((c) => c == channel).listen((_) => armRestSeed());
 
-  final sub = ref.watch(realtimeClientProvider).subscribe(channel).listen((e) {
+  final sub = client.subscribe(channel).listen((e) {
+    socketGen++;
     switch (e.type) {
       case RealtimeEventType.snapshot:
-        live = true;
-        byId.clear();
-        final rows = <Map<String, dynamic>>[];
-        for (final item in (e.data as List<dynamic>? ?? const [])) {
-          final chat = item as Map<String, dynamic>;
-          byId[chat['id'] as String] = chat;
-          delivery.observe(chat, admin: admin);
-          rows.add(chat);
-        }
-        unawaited(cache.replaceChats(rows));
+        replaceAll(
+          (e.data as List<dynamic>? ?? const []).cast<Map<String, dynamic>>(),
+        );
+        return;
       case RealtimeEventType.upsert:
         final chat = e.data as Map<String, dynamic>;
         byId[chat['id'] as String] = chat;
@@ -205,7 +266,9 @@ Stream<List<ChatDoc>> _chatListChannel(
   });
 
   ref.onDispose(() {
+    restSeed?.cancel();
     sub.cancel();
+    resyncSub.cancel();
     controller.close();
   });
   return controller.stream;
@@ -239,7 +302,9 @@ final adminChatsProvider = StreamProvider<List<ChatDoc>>((ref) {
   final subs = <StreamSubscription<dynamic>>[];
   final delivery = _DeliveryMarker(ref);
   final cache = ref.read(chatCacheProvider);
-  final liveStores = <String>{}; // stores whose server snapshot has arrived
+  final client = ref.watch(realtimeClientProvider);
+  final liveStores = <String>{}; // stores whose server list has arrived
+  final socketGen = <String, int>{}; // per store — see _chatListChannel
 
   void emit() {
     final list = byId.values.where((c) => _visibleFor(c, admin: true)).toList()
@@ -247,6 +312,51 @@ final adminChatsProvider = StreamProvider<List<ChatDoc>>((ref) {
     if (!controller.isClosed) {
       controller.add(list.map((c) => ChatDoc(c)).toList());
     }
+  }
+
+  // Replace just this store's entries — from its snapshot or its REST copy,
+  // the same query (listStoreChats) either way.
+  void replaceStore(String storeId, List<Map<String, dynamic>> rows) {
+    liveStores.add(storeId);
+    byId.removeWhere((_, c) => c['storeId'] == storeId);
+    for (final chat in rows) {
+      byId[chat['id'] as String] = chat;
+      delivery.observe(chat, admin: true);
+    }
+    unawaited(cache.replaceChats(rows, storeId: storeId));
+    emit();
+  }
+
+  // Same REST fallback and socket-supersedes rule as _chatListChannel, per
+  // store (GET /chats?storeId= is the admin form of the same endpoint).
+  Future<void> seedFromRest(String storeId) async {
+    final gen = socketGen[storeId] ?? 0;
+    try {
+      final json = await ref
+          .read(apiClientProvider)
+          .get('/chats', query: {'storeId': storeId});
+      if (controller.isClosed || (socketGen[storeId] ?? 0) != gen) return;
+      replaceStore(
+        storeId,
+        (json['chats'] as List<dynamic>? ?? const []).cast<Map<String, dynamic>>(),
+      );
+    } catch (_) {
+      // See _chatListChannel.
+    }
+  }
+
+  // One armed timer per store, on the same grace as _chatListChannel — an
+  // admin of four stores used to pay four GET /chats on every launch and
+  // every reconnect, and now pays none unless a store's channel really does
+  // go silent.
+  final restSeeds = <String, Timer>{};
+  void armRestSeed(String storeId) {
+    final gen = socketGen[storeId] ?? 0;
+    restSeeds.remove(storeId)?.cancel();
+    restSeeds[storeId] = Timer(chatListRestSeedGrace, () {
+      if (controller.isClosed || (socketGen[storeId] ?? 0) != gen) return;
+      unawaited(seedFromRest(storeId));
+    });
   }
 
   if (storeIds.isEmpty) {
@@ -266,23 +376,20 @@ final adminChatsProvider = StreamProvider<List<ChatDoc>>((ref) {
     }));
   }
   for (final storeId in storeIds) {
-    final sub = ref
-        .watch(realtimeClientProvider)
-        .subscribe('store:$storeId:chats')
-        .listen((e) {
+    final channel = 'store:$storeId:chats';
+    armRestSeed(storeId);
+    subs.add(
+      client.resyncs.where((c) => c == channel).listen((_) => armRestSeed(storeId)),
+    );
+    final sub = client.subscribe(channel).listen((e) {
+          socketGen[storeId] = (socketGen[storeId] ?? 0) + 1;
           switch (e.type) {
             case RealtimeEventType.snapshot:
-              // Replace just this store's entries.
-              liveStores.add(storeId);
-              byId.removeWhere((_, c) => c['storeId'] == storeId);
-              final rows = <Map<String, dynamic>>[];
-              for (final item in (e.data as List<dynamic>? ?? const [])) {
-                final chat = item as Map<String, dynamic>;
-                byId[chat['id'] as String] = chat;
-                delivery.observe(chat, admin: true);
-                rows.add(chat);
-              }
-              unawaited(cache.replaceChats(rows, storeId: storeId));
+              replaceStore(
+                storeId,
+                (e.data as List<dynamic>? ?? const []).cast<Map<String, dynamic>>(),
+              );
+              return;
             case RealtimeEventType.upsert:
               final chat = e.data as Map<String, dynamic>;
               byId[chat['id'] as String] = chat;
@@ -304,6 +411,9 @@ final adminChatsProvider = StreamProvider<List<ChatDoc>>((ref) {
   }
 
   ref.onDispose(() {
+    for (final t in restSeeds.values) {
+      t.cancel();
+    }
     for (final s in subs) {
       s.cancel();
     }
@@ -398,18 +508,29 @@ Map<String, dynamic> _withoutHiddenQuote(Map<String, dynamic> m, int cutoff) {
 /// stamped and must not show as seen here either) that is still missing the
 /// stamp gets it. Copies rather than mutating, so lists already handed to the
 /// UI are never edited under it. Returns the keys it changed.
+///
+/// A NULL `upToMessageId` means the server stamped no row at all, and the only
+/// correct reading of it is "change nothing". Treating it as "no upper bound"
+/// stamped the whole window — including a message that reached this socket a
+/// moment before the receipt — so bubbles nobody had opened flipped to the
+/// blue double tick, and the thread cache persisted that lie across a
+/// relaunch. The server can genuinely send it: markReceipts publishes whenever
+/// `msgs.count + unreadCleared > 0`, so a read receipt that stamped no message
+/// but cleared a non-zero unread counter (a `sendMessage` committing between
+/// its two updateMany statements) carries a null bound.
 List<String> _applyReceipts(Map<String, Map<String, dynamic>> byId, Map<String, dynamic> receipt) {
   final role = receipt['senderRole'];
   final status = receipt['status'];
   final at = receipt['at'];
   final upTo = int.tryParse('${receipt['upToMessageId']}');
+  if (upTo == null) return const <String>[];
   final from = int.tryParse('${receipt['fromMessageId']}');
   final changed = <String>[];
   for (final entry in byId.entries.toList()) {
     final m = entry.value;
     if (m['senderRole'] != role) continue;
     final id = _messageId(m);
-    if (upTo != null && id > upTo) continue;
+    if (id > upTo) continue;
     if (from != null && id <= from) continue;
     if (status == 'read') {
       if (m['readAt'] != null) continue;
@@ -454,8 +575,10 @@ class ChatMessagesState {
 /// by message id (monotonic BIGINTs, so "newer" is one comparison):
 ///
 ///  * the local cache (chat_cache.dart) — instant paint, works offline;
-///  * a one-shot REST fetch of the latest window — fastest fresh paint, and
-///    the thread still loads when the socket can't connect but REST can;
+///  * a REST fetch of the latest window — fastest fresh paint, the thread
+///    still loads when the socket can't connect but REST can, and repeated
+///    on every socket reconnect (RealtimeClient.resyncs) because the
+///    snapshot a reconnect should bring may never come;
 ///  * the socket (snapshot → upserts/receipts), authoritative once it lands;
 ///  * the outbox: the moment the server accepts one of OUR messages (POST
 ///    response) that row lands here directly rather than waiting for its echo
@@ -482,10 +605,12 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
 
   final _byId = <String, Map<String, dynamic>>{};
   StreamSubscription<RealtimeEvent>? _wsSub;
+  StreamSubscription<String>? _resyncSub;
   StreamSubscription<SentMessage>? _sentSub;
   bool _disposed = false;
   bool _seeded = false;
   bool _authoritative = false; // REST seed or socket snapshot has landed
+  int _socketGen = 0; // bumped on every frame the thread channel delivers
   bool _hasMore = true;
   bool _loadingOlder = false;
   String? _error;
@@ -499,6 +624,7 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
     _disposed = false;
     _seeded = false;
     _authoritative = false;
+    _socketGen = 0;
     _hasMore = true;
     _loadingOlder = false;
     _error = null;
@@ -506,6 +632,7 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
     ref.onDispose(() {
       _disposed = true;
       _wsSub?.cancel();
+      _resyncSub?.cancel();
       _sentSub?.cancel();
     });
     // The cutoff comes from the chat doc, for whichever side this account is
@@ -524,6 +651,7 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
     unawaited(_seedFromCache());
     unawaited(_seedFromRest());
     _listenSocket();
+    _listenResyncs();
     _listenOutbox();
     return const ChatMessagesState();
   }
@@ -634,12 +762,20 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
     _publish();
   }
 
-  Future<void> _seedFromRest() async {
+  /// The latest window over REST. [resync] = a socket reconnect (see
+  /// _listenResyncs) rather than the open: the first seed defers to a
+  /// snapshot that has already landed, a re-seed to any frame that arrived
+  /// while it was in flight — either way the socket has spoken since and
+  /// holds the fresher state (a receipts stamp this answer would undo, a
+  /// message it lacks), so the answer is dropped.
+  Future<void> _seedFromRest({bool resync = false}) async {
+    final gen = _socketGen;
     try {
       final json = await ref
           .read(apiClientProvider)
           .get('/chats/$chatId/messages', query: {'limit': _windowSize});
-      if (_disposed || _authoritative) return;
+      if (_disposed) return;
+      if (resync ? _socketGen != gen : _authoritative) return;
       final rows = (json['messages'] as List<dynamic>? ?? const []).cast<Map<String, dynamic>>();
       _mergeWindow(rows, complete: rows.length < _windowSize);
       _authoritative = true;
@@ -653,8 +789,21 @@ class ChatMessagesNotifier extends Notifier<ChatMessagesState> {
     }
   }
 
+  /// A reconnect re-subscribes the channel and should bring a snapshot. When
+  /// it does not — the server's bus is down, which is why the client
+  /// reconnected in the first place — the REST window is the only source of
+  /// what was missed, so it is fetched again. One request per reconnect.
+  void _listenResyncs() {
+    _resyncSub = ref
+        .read(realtimeClientProvider)
+        .resyncs
+        .where((c) => c == 'chat:$chatId:messages')
+        .listen((_) => _seedFromRest(resync: true));
+  }
+
   void _listenSocket() {
     _wsSub = ref.read(realtimeClientProvider).subscribe('chat:$chatId:messages').listen((e) {
+      _socketGen++;
       switch (e.type) {
         case RealtimeEventType.snapshot:
           final rows = (e.data as List<dynamic>? ?? const []).cast<Map<String, dynamic>>();

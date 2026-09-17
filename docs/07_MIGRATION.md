@@ -139,8 +139,14 @@ or superadmin — ownership resolved server-side since the route has no storeId 
   when a row was actually inserted/deleted" — repeat calls are provably idempotent (replaces
   `onLikeWrite`/`onSavedWrite`/`onViewCreated`/`onSentCreated`/`onShareCreated`).
 - `server/src/stories/`: `POST /stores/:storeId/stories`, `GET /stories/active`,
-  `GET /stores/:storeId/stories`, `DELETE /stories/:id`, `POST /stories/:id/view` (records the view
-  create-only AND upserts `user_story_seen` — replaces `users/{uid}/storySeen`).
+  `GET /stores/:storeId/stories`, `DELETE /stories/:id`, `POST /stories/:id/view` (records that ONE
+  slide's view, create-only — the owner's "seen by N"). It deliberately does **not** touch
+  `user_story_seen`: the viewer fires it per slide, so stamping there made `rings[].seen` true after
+  1 of 3 slides and muted both story rings with two stories unwatched — the opposite of the rule
+  docs/02 states ("written when the user watches a store's story sequence through to the end").
+  `POST /stores/:storeId/story-seen` (→ `markStoreSeen`, replacing `users/{uid}/storySeen`) is the
+  only writer of that row, and the viewer sends it on the last slide. Pinned by
+  `tests/stories.seen.test.ts`.
 - `server/src/media/`: MinIO client (`minio.ts`) + `POST /media/upload-url` (any admin) returns a
   5-minute presigned PUT URL and the eventual public URL; the client PUTs bytes directly to MinIO,
   then passes that public URL when creating the post/story. Bucket is created (idempotently) and set
@@ -253,12 +259,28 @@ for the caller's side only).
   hidden row, and the superadmin rule), the `chat-delete` block of `tests/authz.matrix.test.ts`, and
   a snapshot case in `tests/realtime.gateway.test.ts`.
 - `realtime/channels.ts` — extended the Phase 4 gateway with a **pattern + per-channel authorize**
-  registry (`post:{id}` public; `chat:{id}`, `chat:{id}:messages`, `user:{uid}:chats`,
+  registry (`post:{id}` and `store:{id}` public; `chat:{id}`, `chat:{id}:messages`, `user:{uid}:chats`,
   `store:{storeId}:chats` all check real participancy against the DB before allowing subscribe —
   never trusting the connection's cached claims for this, since those can be stale for the token's
   full 15-minute TTL). Verified live: a stranger token subscribing to another user's chat/list channel
   gets `{type:"error", error:"FORBIDDEN"}`; a participant gets `snapshot` then live `upsert` frames
-  across all four channels in real time when a message is sent from the _other_ side.
+  across all four channels in real time when a message is sent from the _other_ side. A subscribe
+  the server could not complete (bus, DB, or its 10 s deadline) gets
+  `{type:"error", error:"SUBSCRIBE_FAILED"}` rather than silence — see `08_OPERATIONS.md` §3d.
+  `store:{id}` is the sixth channel and the **second publicly readable** one: `PATCH /stores/:id`
+  publishes the store row on it so an open store profile or chat header shows a rename or a new
+  avatar live, and it is public-read for the same reason `post:{id}` is — `GET /stores/:id` already
+  returns that identical row to any authenticated user, so the socket exposes nothing the REST route
+  does not. Pinned by the `authz matrix: store:{id} channel and PATCH /users/me name` block of
+  `tests/authz.matrix.test.ts`.
+- **Name validation on the two rename paths** (behaviour change for any client that used to blank a
+  name): `PATCH /users/me` and `PATCH|POST /stores` now take `name: z.string().trim().min(1).max(120)`
+  (`users/routes.ts`, `stores/routes.ts`). `""` and `"   "` were previously accepted and left the
+  display name empty in the chat header, the chat list, order rows and the store profile; both now
+  answer `400 INVALID_INPUT`, and a name is stored trimmed. The mobile client guards this too
+  (`edit_profile_screen.dart`, `edit_store_screen.dart`, `name_entry_screen.dart`), but an older
+  build, a replay or the panel must not be able to do it either. Pinned by the
+  `authz matrix: PATCH /stores/:id name` block alongside the `/users/me` one.
 - **The plan's highest-value chat test** — `tests/chat.race.test.ts`: 20 concurrent
   `createOrGetChat` + `sendMessage` calls for one brand-new user+store never fail, produce exactly one
   `chats` row, and exactly 20 `messages` rows. This caught two real bugs before they ever reached
@@ -561,7 +583,9 @@ change list.
   customer's name. A notification tap opens the thread (`listenNotificationTaps`: cold start via
   `getInitialMessage`, background via `onMessageOpenedApp` — neither was handled). Android:
   `chat_messages` and `announcements` channels at IMPORTANCE_HIGH created in `MainActivity.kt`
-  (`chat_messages` is the manifest default). iOS:
+  (`chat_messages` is the manifest default) — **superseded**: the ids, the third channel and the
+  owning class changed with the message-sound pass, see "Notification sound and channels" under
+  *Post-migration feature changes* below. iOS:
   `Runner.entitlements` (`aps-environment`) registered in the Xcode project and
   `UIBackgroundModes: remote-notification` — without the entitlement no push could ever arrive on
   iOS. Still needed outside the repo: APNs key in the Firebase project, Push capability on the App ID.
@@ -643,6 +667,39 @@ behavior stays traceable to a decision, same as the phases above.
 - **Super-admin orders report**: the dashboard `OrdersTable` gained a total-orders + total-items
   summary, an inclusive **date-range (from/to) calendar filter**, and a click-to-toggle **sort-by-date**
   column header. All client-side over the existing 90-day fetch — no schema or API change.
+- **Notification sound and channels** (supersedes the Phase 9c Android line above). Every push — chat,
+  announcement, order notice — rings with the **phone's default notification sound**, on three
+  channels of its own so a user can silence one without the others. A bundled chat sound shipped in a
+  round of local test builds and the owner removed it ("normal notification with the phone's default
+  sound"); the assets, the `setSound` call and the server's sound options are gone.
+  `docs/08_OPERATIONS.md` §3b is the single source of truth — the summary:
+  - **Three Android channels**, `chat_messages` / `announcements` / `orders`, all IMPORTANCE_HIGH and
+    all with **no `setSound`** (so: system default sound), names and descriptions localised in
+    `res/values/strings.xml` (Turkmen) and `res/values-ru` (Russian) since the product ships no
+    English. `chat_messages` is the manifest's `default_notification_channel_id` and the id the last
+    released build already created, so there is nothing to migrate. `chat_messages_v2` — the id the
+    bundled sound needed, because a channel's sound is immutable once created — is **deleted** at
+    startup so it does not linger in the test handsets' notification settings.
+  - **Created in `mobile/android/app/src/main/kotlin/com/semay/semay/SemayApplication.kt`, not
+    `MainActivity.kt`** — registered as `android:name=".SemayApplication"` in place of Flutter's
+    `${applicationName}` placeholder. FCM draws a backgrounded app's notification from
+    `FirebaseMessagingService`, which starts the process but never the activity, so channels created
+    from the activity would not exist for the first notification after a Play Store update.
+  - **Assets**: none. `res/raw/semay_message.mp3`, `res/raw/keep.xml` and `ios/Runner/semay_message.wav`
+    (with all four of its `project.pbxproj` entries) were deleted with the custom sound; `res/raw`
+    itself is gone. Docs/08 §3b keeps the release-build shrinker trap on record for anyone who tries
+    to bring a bundled sound back — it is not a trap the current code can hit.
+  - **Server**: `PushOptions` has no sound field at all; `notifications/push.ts` sends
+    `android.notification.sound: "default"` and `aps.sound: "default"` for every push type.
+    `orders/service.ts` names `channelId: "orders"`, which is why the server must be redeployed
+    before or with the app release.
+  - **The rule, one line:** a chat push is silent ONLY when its `chatId` equals the thread on screen
+    with the app resumed; everything else shows normally with the default sound, and broadcasts are
+    never suppressed. Stated
+    in `shouldPresentPush` (`notification_service.dart`) and mirrored in `AppDelegate.swift`'s
+    `willPresent`, which is fed the active chat over the `com.semay.semay/notifications` method
+    channel. That channel also carries `dismissChat`, so opening a thread clears its delivered
+    notifications on both platforms.
 
 ## Things Firebase gave "for free" that need real new work
 

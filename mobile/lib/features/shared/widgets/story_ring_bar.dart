@@ -10,6 +10,7 @@ import '../../../core/theme.dart';
 import '../../story_composer/add_story_flow.dart';
 import '../../story_viewer/story_viewer_screen.dart' show StoryViewerArgs;
 import '../story_bar_provider.dart';
+import 'story_ring.dart';
 
 /// Homepage story bar — Figma frame 195:4299 node 195:4308 (user) and
 /// 223:4769 (admin, with the "+" add-story badge on the own-store ring).
@@ -125,14 +126,12 @@ class _StoryRing extends StatelessWidget {
                     child: AnimatedBuilder(
                       animation: spin,
                       builder: (context, child) => CustomPaint(
-                        painter: _RingPainter(
+                        painter: StoryRingPainter(
+                          hasStories: ring.hasStories,
+                          seen: ring.seen,
                           rotation: ring.hasStories && !ring.seen
                               ? spin.value * 2 * math.pi
                               : 0,
-                          gradient: ring.hasStories && !ring.seen,
-                          color: ring.hasStories
-                              ? AppColors.buttonMuted
-                              : Colors.transparent,
                         ),
                         child: child,
                       ),
@@ -198,42 +197,4 @@ class _StoryRing extends StatelessWidget {
       ),
     );
   }
-}
-
-class _RingPainter extends CustomPainter {
-  _RingPainter({
-    required this.rotation,
-    required this.gradient,
-    required this.color,
-  });
-
-  final double rotation;
-  final bool gradient;
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5;
-
-    if (gradient) {
-      paint.shader = SweepGradient(
-        colors: AppColors.storyGradient,
-        transform: GradientRotation(rotation),
-      ).createShader(rect);
-    } else {
-      if (color == Colors.transparent) return;
-      paint.color = color;
-    }
-
-    canvas.drawCircle(rect.center, (size.width - paint.strokeWidth) / 2, paint);
-  }
-
-  @override
-  bool shouldRepaint(_RingPainter oldDelegate) =>
-      oldDelegate.rotation != rotation ||
-      oldDelegate.gradient != gradient ||
-      oldDelegate.color != color;
 }

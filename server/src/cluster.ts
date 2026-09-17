@@ -2,6 +2,7 @@ import cluster from "node:cluster";
 import { availableParallelism } from "node:os";
 
 import { config } from "./config.js";
+import { bindBusLogger, closeBus, verifyBusAtBoot } from "./realtime/bus.js";
 
 // A Node process runs JavaScript on ONE core. Serving 100k daily active users
 // from a single process leaves every other core idle and makes that one process
@@ -82,6 +83,23 @@ if (cluster.isPrimary) {
       "REDIS_URL is required in cluster mode: without it, realtime events do not " +
         "cross worker processes and users would silently miss messages. " +
         "Set REDIS_URL, or run single-process with `npm start`."
+    );
+    process.exit(1);
+  }
+
+  // Set is not the same as reachable. Workers with an unreachable Redis boot
+  // and deliver in-process, which for a cluster means every message reaches
+  // only the sockets on the worker that handled the write — the exact silent
+  // loss the check above exists to prevent. Fail closed here, before forking.
+  // The primary serves no traffic, so its probe connections are closed again.
+  bindBusLogger(console);
+  const busProblem = await verifyBusAtBoot();
+  await closeBus();
+  if (busProblem) {
+    console.error(
+      `[cluster] ${busProblem}.\n` +
+        "  Cluster mode needs Redis for cross-worker realtime delivery — refusing to fork.\n" +
+        "  Start the Redis service, fix REDIS_URL, or run single-process with `npm start`."
     );
     process.exit(1);
   }

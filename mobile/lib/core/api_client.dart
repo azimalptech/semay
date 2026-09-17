@@ -1,6 +1,8 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'l10n.dart';
 import 'session.dart';
 
 // --dart-define=API_BASE_URL=... overrides this, mirroring the existing
@@ -24,6 +26,28 @@ class ApiException implements Exception {
 
   @override
   String toString() => 'ApiException($statusCode, $error)';
+}
+
+/// What to SHOW for a failed save, in the user's language. ApiException's
+/// toString() is for logs ("ApiException(400, INVALID_INPUT)") and used to be
+/// what the profile-edit SnackBars displayed verbatim; this maps the handful
+/// of outcomes a user can act on and folds everything else (401/403, 5xx, an
+/// unexpected shape, a non-API error) into a plain "could not save".
+String describeApiError(S s, Object e) {
+  if (e is! ApiException) return s.saveFailed;
+  // No status = the request never got an answer (connection refused, timeout,
+  // dropped socket — _mapError's REQUEST_FAILED).
+  // statusCode == null is the ONLY "no answer" case — _mapError below leaves
+  // it null precisely when there was no HTTP response. `error` is not a
+  // second test for it: _mapError also falls back to REQUEST_FAILED for a
+  // real response whose body isn't the API's `{error}` shape (an nginx
+  // 502/504 page, an empty 500, a 413), and reporting those as "no internet"
+  // sent people to check their SIM while the server was the thing failing.
+  if (e.statusCode == null) return s.noConnection;
+  if (e.statusCode == 400 && e.error == 'INVALID_INPUT') return s.invalidInput;
+  if (e.statusCode == 429) return s.tooManyRequests;
+  if (e.statusCode! >= 500) return s.serverError;
+  return s.saveFailed;
 }
 
 ApiException _mapError(DioException e) {
@@ -92,13 +116,66 @@ enum RefreshOutcome { ok, rejected, unreachable }
 
 Future<RefreshOutcome>? _refreshInFlight;
 
+/// Stops a refresh storm. Five refreshes inside a minute is not a phone
+/// renewing a 15-minute token — it is a loop: the realtime client's connect
+/// refreshed, the refresh was mistaken for a login, the connect restarted and
+/// refreshed again (docs/08_OPERATIONS.md §3a), ~600 times in 6 s until the
+/// server's rate limiter ended it. Each turn rotated the refresh token and
+/// burned the `/auth/refresh` budget shared by every phone behind the same
+/// carrier NAT. That loop is fixed at its root; this is the backstop for the
+/// next one. While open, refreshes report `unreachable`, which every caller
+/// already treats as "try again later" without touching the session.
+class RefreshCircuitBreaker {
+  RefreshCircuitBreaker({DateTime Function()? now}) : _now = now ?? DateTime.now;
+
+  static const window = Duration(seconds: 60);
+  static const maxInWindow = 5;
+  static const pause = Duration(seconds: 30);
+
+  final DateTime Function() _now;
+  final _attempts = <DateTime>[];
+  DateTime? _openUntil;
+
+  /// True while refreshes are being refused.
+  bool get isOpen {
+    final until = _openUntil;
+    if (until == null) return false;
+    if (_now().isBefore(until)) return true;
+    _openUntil = null;
+    _attempts.clear();
+    return false;
+  }
+
+  /// Records one refresh attempt; false when it must be refused instead.
+  bool allow() {
+    if (isOpen) return false;
+    final now = _now();
+    _attempts.removeWhere((t) => now.difference(t) > window);
+    if (_attempts.length >= maxInWindow) {
+      _openUntil = now.add(pause);
+      debugPrint(
+        'api: ${_attempts.length} token refreshes in ${window.inSeconds} s — '
+        'refusing refreshes for ${pause.inSeconds} s',
+      );
+      return false;
+    }
+    _attempts.add(now);
+    return true;
+  }
+}
+
+final _refreshBreaker = RefreshCircuitBreaker();
+
 /// Single-flight: the REST interceptor and the realtime client can both
 /// discover an expired token in the same instant, and the server rotates the
 /// refresh token on every call — two concurrent refreshes would have the
 /// second one presenting an already-revoked token and getting the session
 /// killed for no reason.
 Future<RefreshOutcome> _tryRefresh(Ref ref) {
-  return _refreshInFlight ??= _doRefresh(ref).whenComplete(() => _refreshInFlight = null);
+  final inFlight = _refreshInFlight;
+  if (inFlight != null) return inFlight;
+  if (!_refreshBreaker.allow()) return Future.value(RefreshOutcome.unreachable);
+  return _refreshInFlight = _doRefresh(ref).whenComplete(() => _refreshInFlight = null);
 }
 
 /// Refresh: one attempt, and one quick retry if the server could not be
@@ -184,7 +261,20 @@ class AccessTokenSource {
 
   /// Refresh when this little (or less) is left — enough for the connect
   /// handshake to complete before the server's own expiry check would fail.
-  static const _minRemaining = Duration(seconds: 60);
+  /// 60 s at the production TTL (15 min), a third of the lifetime for a TTL
+  /// under 3 min (test and ops configs): against a flat 60 s a 40 s token was
+  /// "about to expire" the moment it was issued, so every connect refreshed —
+  /// and, with the session-change bug that used to restart the connect on
+  /// every refresh, looped (docs/08_OPERATIONS.md §3a).
+  static const _maxMinRemaining = Duration(seconds: 60);
+
+  @visibleForTesting
+  static Duration minRemainingFor(String accessToken) {
+    final lifetime = jwtLifetime(accessToken);
+    if (lifetime == null) return _maxMinRemaining;
+    final third = lifetime ~/ 3;
+    return third < _maxMinRemaining ? third : _maxMinRemaining;
+  }
 
   Future<String?> validToken({bool forceRefresh = false}) async {
     final store = _ref.read(secureSessionStoreProvider);
@@ -192,7 +282,8 @@ class AccessTokenSource {
     if (current == null) return null;
     final exp = jwtExpiresAt(current);
     final expired = exp == null || exp.difference(DateTime.now().toUtc()) < Duration.zero;
-    final fresh = !expired && exp.difference(DateTime.now().toUtc()) > _minRemaining;
+    final fresh =
+        !expired && exp.difference(DateTime.now().toUtc()) > minRemainingFor(current);
     if (fresh && !forceRefresh) return current;
 
     switch (await _tryRefresh(_ref)) {

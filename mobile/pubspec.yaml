@@ -83,6 +83,19 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
 
+  # Tests only. test/services/share_and_record_test.dart drives the real
+  # share_plus method-channel implementation (`SharePlatform.instance =
+  # MethodChannelShare()`) to capture exactly what the OS sheet receives;
+  # share_plus itself re-exports neither symbol, and on the Windows test host
+  # its registrant would otherwise swap in the mailto: fallback. Already in
+  # the lockfile as share_plus's own dependency — same resolved version.
+  share_plus_platform_interface: ^6.1.0
+  # Already pulled in by firebase_messaging; listed because
+  # test/services/foreground_notification_test.dart feeds RemoteMessages into
+  # FirebaseMessagingPlatform.onMessage — the stream FirebaseMessaging.onMessage
+  # is backed by, which firebase_messaging itself does not export.
+  firebase_messaging_platform_interface: ^4.9.1
+
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
   # activated in the `analysis_options.yaml` file located at the root of your

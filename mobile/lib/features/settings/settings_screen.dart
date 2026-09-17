@@ -124,7 +124,14 @@ class SettingsScreen extends ConsumerWidget {
                 iconColor: const Color(0xFF5C5C5C),
                 title: s.darkMode,
                 value: ref.watch(darkModeProvider),
-                onChanged: (value) => setDarkMode(ref, value),
+                onChanged: (value) async {
+                  final messenger = ScaffoldMessenger.of(context);
+                  if (!await setDarkMode(ref, value)) {
+                    messenger.showSnackBar(
+                      SnackBar(content: Text(s.saveFailed)),
+                    );
+                  }
+                },
               ),
               _SettingsTile(
                 icon: const AppIcon('info'),
@@ -263,11 +270,35 @@ Future<void> _showLanguageSheet(BuildContext context, WidgetRef ref) async {
                   ? const AppIcon('check', color: AppColors.brand)
                   : null,
               onTap: () async {
-                await ref
-                    .read(apiClientProvider)
-                    .patch('/users/me', body: {'language': entry.key});
+                // Same rule as the two profile-edit screens: a preference
+                // save that cannot reach the server must say so. This was a
+                // bare async onTap, so offline the ApiException escaped as an
+                // unhandled zone error — the sheet stayed open, the language
+                // did not change, and nothing at all was said.
+                final messenger = ScaffoldMessenger.of(sheetContext);
+                final navigator = Navigator.of(sheetContext);
+                try {
+                  await ref
+                      .read(apiClientProvider)
+                      .patch('/users/me', body: {'language': entry.key});
+                } catch (e) {
+                  // The sheet has to come DOWN before the message goes up.
+                  // `ScaffoldMessenger.of(sheetContext)` resolves to the ROOT
+                  // messenger (a modal sheet route has none of its own), which
+                  // paints the SnackBar into the settings Scaffold underneath
+                  // — so with the sheet and its barrier still covering the
+                  // bottom of the screen the failure was drawn behind them and
+                  // never seen. `sheetContext.mounted`, not `canPop()`: if the
+                  // user already closed the sheet during the request, popping
+                  // again would take the settings screen with it.
+                  if (sheetContext.mounted) navigator.pop();
+                  messenger.showSnackBar(
+                    SnackBar(content: Text(describeApiError(s, e))),
+                  );
+                  return;
+                }
                 ref.invalidate(userProfileProvider);
-                if (sheetContext.mounted) Navigator.of(sheetContext).pop();
+                if (sheetContext.mounted) navigator.pop();
               },
             ),
         ],

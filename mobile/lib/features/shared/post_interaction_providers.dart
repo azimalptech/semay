@@ -5,6 +5,7 @@ import '../../core/api_client.dart';
 import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
 import '../../core/realtime_client.dart';
+import '../../core/share_links.dart';
 import '../../services/posts_service.dart';
 
 /// Shared by every bookmark icon (post_card.dart, post_detail_screen.dart,
@@ -27,16 +28,44 @@ Future<void> toggleSaveAndNotify(
 
 /// Shared by every "share" icon — see PostsService.shareAndRecord; only
 /// shows the confirmation when the OS share sheet actually completed.
+/// [context] must be the tapped control's own (wrap the icon in a Builder):
+/// its render box anchors the sheet, which iPad refuses to show unanchored.
 Future<void> shareAndNotify(
   BuildContext context,
   WidgetRef ref,
-  String postId,
-) async {
-  final shared = await ref.read(postsServiceProvider).shareAndRecord(postId);
-  if (!shared || !context.mounted) return;
-  ScaffoldMessenger.of(
-    context,
-  ).showSnackBar(SnackBar(content: Text(ref.read(l10nProvider).postShared)));
+  String postId, {
+  required bool isReel,
+  required String storeName,
+  String caption = '',
+}) async {
+  final s = ref.read(l10nProvider);
+  final outcome = await ref.read(postsServiceProvider).shareAndRecord(
+    postId,
+    isReel: isReel,
+    headline: isReel
+        ? s.shareReelHeadline(storeName)
+        : s.sharePostHeadline(storeName),
+    caption: caption,
+    sharePositionOrigin: shareOriginOf(context),
+  );
+  if (!context.mounted) return;
+  showShareOutcome(context, s, outcome);
+}
+
+/// The one place a share outcome becomes UI, so the post/reel icon and the
+/// store icon — the same glyph on adjacent screens — can never disagree about
+/// what a share looks like. A dismissal is deliberate and stays silent; a
+/// sheet that never opened gets a message naming the reason, because
+/// otherwise the button simply appears to do nothing (the iPad no-anchor case
+/// is real — shareOriginOf may legitimately return null).
+void showShareOutcome(BuildContext context, S s, ShareOutcome outcome) {
+  final text = switch (outcome) {
+    ShareOutcome.shared => s.postShared,
+    ShareOutcome.failed => s.shareFailed,
+    ShareOutcome.dismissed => null,
+  };
+  if (text == null) return;
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 }
 
 /// Store name/avatar for a post's header row — live via the `store:{id}`

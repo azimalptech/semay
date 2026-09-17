@@ -44,6 +44,28 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- semay://open/p|r|s/<id> — what the share page's "Open in SeMay" button
+	     uses, and the only way into the app from a link on iOS until the
+	     associated-domains entitlement exists (portal work: see
+	     docs/09_DEPLOYMENT.md §5e; adding the entitlement before the App ID has
+	     the capability breaks signing). FlutterDeepLinkingEnabled makes the
+	     engine hand the URL to Flutter's router as a route — router.dart's
+	     redirect turns it into the linked post/store. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.semay.semay</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>semay</string>
+			</array>
+		</dict>
+	</array>
+	<key>FlutterDeepLinkingEnabled</key>
+	<true/>
 	<!-- Lets a chat push (sent with content-available) wake the app briefly in
 	     the background so firebaseMessagingBackgroundHandler can post the
 	     delivered receipt — the sender's second grey check — before the user

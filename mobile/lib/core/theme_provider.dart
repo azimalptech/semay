@@ -10,9 +10,18 @@ final darkModeProvider = Provider<bool>((ref) {
   return ref.watch(userProfileProvider).value?['darkMode'] as bool? ?? false;
 });
 
-Future<void> setDarkMode(WidgetRef ref, bool value) async {
+/// Returns false when the preference could NOT be saved, so the caller can
+/// say so. It used to be a plain `Future<void>` called from a Switch's
+/// onChanged: offline the ApiException escaped as an unhandled zone error and
+/// the switch simply sprang back with nothing said.
+Future<bool> setDarkMode(WidgetRef ref, bool value) async {
   final session = ref.read(authStateChangesProvider).value;
-  if (session == null) return;
-  await ref.read(apiClientProvider).patch('/users/me', body: {'darkMode': value});
+  if (session == null) return false;
+  try {
+    await ref.read(apiClientProvider).patch('/users/me', body: {'darkMode': value});
+  } catch (_) {
+    return false;
+  }
   ref.invalidate(userProfileProvider);
+  return true;
 }

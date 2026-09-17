@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { MEDIA_DIR } from "../src/media/storage.js";
-import { authHeader, createUserWithToken, type App } from "./helpers.js";
+import { authHeader, cleanupUsers, createUserWithToken, type App } from "./helpers.js";
 
 // No test used to actually FETCH a media file, which let a crash-on-first-request
 // bug in the static mount's setHeaders hook pass both typecheck and the full
@@ -26,6 +26,10 @@ describe("media serving", () => {
   afterAll(async () => {
     await app.close();
     await unlink(path.join(MEDIA_DIR, key)).catch(() => {});
+    // `userIds` was collected and never used: this file leaked one superadmin
+    // fixture on EVERY run, which is what kept globalTeardown's sweep armed
+    // (and load-bearing) run after run.
+    await cleanupUsers(userIds);
   });
 
   it("serves a stored file with hardening headers instead of crashing", async () => {

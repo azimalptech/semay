@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'app_icon.dart';
+import 'share_links.dart';
 import 'shell_tab.dart';
 import 'theme.dart';
 import '../features/auth/name_entry_screen.dart';
@@ -58,6 +59,21 @@ class _RouterRefreshNotifier extends ChangeNotifier {
   }
 }
 
+/// Sees a share link delivered to a RUNNING app before go_router's own
+/// RouteInformationProvider does, so the link can be pushed onto the existing
+/// navigation stack instead of replacing it — see handleWarmLink below.
+/// Returning true from [didPushRouteInformation] stops WidgetsBinding handing
+/// the route to any later observer.
+class _WarmDeepLinkObserver extends WidgetsBindingObserver {
+  _WarmDeepLinkObserver(this.handle);
+
+  final bool Function(Uri uri) handle;
+
+  @override
+  Future<bool> didPushRouteInformation(RouteInformation routeInformation) async =>
+      handle(routeInformation.uri);
+}
+
 // Role-based redirect: unauthenticated -> /auth/phone; authenticated with an
 // incomplete profile (empty users/{uid}.name, set by verifyOtp) -> /auth/name;
 // otherwise -> /home (user) or /admin/home (admin/superadmin).
@@ -74,7 +90,97 @@ final routerProvider = Provider<GoRouter>((ref) {
   // *first* gate, never something to return to once passed.
   var pastInitialAuthResolve = false;
 
-  return GoRouter(
+  // A share link the app was opened with (share_links.dart), parked by
+  // redirect() until the shell root is the current location and then pushed
+  // on top of it — so the linked post/store always has the shell (and a
+  // working back) underneath, on a cold start, a warm one, and a cold start
+  // that first has to go through login. A plain field rather than a
+  // provider: on a cold start redirect() runs inside Router's
+  // didChangeDependencies, where Riverpod forbids provider writes.
+  ShareTarget? pendingDeepLink;
+  late final GoRouter router;
+
+  void dispatchPendingDeepLink() {
+    final target = pendingDeepLink;
+    if (target == null) return;
+    final loc = router.routerDelegate.currentConfiguration.uri.path;
+    if (loc != _userShellRoot && loc != _adminShellRoot) return;
+    pendingDeepLink = null;
+    debugPrint('router: opening deep link $target');
+    router.push(target.route);
+  }
+
+  // Deferred, never inline: this is called from redirect() and from the
+  // delegate's own change notification, and the check has to see the
+  // location the navigation being processed ends on. The redirect chain is
+  // synchronous, so a microtask runs once it has settled.
+  void scheduleDeepLinkDispatch() =>
+      Future<void>.microtask(dispatchPendingDeepLink);
+
+  // A link that arrives while the app is ALREADY RUNNING (Android
+  // onNewIntent, iOS openURL) is handled here and never handed to go_router.
+  //
+  // Not a refinement — a correctness fix. The platform delivers it as a new
+  // route, and Router answers with setNewRoutePath, which REPLACES the whole
+  // configuration: a user reading a chat, or three screens deep in a store,
+  // who taps a SeMay link in WhatsApp had every one of those screens silently
+  // discarded, because the stack was rebuilt from the shell root before the
+  // linked screen was pushed on top. Returning the current location from
+  // redirect() does not help; the replace happens either way. WhatsApp and
+  // Instagram push over your current place and back returns to it, so this
+  // pushes onto the live stack instead.
+  //
+  // Only the WARM case is intercepted. A cold start arrives as the engine's
+  // initial route (not this channel), where there is no stack to preserve and
+  // the parking path in redirect() below is what puts the shell underneath.
+  bool handleWarmLink(Uri uri) {
+    final target = parseIncomingLink(uri);
+    if (target == null) {
+      // A URI the app CLAIMS from the OS but cannot make a target out of —
+      // `/p/` alone, `/p/<id>/extra`, a link with trailing prose
+      // punctuation, a non-UUID id, `semay://open/x/<id>`. The manifest's
+      // pathPrefix and the scheme filter claim a far wider space than
+      // parseIncomingLink accepts (see isOwnShareUri), and once App Links
+      // verify Android delivers all of it here with no chooser.
+      //
+      // Swallow it. Falling through to go_router is what reset the stack —
+      // Router answers with setNewRoutePath, REPLACES the whole
+      // configuration, matches nothing, and leaves the user on the default
+      // "Page Not Found" screen with an EMPTY stack: no AppBar, no back, no
+      // shell. A mangled link must cost nothing, not three screens.
+      if (isOwnShareUri(uri)) {
+        debugPrint('router: ignoring unparseable SeMay link $uri');
+        return true;
+      }
+      // Genuinely foreign route information still belongs to go_router.
+      return false;
+    }
+    final loc = router.routerDelegate.currentConfiguration.uri.path;
+    // Still on the way in (splash, or the login flow): park it and let the
+    // gates dispatch it once they land on a shell, exactly as a cold start
+    // behind login does.
+    if (loc == _splashRoute || loc.startsWith('/auth')) {
+      pendingDeepLink = target;
+      scheduleDeepLinkDispatch();
+      return true;
+    }
+    debugPrint('router: warm deep link $target onto $loc');
+    router.push(target.route);
+    // Consumed either way: letting it fall through to go_router is what reset
+    // the stack.
+    return true;
+  }
+
+  final deepLinkObserver = _WarmDeepLinkObserver(handleWarmLink);
+  // Added before the Router widget's own RouteInformationProvider registers
+  // itself (that happens in Router.initState, after this provider is first
+  // read), and WidgetsBinding hands a pushed route to observers in order,
+  // stopping at the first that returns true — so this one sees warm links
+  // first. Removed with the provider.
+  WidgetsBinding.instance.addObserver(deepLinkObserver);
+  ref.onDispose(() => WidgetsBinding.instance.removeObserver(deepLinkObserver));
+
+  router = GoRouter(
     // Set once here, not created fresh per GoRouter instance — the same
     // "global key wired up before runApp, used by code with no
     // BuildContext of its own" pattern rootNavigatorKey's own doc comment
@@ -85,6 +191,24 @@ final routerProvider = Provider<GoRouter>((ref) {
     observers: [shellRouteObserver],
     initialLocation: _splashRoute,
     refreshListenable: refreshNotifier,
+    // An unmatched location must never be a resting place. Without this,
+    // go_router's built-in "Page Not Found" screen is the whole app: an
+    // empty stack, no AppBar, no back, no shell — on Android the only way
+    // out is to kill the app. Reachable on a COLD start from any URL the
+    // AndroidManifest claims but share_links.dart cannot parse
+    // (https://semaycollection.com/p/ and friends — see handleWarmLink,
+    // which covers the warm half); redirect() returns null for those, so the
+    // router would simply come to rest on the unmatched path.
+    //
+    // Land on the shell instead, exactly as a plain launch does. Same
+    // `role.value != AppRole.user` test redirect() uses, for the same reason
+    // it reads the role once: the two must not disagree about "admin".
+    onException: (context, state, goRouter) {
+      final isAdminRole = ref.read(appRoleProvider).value != AppRole.user;
+      final home = isAdminRole ? _adminShellRoot : _userShellRoot;
+      debugPrint('router: no route for ${state.uri} — falling back to $home');
+      goRouter.go(home);
+    },
     redirect: (context, state) {
       final authState = ref.read(authStateChangesProvider);
       final role = ref.read(appRoleProvider);
@@ -96,6 +220,33 @@ final routerProvider = Provider<GoRouter>((ref) {
         'uri=${state.uri} fullPath=${state.fullPath}',
       );
 
+      // Read once and used by BOTH the deep-link shell choice below and the
+      // role gate further down. They used to test the role two different ways
+      // (`== admin || == superadmin` here, `!= user` there), which disagree
+      // for AppRole.unauthenticated and for a null value after a failed role
+      // fetch — only the synchronous redirect chain hid the disagreement.
+      final isAdminRole = role.value != AppRole.user;
+
+      // https://semaycollection.com/p/<id>, semay://open/s/<id>, … — the OS
+      // handed us a share link. On a COLD start it arrives here as the initial
+      // route (a warm one is intercepted before go_router sees it — see
+      // handleWarmLink). Never a resting location: park it (see
+      // pendingDeepLink) and send the router through its normal gates; the
+      // linked screen is pushed once those land on the shell.
+      final deepLink = parseIncomingLink(state.uri);
+      if (deepLink != null) {
+        pendingDeepLink = deepLink;
+        scheduleDeepLinkDispatch();
+      }
+      // Where a link's own path goes wherever the gates below would otherwise
+      // stay put — plain navigation keeps the `null` those branches return.
+      String? stay() {
+        if (deepLink == null) return null;
+        if (!authState.hasValue && !pastInitialAuthResolve) return _splashRoute;
+        if (authState.hasValue && authState.value == null) return '/auth/phone';
+        return isAdminRole ? _adminShellRoot : _userShellRoot;
+      }
+
       // Firebase Auth hasn't finished checking for a persisted session yet
       // (authStateChangesProvider's first, async emission) — stay on the
       // splash screen instead of flashing the login screen for an instant
@@ -103,7 +254,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       // Only applies before the very first successful resolve — see
       // pastInitialAuthResolve's comment above.
       if (!authState.hasValue) {
-        if (pastInitialAuthResolve) return null;
+        if (pastInitialAuthResolve) return stay();
         return loc == _splashRoute ? null : _splashRoute;
       }
       pastInitialAuthResolve = true;
@@ -130,7 +281,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       // /auth/name before the real Firestore snapshot arrives and corrects
       // it. isLoading stays true through that whole window, so this holds
       // off until the data is actually settled.
-      if (role.isLoading || profile.isLoading) return null;
+      if (role.isLoading || profile.isLoading) return stay();
 
       // A FAILED profile fetch is not the same as "this user has no name".
       // When /users/me errors (API unreachable, tunnel down, token rejected),
@@ -138,12 +289,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       // name.isEmpty test below read empty and bounced people who already had
       // a name onto /auth/name on every launch. Only act on a profile that
       // genuinely loaded; on error stay put so the screen's own retry can run.
-      if (profile.hasError || !profile.hasValue) return null;
+      if (profile.hasError || !profile.hasValue) return stay();
 
       final name = profile.value?['name'] as String? ?? '';
       if (name.isEmpty) return loc == '/auth/name' ? null : '/auth/name';
-
-      final isAdminRole = role.value != AppRole.user;
 
       if (isAuthRoute || onSplash) {
         return isAdminRole ? _adminShellRoot : _userShellRoot;
@@ -156,7 +305,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (isAdminRole && loc == _userShellRoot) return _adminShellRoot;
       if (!isAdminRole && loc == _adminShellRoot) return _userShellRoot;
 
-      return null;
+      return stay();
     },
     routes: [
       GoRoute(
@@ -220,6 +369,26 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/store/:storeId',
         builder: (context, state) =>
             StoreProfileScreen(storeId: state.pathParameters['storeId']!),
+      ),
+      // Share-link paths (share_links.dart: /p image or carousel post, /r
+      // reel, /s store). Never a resting location — redirect parks the
+      // target and pushes /post or /store over the shell — but go_router has
+      // to match the incoming URI to run redirect with it at all, and these
+      // are the fallback should one ever slip through.
+      GoRoute(
+        path: '/p/:id',
+        builder: (context, state) =>
+            PostDetailScreen(postId: state.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: '/r/:id',
+        builder: (context, state) =>
+            PostDetailScreen(postId: state.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: '/s/:id',
+        builder: (context, state) =>
+            StoreProfileScreen(storeId: state.pathParameters['id']!),
       ),
       GoRoute(
         path: '/home/story/:storeId',
@@ -305,6 +474,13 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
     ],
   );
+  // Every navigation the router settles is a chance for a parked share link
+  // to find the shell underneath it (splash -> shell, /auth/* -> shell).
+  router.routerDelegate.addListener(scheduleDeepLinkDispatch);
+  ref.onDispose(
+    () => router.routerDelegate.removeListener(scheduleDeepLinkDispatch),
+  );
+  return router;
 });
 
 class _TabIcon {
@@ -457,7 +633,7 @@ class _SwipeableTabShellState extends State<_SwipeableTabShell> {
       ),
       bottomNavigationBar: onReels
           ? null
-          : _TabNavBar(
+          : TabNavBar(
               controller: _pageController,
               settledIndex: _settledIndex,
               onTap: _goToPage,
@@ -470,9 +646,13 @@ class _SwipeableTabShellState extends State<_SwipeableTabShell> {
 /// icon can cross-fade between its outline and filled variant continuously
 /// as `controller`'s page value moves — driven by the live drag position,
 /// the same "alpha fading tied to swipe percentage" Instagram itself uses,
-/// not just a binary selected/unselected swap on settle.
-class _TabNavBar extends ConsumerWidget {
-  const _TabNavBar({
+/// not just a binary selected/unselected swap on settle. The Chat item
+/// carries the unread badge (totalUnreadChatCountProvider, role-aware).
+/// Public only so test/chat/chat_tab_badge_test.dart can mount it on its
+/// own; the shell above is its one caller.
+class TabNavBar extends ConsumerWidget {
+  const TabNavBar({
+    super.key,
     required this.controller,
     required this.settledIndex,
     required this.onTap,

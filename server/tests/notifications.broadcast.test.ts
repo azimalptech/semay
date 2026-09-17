@@ -41,6 +41,7 @@ describe("POST /notifications/broadcast — push outcome is visible", () => {
   let superadminId: string;
   let plainToken: string;
   let recipientId: string;
+  let deletedId: string;
   const recipientToken = `test-broadcast-token-${Math.random().toString(36).slice(2)}`;
   const titles: string[] = [];
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -68,12 +69,18 @@ describe("POST /notifications/broadcast — push outcome is visible", () => {
     await prisma.userFcmToken.create({
       data: { userId: recipientId, token: recipientToken, platform: "android" },
     });
+    // An account that went through DELETE /users/me: the row survives (orders
+    // keep a valid FK) with deletedAt stamped — see users/service.ts
+    // deleteAccount. The fan-out must not write to it.
+    const gone = await createUserWithToken("user");
+    deletedId = gone.userId;
+    await prisma.user.update({ where: { id: deletedId }, data: { deletedAt: new Date() } });
   });
 
   afterAll(async () => {
     // A broadcast writes a row for EVERY user, not just the fixtures.
     await prisma.userNotification.deleteMany({ where: { title: { in: titles } } });
-    await cleanupUsers([superadminId, recipientId]); // cascades the token row
+    await cleanupUsers([superadminId, recipientId, deletedId]); // cascades the token row
     await app.close();
   });
 
@@ -136,9 +143,10 @@ describe("POST /notifications/broadcast — push outcome is visible", () => {
     expect(msg).toBeDefined();
     expect(msg!.notification).toEqual({ title, body: "broadcast test body" });
     expect(msg!.data).toEqual({ type: "broadcast" });
-    // The channel MainActivity.kt creates at IMPORTANCE_HIGH; without it FCM
-    // would drop the notification on the manifest default and it could not be
-    // muted separately from chat.
+    // The channel SemayApplication.kt creates at IMPORTANCE_HIGH; without it
+    // FCM would drop the notification on the manifest default (which is the
+    // CHAT channel, so it would also play the message sound) and it could not
+    // be muted separately from chat.
     expect(msg!.android?.priority).toBe("high");
     expect(msg!.android?.notification).toMatchObject({
       channelId: "announcements",
@@ -147,7 +155,35 @@ describe("POST /notifications/broadcast — push outcome is visible", () => {
     });
     expect(msg!.apns?.payload?.aps).toMatchObject({ sound: "default", threadId: "broadcast" });
     expect(msg!.apns?.payload?.aps?.contentAvailable).toBeUndefined();
+    // Nothing on the push path may warn on a broadcast that worked — not the
+    // "push skipped: FCM disabled" line this case exists to rule out, and not
+    // anything a later change adds either. A narrower `not.toHaveBeenCalledWith
+    // (…, "push skipped: FCM disabled")` was tried first, because the fan-out
+    // used to WARN about recipients deleted mid flight and the suite's parallel
+    // files delete fixture accounts constantly — but that let every future
+    // warning through unnoticed. The fan-out's diagnostic is an `info` now
+    // (notifications/service.ts: it reports a designed outcome, not a fault),
+    // so the strict assertion is both correct and stable.
     expect(log.warn).not.toHaveBeenCalled();
     fcm.enabled = false;
+  });
+
+  it("skips accounts that have been deleted", async () => {
+    fcm.enabled = false;
+    const title = `deleted-${recipientToken}`;
+    const res = await broadcast(superadminToken, title);
+    expect(res.statusCode).toBe(200);
+
+    // The live fixture got it...
+    expect(
+      await prisma.userNotification.count({ where: { userId: recipientId, title } })
+    ).toBe(1);
+    // ...and the scrubbed account got nothing. DELETE /users/me deletes that
+    // user's inbox rows; an unfiltered fan-out quietly wrote a fresh one per
+    // broadcast, forever, against an account that was told its data was gone —
+    // and counted it in the `sent` the superadmin panel shows.
+    expect(
+      await prisma.userNotification.count({ where: { userId: deletedId, title } })
+    ).toBe(0);
   });
 });

@@ -36,9 +36,14 @@ class _PinchZoomImageState extends State<PinchZoomImage>
   final GlobalKey _boxKey = GlobalKey();
   final Map<int, Offset> _pointers = {};
   OverlayEntry? _overlayEntry;
-  late final AnimationController _resetController = AnimationController(
-    vsync: this,
-  )..addListener(_onResetTick);
+  // initState, not a lazy `late final`: nothing in build() touches this
+  // controller — only a pinch does — so for every image that is never
+  // pinched (i.e. nearly all of them) the first touch of the field was
+  // dispose() itself, which then CONSTRUCTED an AnimationController on an
+  // already-defunct element. createTicker's TickerMode lookup throws there
+  // ("Looking up a deactivated widget's ancestor is unsafe"), taking the
+  // overlay teardown below down with it.
+  late final AnimationController _resetController;
 
   Rect? _originalRect;
   double _initialSpan = 1;
@@ -47,6 +52,13 @@ class _PinchZoomImageState extends State<PinchZoomImage>
   Offset _panOffset = Offset.zero;
   double? _resetFromScale;
   Offset? _resetFromOffset;
+
+  @override
+  void initState() {
+    super.initState();
+    _resetController = AnimationController(vsync: this)
+      ..addListener(_onResetTick);
+  }
 
   @override
   void dispose() {

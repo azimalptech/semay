@@ -70,6 +70,20 @@ const schema = z.object({
   // process never reaches WebSocket subscribers on another, so users would
   // silently miss realtime updates. See realtime/bus.ts.
   REDIS_URL: z.string().default(""),
+  // Treat an unreachable Redis as an outage rather than a degradation: after
+  // 30 s without the bus, this process stops serving REALTIME — the gateway
+  // refuses new subscribes and closes the sockets it is holding, and
+  // /health/realtime answers 503 so the WebSocket upstream stops routing here.
+  // /health/ready deliberately keeps answering 200 (everything that is not
+  // realtime still works, and every box sharing one Redis crosses this
+  // threshold together). Implied for cluster workers. Set it when several
+  // single-process machines share one Redis — each would otherwise keep
+  // serving with realtime events confined to itself, and nothing upstream
+  // would notice. See realtime/bus.ts isBusRequired.
+  REDIS_REQUIRED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
 
   // Worker processes in cluster mode (npm run start:cluster). 0 = one per CPU
   // core. Ignored by the single-process entry point.
@@ -80,6 +94,67 @@ const schema = z.object({
   // serves /media itself, so this is normally <api-origin>/media).
   MEDIA_DIR: z.string().default("./media"),
   MEDIA_PUBLIC_BASE_URL: z.string().default("http://localhost:8080/media"),
+
+  // ── Public share pages (share/routes.ts) ────────────────────────────────
+  // The only unauthenticated HTML the API serves: GET /p/:id, /r/:id, /s/:id
+  // plus the two /.well-known files. See docs/08_OPERATIONS.md §6f.
+  //
+  // "generic" is the only mode: the page renders the SAME copy for every id
+  // and performs NO database read at all. That is a security property, not a
+  // shortcut — a page that rendered the post would turn every share link into
+  // an existence oracle for post/store ids and put an unauthenticated,
+  // uncacheable query in front of the DB. Kept as an enum so a future
+  // "content" mode is an explicit, reviewed config change rather than a diff
+  // nobody notices.
+  SHARE_PAGE_MODE: z.enum(["generic"]).default("generic"),
+  // Origin the share links are built from — used for the canonical <link>,
+  // og:url and the Android intent fallback URL. Empty = derive it from
+  // MEDIA_PUBLIC_BASE_URL's origin, which is already the API's public origin,
+  // so a correct deployment needs no extra variable. ORIGIN ONLY: any path
+  // written here is stripped (share/routes.ts sharePublicBaseUrl takes
+  // .origin), because MEDIA_PUBLIC_BASE_URL — the value this one gets copied
+  // from — ends in /media, and that suffix would corrupt every shared link.
+  SHARE_PUBLIC_BASE_URL: z.string().default(""),
+  // Per-IP cap for the share surface specifically. Much tighter than the
+  // global 3000/min: these five routes are the only ones a stranger with a
+  // link can reach, they are pure HTML/JSON with no auth behind them, and a
+  // real recipient loads one page once. Generous enough for a link that goes
+  // viral behind one carrier NAT.
+  RATE_LIMIT_SHARE_MAX_PER_MIN: z.coerce.number().int().positive().default(120),
+  // Where a recipient WITHOUT the app is sent — the store buttons on the page
+  // AND, for SHARE_PLAY_URL, the Android intent's S.browser_fallback_url (so
+  // the primary "Open in SeMay" button lands on Play when the app is
+  // missing; share/html.ts openAppHref).
+  //
+  // BOTH default to empty, and empty renders a "coming soon" badge instead of
+  // a link. Deliberately symmetric: whether either listing is actually
+  // published is an owner fact, not something to assume in a zod default. A
+  // hard-coded Play URL here would have every unconfigured deployment link to
+  // a listing nobody has confirmed exists — a Play 404 is strictly worse for
+  // the recipient than an honest "Ýakynda". Set the real values in
+  // server/.env once the listings are live (docs/09_DEPLOYMENT.md §5e).
+  SHARE_PLAY_URL: z.string().default(""),
+  SHARE_APPSTORE_URL: z.string().default(""),
+  // Android App Links: the SHA-256 fingerprints of the certificate(s) the
+  // installed APK is signed with, comma-separated (colon-separated uppercase
+  // hex, as keytool prints them). MUST be the Play App Signing certificate,
+  // not the upload key, or `adb shell pm get-app-links` silently reports
+  // "none" forever. Empty serves an empty (valid) assetlinks document — the
+  // routes still answer, verification simply cannot succeed until it is set.
+  SHARE_ANDROID_CERT_SHA256: z.string().default(""),
+  // iOS Universal Links: "<TEAMID>.<bundle id>", e.g. ABCDE12345.com.semay.semay.
+  // Empty makes /.well-known/apple-app-site-association answer 404 rather than
+  // an empty document — correct today, because the app deliberately ships
+  // WITHOUT the associated-domains entitlement (Apple Developer portal work;
+  // docs/09_DEPLOYMENT.md §5e) and the share page's own "Open in SeMay" button
+  // is what opens the app meanwhile. The 404 matters: Apple serves this file
+  // through its own CDN and caches it, so publishing an empty one would have
+  // the CDN answering "delegates nothing" for days after the entitlement
+  // finally lands. See share/routes.ts.
+  SHARE_IOS_APP_ID: z.string().default(""),
+  // The Android package the intent:// button targets. Only ever changes if
+  // the applicationId does.
+  SHARE_ANDROID_PACKAGE: z.string().default("com.semay.semay"),
 
   // Request/error logs are written as newline-delimited JSON to
   // LOG_DIR/app.<n>.log, rotated daily and pruned to LOG_RETENTION_DAYS files.
@@ -146,6 +221,41 @@ const schema = z.object({
       path: ["MEDIA_PUBLIC_BASE_URL"],
       message: "must be an absolute URL, e.g. https://example.com/media",
     });
+  }
+
+  // SHARE_PUBLIC_BASE_URL is what every share page advertises as its own
+  // canonical URL and what the Android intent:// button falls back to. A
+  // malformed value there would ship broken links to every recipient, and the
+  // symptom (a link preview that resolves to nothing) appears on someone
+  // else's phone, so refuse to boot on it rather than discover it in the wild.
+  if (cfg.SHARE_PUBLIC_BASE_URL !== "") {
+    try {
+      const u = new URL(cfg.SHARE_PUBLIC_BASE_URL);
+      if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("scheme");
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SHARE_PUBLIC_BASE_URL"],
+        message: "must be an absolute http(s) origin, e.g. https://semaycollection.com (or empty to derive it from MEDIA_PUBLIC_BASE_URL)",
+      });
+    }
+  }
+  // Same for the two store links: they are rendered as <a href>, so anything
+  // that is not an absolute http(s) URL is either a dead button or — with a
+  // javascript: value — an injected script on a page whose whole point is
+  // that it runs none. Empty is valid and means "coming soon".
+  for (const key of ["SHARE_PLAY_URL", "SHARE_APPSTORE_URL"] as const) {
+    if (cfg[key] === "") continue;
+    try {
+      const u = new URL(cfg[key]);
+      if (u.protocol !== "https:" && u.protocol !== "http:") throw new Error("scheme");
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} must be an absolute http(s) URL, or empty to render a "coming soon" badge`,
+      });
+    }
   }
 
   // In production (OTP_DEV_MODE=false) real SMS must be deliverable — otherwise

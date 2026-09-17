@@ -346,13 +346,23 @@ class _PostCardState extends ConsumerState<PostCard> {
                 ),
                 const SizedBox(width: 16),
                 // 426:6054 — share is the last item, and carries no count in
-                // the design (unlike like/send/view).
-                InkWell(
-                  onTap: () => shareAndNotify(context, ref, postId),
-                  child: AppIcon(
-                    'arrow_share',
-                    size: 24,
-                    color: AppColors.textPrimary,
+                // the design (unlike like/send/view). Builder: the sheet is
+                // anchored to this icon's own box (see shareAndNotify).
+                Builder(
+                  builder: (shareContext) => InkWell(
+                    onTap: () => shareAndNotify(
+                      shareContext,
+                      ref,
+                      postId,
+                      isReel: type == 'reel',
+                      storeName: storeName,
+                      caption: caption,
+                    ),
+                    child: AppIcon(
+                      'arrow_share',
+                      size: 24,
+                      color: AppColors.textPrimary,
+                    ),
                   ),
                 ),
                 // Not in the Figma card, which only draws the customer state.

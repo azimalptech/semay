@@ -38,17 +38,18 @@ class StoriesService {
     await _api.delete('/stories/$storyId');
   }
 
-  /// Marks a store's stories watched-to-the-end for the signed-in user — the
-  /// story bar greys that ring out. Called on the last story (see
-  /// story_viewer_screen); recordStoryView also stamps this for non-owners,
-  /// this covers the owner-viewing-own-store case too.
+  /// Marks a store's stories watched-to-the-end for the signed-in user — both
+  /// story rings (the home bar and the store profile header) grey out. Called
+  /// on the LAST story (see story_viewer_screen), and it is the ONLY thing
+  /// that sets `seen`: recordStoryView below deliberately does not, or
+  /// watching 1 of 3 slides would mute a store with two stories unwatched.
   Future<void> markStoreSeen(String storeId) async {
     await _api.post('/stores/$storeId/story-seen');
   }
 
-  /// Records a per-story view; the server also stamps user_story_seen for that
-  /// store in the same call (replaces the old separate markStoreSeen +
-  /// recordStoryView writes — see server recordStoryView).
+  /// Records a per-story view (the owner's "seen by N"). Fired per slide, so
+  /// it must NOT imply the store has been watched through — see markStoreSeen
+  /// above and server/src/stories/service.ts recordStoryView.
   Future<void> recordStoryView(String storyId) async {
     await _api.post('/stories/$storyId/view');
   }

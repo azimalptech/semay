@@ -15,9 +15,11 @@ import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
 import '../../core/outbox.dart';
 import '../../core/realtime_client.dart';
+import '../../core/shell_tab.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/chat_service.dart';
+import '../../services/notification_service.dart';
 import '../../services/quick_replies_service.dart';
 import '../shared/post_interaction_providers.dart';
 import '../store_profile/store_profile_providers.dart';
@@ -39,14 +41,35 @@ class ChatThreadScreen extends ConsumerStatefulWidget {
 }
 
 class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, RouteAware {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   bool _hasText = false;
   bool _isAdminHere = false;
+  // True while a page route sits on top of this thread — the store profile, a
+  // shared post, the attachment viewer, or another chat opened from a
+  // notification tap. "On screen" in the suppression rule means visible, not
+  // merely mounted, so a message arriving while the user is on one of those
+  // has to ring like any other. Popups (bottom sheets, dialogs) are not page
+  // routes and deliberately do not count: the thread is still what the user
+  // is looking at behind them.
+  bool _covered = false;
+  // False while the OS has the app off screen (see
+  // didChangeAppLifecycleState).
+  bool _resumed = true;
   DateTime _lastTypingWrite = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _staleness;
   bool _isAttaching = false;
+  // Held, not re-read in dispose(). `ref` is unusable once the element is
+  // defunct, and Flutter's StatefulElement.unmount() marks it defunct BEFORE
+  // calling State.dispose() — so `ref.read(chatServiceProvider)` there threw
+  // a StateError (a real throw in flutter_riverpod, not an assert), which
+  // aborted the rest of dispose: activeChatId was never cleared (so pushes
+  // for this chat stayed suppressed after leaving it) and the 1-second
+  // staleness Timer, the text controller and the scroll controller were all
+  // leaked, one set per thread opened. chatServiceProvider is a plain
+  // Provider, so the instance captured in initState is the same one.
+  late final ChatService _chatService;
   // Id of the newest message last seen, to notice a NEW newest one. The list
   // is reversed (offset 0 = newest), so a thread opens at the bottom by
   // itself and an incoming message shows without scrolling when the user is
@@ -55,6 +78,8 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
   // Set by swiping a bubble (see _SwipeToReply's onReply); shown as a
   // preview strip above the composer, cleared on send/cancel.
   Map<String, String?>? _replyingTo;
+  // One read receipt at a time — see _syncReadStatus / _markThreadRead.
+  bool _readInFlight = false;
 
   void _scrollToNewest() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -86,7 +111,9 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     // Suppresses the in-app banner for messages from THIS chat while it is on
     // screen (the push itself still arrives; the server no longer skips it —
     // see chat_service.dart's setActiveChat and that function's comment).
-    ref.read(chatServiceProvider).setActiveChat(widget.chatId);
+    _chatService = ref.read(chatServiceProvider);
+    // Also clears this chat's shade entry and the launcher count it carried.
+    _claimActiveChat();
     _controller.addListener(_onTextChanged);
     // Re-evaluates typing-indicator freshness so it disappears when the other
     // side goes quiet without another snapshot arriving.
@@ -95,21 +122,60 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     });
   }
 
+  // The flag says "this thread is what the user is looking at", which is true
+  // only while this screen is BOTH uncovered and in a resumed app. Both
+  // conditions move independently (a route pushed over the thread, the app
+  // backgrounded), so every transition runs through here.
+  void _claimActiveChat() {
+    if (_covered || !_resumed) {
+      // Only ours to give up: thread B stacked over this one owns the flag
+      // until it is popped (and its own didPopNext hands it back).
+      if (locallyActiveChatId == widget.chatId) _chatService.setActiveChat(null);
+      return;
+    }
+    _chatService.setActiveChat(widget.chatId);
+    // The shade entry for this chat (and the launcher count it carried) is
+    // about what the user is now looking at.
+    dismissChatNotification(widget.chatId);
+  }
+
+  // Covered by / uncovered from another PAGE route — the store profile
+  // (context.push('/store/...')), a shared post, the full-screen attachment
+  // viewer, or another chat opened from a notification tap. Delivered by
+  // shell_tab.dart's router-wide observer, which also relays a push that
+  // happened over a popup. Without this, "on screen" meant "still mounted":
+  // the thread stayed silent while the user was on a screen pushed from it,
+  // and — the worse half — popping chat B off chat A used to leave the flag
+  // at null, so every later message for the chat on screen rang.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) shellRouteObserver.subscribe(this, route);
+  }
+
+  @override
+  void didPushNext() {
+    _covered = true;
+    _claimActiveChat();
+  }
+
+  @override
+  void didPopNext() {
+    _covered = false;
+    _claimActiveChat();
+  }
+
   // A backgrounded app still has this screen mounted in Flutter's tree, but
   // the user obviously isn't looking at it — clear activeChatId so a message
   // arriving then isn't treated as "already on screen", and restore it on
-  // return (as long as this screen is still the one on top; if they
-  // navigated away first, dispose() has already cleared it and this would
-  // just needlessly reset it back).
+  // return (unless another route has since been pushed over this one, or
+  // another thread now owns the flag).
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
-    final service = ref.read(chatServiceProvider);
-    if (state == AppLifecycleState.resumed) {
-      service.setActiveChat(widget.chatId);
-    } else {
-      service.setActiveChat(null);
-    }
+    _resumed = state == AppLifecycleState.resumed;
+    _claimActiveChat();
   }
 
   void _onTextChanged() {
@@ -128,7 +194,12 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    ref.read(chatServiceProvider).setActiveChat(null);
+    shellRouteObserver.unsubscribe(this);
+    // Only if it is still OUR claim. A thread stacked over this one is
+    // disposed at the END of its pop animation, long after the pop handed the
+    // flag back here (didPopNext) — an unconditional clear there is what left
+    // the visible thread marked as "not on screen".
+    if (locallyActiveChatId == widget.chatId) _chatService.setActiveChat(null);
     _staleness?.cancel();
     _controller.dispose();
     _scrollController.removeListener(_onScroll);
@@ -157,9 +228,36 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     // below lands, their messages carry readAt and myUnread is 0, so the next
     // build returns here early.
     if (!hasUnreadFromThem && myUnread == 0) return;
-    // One /receipts call marks their messages read AND clears my unread badge
-    // (server markReceipts does both), so a single POST replaces the old two.
-    ref.read(chatServiceProvider).markThreadRead(widget.chatId, asAdmin: isAdmin);
+    // One in flight at a time. The gate above stays true until the server's
+    // answer comes back and republishes the thread, and several builds happen
+    // inside that window (the REST seed, the socket snapshot, the chat-doc
+    // upsert) — so opening one thread fired three or four identical POSTs,
+    // each a full prisma.$transaction with an updateMany on the server. The
+    // extras were no-ops there, but at the 100k-DAU target in docs/08 §2 a
+    // 3-4x write amplification on a per-thread-open endpoint is not free.
+    //
+    // No dirty flag is needed, and adding one re-introduced a redundant POST:
+    // a build during the window is not evidence of anything new. The answer
+    // itself causes the next build (the receipts roll-up and the chat-document
+    // upsert the server publishes), and this gate is re-evaluated there — so a
+    // message that landed mid-flight and really is still unread is marked one
+    // round trip later, and one that is not costs nothing.
+    if (_readInFlight) return;
+    unawaited(_markThreadRead(isAdmin));
+  }
+
+  /// One /receipts call marks their messages read AND clears my unread badge
+  /// (server markReceipts does both), so a single POST replaces the old two.
+  Future<void> _markThreadRead(bool isAdmin) async {
+    _readInFlight = true;
+    try {
+      await ref.read(chatServiceProvider).markThreadRead(widget.chatId, asAdmin: isAdmin);
+    } catch (_) {
+      // Best-effort, as it always was: the next emission re-evaluates the gate
+      // above and tries again, and the thread is re-read on the next open.
+    } finally {
+      _readInFlight = false;
+    }
   }
 
   void _send() {
@@ -947,15 +1045,29 @@ class _SwipeToReplyState extends State<_SwipeToReply>
   static const _maxDrag = 64.0;
   static const _replyThreshold = 48.0;
 
-  late final AnimationController _snapBack =
-      AnimationController(
-        vsync: this,
-        duration: const Duration(milliseconds: 200),
-      )..addListener(() {
-        setState(() => _dragExtent = _snapBackTween.evaluate(_snapBack));
-      });
+  // Built in initState, NOT as a `late final` initializer. Lazily, the first
+  // touch of the field is whatever runs first — and for the overwhelming
+  // majority of bubbles (every one that is scrolled out of view or closed
+  // without ever being swiped) that first touch is `dispose()` itself. So the
+  // controller got CONSTRUCTED during dispose, and createTicker's TickerMode
+  // lookup ran against an element that is already deactivated: "Looking up a
+  // deactivated widget's ancestor is unsafe", thrown out of dispose while the
+  // thread's list was being torn down.
+  late final AnimationController _snapBack;
   Tween<double> _snapBackTween = Tween<double>(begin: 0, end: 0);
   double _dragExtent = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _snapBack =
+        AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 200),
+        )..addListener(() {
+          setState(() => _dragExtent = _snapBackTween.evaluate(_snapBack));
+        });
+  }
 
   @override
   void dispose() {
@@ -1234,26 +1346,12 @@ class _MessageBubble extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (isMine) ...[
-                if (isFailed)
-                  Icon(Icons.error_outline, size: 16, color: AppColors.error)
-                else if (isPending)
-                  // Clock = accepted locally, not yet by the server.
-                  Icon(Icons.schedule, size: 14, color: AppColors.textSecondary)
-                else
-                  AppIcon(
-                    // Single check = sent only; double gray = delivered to
-                    // their device; double blue = they've opened the thread
-                    // and read it. See chat_service.dart's
-                    // markDelivered/markMessagesRead for who sets these and
-                    // when.
-                    readAt != null || deliveredAt != null
-                        ? 'check_double'
-                        : 'check',
-                    size: 16,
-                    color: readAt != null
-                        ? AppColors.brand
-                        : AppColors.textSecondary,
-                  ),
+                MessageStatusTicks(
+                  deliveredAt: deliveredAt,
+                  readAt: readAt,
+                  isPending: isPending,
+                  isFailed: isFailed,
+                ),
                 const SizedBox(width: 2),
               ],
               Text(_formatTime(timestamp), style: AppTypography.caption),
@@ -1298,6 +1396,47 @@ class _MessageBubble extends StatelessWidget {
     final hour = timestamp.hour.toString().padLeft(2, '0');
     final minute = timestamp.minute.toString().padLeft(2, '0');
     return '$hour:$minute';
+  }
+}
+
+/// The status mark under one of MY bubbles — the three states a sender can
+/// tell apart at a glance, plus the outbox's two. Clock = accepted locally,
+/// not yet by the server; red = the outbox gave up (tap retries); single
+/// grey check = sent, the server has it; double grey = delivered, the
+/// recipient's device has it (their chat list or push handler stamped it —
+/// chat_service.dart markDelivered); double blue = read, they opened the
+/// thread. Nothing is drawn on an incoming bubble. Stamps reach the list as
+/// `receipts` roll-ups on the thread channel (chat_providers.dart
+/// _applyReceipts), which republish it, so the mark under an older message
+/// changes the moment its receipt lands — not on the next open.
+class MessageStatusTicks extends StatelessWidget {
+  const MessageStatusTicks({
+    super.key,
+    required this.deliveredAt,
+    required this.readAt,
+    this.isPending = false,
+    this.isFailed = false,
+  });
+
+  final DateTime? deliveredAt;
+  final DateTime? readAt;
+  final bool isPending;
+  final bool isFailed;
+
+  @override
+  Widget build(BuildContext context) {
+    if (isFailed) {
+      return Icon(Icons.error_outline, size: 16, color: AppColors.error);
+    }
+    if (isPending) {
+      return Icon(Icons.schedule, size: 14, color: AppColors.textSecondary);
+    }
+    final read = readAt != null;
+    return AppIcon(
+      read || deliveredAt != null ? 'check_double' : 'check',
+      size: 16,
+      color: read ? AppColors.readTick : AppColors.textSecondary,
+    );
   }
 }
 

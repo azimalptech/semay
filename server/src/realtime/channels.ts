@@ -80,6 +80,22 @@ const channelHandlers: ChannelHandler[] = [
       ctx.role === "superadmin" || (ctx.role === "admin" && ctx.storeIds.includes(m[1]!)),
     snapshot: (m) => listStoreChats(m[1]!),
   },
+  // The store row itself — what PATCH /stores/:id publishes (stores/routes.ts)
+  // so an open store profile or chat header shows a rename/new avatar live
+  // instead of only for the admin who made the edit. MUST stay after
+  // "store:{id}:chats": the bare pattern would otherwise never let that one
+  // be reached... it wouldn't actually match ":chats" (the class excludes
+  // ":"), but the ordering rule for this list is specificity, and keeping it
+  // here means a later ":something" channel cannot be silently swallowed.
+  // Public read, exactly like post:{id}: GET /stores/:id already returns this
+  // whole row to any authenticated user, and the snapshot is shaped
+  // identically to the publish so storeDocProvider's `event.data as Map`
+  // handles both the same way.
+  {
+    pattern: /^store:([\w-]+)$/,
+    authorize: async () => true,
+    snapshot: (m) => prisma.store.findUnique({ where: { id: m[1] } }),
+  },
 ];
 
 export function findChannelHandler(channel: string): { handler: ChannelHandler; match: RegExpMatchArray } | null {

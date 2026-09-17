@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/api_client.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
 import '../../services/auth_service.dart';
@@ -13,6 +14,20 @@ enum _PhoneStep { display, enterPhone, enterCode }
 const _resendCooldown = Duration(seconds: 60);
 const _countryCode = '+993';
 const _localDigits = 8;
+// Mirrors updateMeSchema's `name: max(120)` (server/src/users/routes.ts) so an
+// over-long name is told what is wrong here instead of sent for a bare 400.
+const _maxNameLength = 120;
+
+/// What to show in the phone-change error slot: `describeOtpError`
+/// (auth_service.dart), shared with the login OTP screen and phone entry.
+///
+/// The local version of this used to pass any non-code OtpException message
+/// straight through, which was the whole defect — three of AuthService's
+/// messages were English prose ("Invalid code", "Please wait 45s…", "That
+/// phone number is already in use") and landed verbatim in the red slot,
+/// directly above Turkmen copy. Every OtpException now carries a CODE and the
+/// mapping lives in one place, so the login screen cannot drift from this one.
+String _phoneErrorText(S s, Object e) => describeOtpError(s, e);
 
 class EditProfileScreen extends ConsumerStatefulWidget {
   const EditProfileScreen({super.key});
@@ -26,6 +41,10 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
   final _newPhoneController = TextEditingController();
   final _codeController = TextEditingController();
   bool _nameInitialized = false;
+  // Set only by the TextField's onChanged — a programmatic
+  // `controller.text = ...` does not fire it — so it means "a human has
+  // edited this field", which is what the seed in build() must not clobber.
+  bool _userTyped = false;
   bool _isSavingName = false;
 
   var _phoneStep = _PhoneStep.display;
@@ -51,21 +70,33 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
   Future<void> _saveName() async {
     final name = _nameController.text.trim();
     if (name.isEmpty || name == _originalName || _isSavingName) return;
+    final s = ref.read(l10nProvider);
+    if (name.length > _maxNameLength) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(s.nameTooLong(_maxNameLength))),
+      );
+      return;
+    }
+    // The root messenger, resolved BEFORE the await — same rule as
+    // edit_store_screen.dart's _save. The screen stays pop-able while the
+    // PATCH is in flight (only Save is disabled: the AppBar back button, the
+    // Android back gesture and the iOS edge swipe all stay live), and on a
+    // dead link the request sits there for the full 15 s connect timeout. Both
+    // SnackBars used to be gated on `mounted`, so an ordinary back tap during
+    // a save turned BOTH outcomes into silence — and a silent failure reads
+    // as "saved", because Settings still shows the old name.
+    final messenger = ScaffoldMessenger.of(context);
     setState(() => _isSavingName = true);
     try {
       await ref.read(authServiceProvider).completeProfile(name);
       _originalName = name;
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(ref.read(l10nProvider).save)));
-      }
+      // Deliberately NOT gated on `mounted`: the save happened, so the user
+      // must be told whether or not this screen is still up.
+      messenger.showSnackBar(SnackBar(content: Text(s.profileSaved)));
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(e.toString())));
-      }
+      // Un-gated for the same reason — backing out mid-save must not turn a
+      // failure into silence.
+      messenger.showSnackBar(SnackBar(content: Text(describeApiError(s, e))));
     } finally {
       if (mounted) setState(() => _isSavingName = false);
     }
@@ -115,7 +146,11 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
         _phoneStep = _PhoneStep.enterCode;
       });
     } catch (e) {
-      if (mounted) setState(() => _phoneError = e.toString());
+      // Not e.toString(): _phoneError is rendered verbatim in the red slot
+      // below, so that put "ApiException(null, REQUEST_FAILED)" on screen.
+      if (mounted) {
+        setState(() => _phoneError = _phoneErrorText(ref.read(l10nProvider), e));
+      }
     } finally {
       if (mounted) setState(() => _isSubmittingPhone = false);
     }
@@ -143,7 +178,9 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
         _resendAvailableAt = e.lockedUntil;
       });
     } catch (e) {
-      if (mounted) setState(() => _phoneError = e.toString());
+      if (mounted) {
+        setState(() => _phoneError = _phoneErrorText(ref.read(l10nProvider), e));
+      }
     } finally {
       if (mounted) setState(() => _isSubmittingPhone = false);
     }
@@ -153,6 +190,13 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
     final code = _codeController.text.trim();
     final phone = _fullNewPhone;
     if (code.isEmpty || _isSubmittingPhone) return;
+    // Both resolved before the await, exactly as in _saveName above: this
+    // screen is pop-able while POST /auth/change-phone is in flight, and a
+    // phone number that HAS been repointed is the last thing that may be
+    // confirmed silently. (`ref.read` on a defunct ConsumerState throws, so
+    // the l10n lookup cannot wait until after the await either.)
+    final messenger = ScaffoldMessenger.of(context);
+    final s = ref.read(l10nProvider);
     setState(() {
       _isSubmittingPhone = true;
       _phoneError = null;
@@ -165,10 +209,10 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
           _codeController.clear();
           _newPhoneController.clear();
         });
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(ref.read(l10nProvider).save)));
       }
+      // Un-gated: the change landed on the server, so it is reported whether
+      // or not the user has already left the screen.
+      messenger.showSnackBar(SnackBar(content: Text(s.profileSaved)));
     } on OtpLockedException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -178,11 +222,15 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
     } on OtpException catch (e) {
       if (!mounted) return;
       setState(() {
-        _phoneError = e.message;
+        // Not e.message raw: a dead network reaches here as
+        // OtpException("REQUEST_FAILED") — see _phoneErrorText.
+        _phoneError = _phoneErrorText(ref.read(l10nProvider), e);
         _attemptsRemaining = e.attemptsRemaining;
       });
     } catch (e) {
-      if (mounted) setState(() => _phoneError = e.toString());
+      if (mounted) {
+        setState(() => _phoneError = _phoneErrorText(ref.read(l10nProvider), e));
+      }
     } finally {
       if (mounted) setState(() => _isSubmittingPhone = false);
     }
@@ -214,9 +262,19 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
     final s = ref.watch(l10nProvider);
     final profile = ref.watch(userProfileProvider).value;
     final currentPhone = profile?['phone'] as String? ?? '';
-    if (!_nameInitialized) {
-      _originalName = profile?['name'] as String? ?? '';
-      _nameController.text = _originalName;
+    // Only once the profile has actually arrived: the first build usually
+    // runs before GET /users/me resolves, and seeding from null here marked
+    // the field initialised while empty — for the rest of the session.
+    //
+    // ...but the field is live and focusable during that whole wait, so the
+    // seed must never overwrite keystrokes: someone who starts typing on a
+    // cold start (or a slow link) had their edit silently replaced by the
+    // server's old name, cursor back at 0, the moment the GET landed.
+    // `_originalName` is still taken, so the Save button's dirty check below
+    // compares what they typed against the real saved name.
+    if (!_nameInitialized && profile != null) {
+      _originalName = profile['name'] as String? ?? '';
+      if (!_userTyped) _nameController.text = _originalName;
       _nameInitialized = true;
     }
 
@@ -256,6 +314,7 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
           const SizedBox(height: 8),
           TextField(
             controller: _nameController,
+            onChanged: (_) => _userTyped = true,
             decoration: const InputDecoration(),
           ),
           const SizedBox(height: 24),

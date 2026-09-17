@@ -93,26 +93,23 @@ export async function markStoreSeen(storeId: string, userId: string): Promise<vo
   });
 }
 
-/** Records the view (create-only, harmless repeat) and stamps
- * user_story_seen for the story's store — replaces users/{uid}/storySeen. */
+/** Records ONE slide's view (create-only, harmless repeat).
+ *
+ * Deliberately does NOT stamp user_story_seen. It used to, and since the
+ * viewer fires this per slide (story_viewer_screen.dart), watching 1 of 3
+ * slides made getStoryRings answer `seen: true` for the whole store — so the
+ * home bar and, now, the store-profile ring went muted with two stories still
+ * unwatched, exactly inverting the product rule ("gradient unseen, muted when
+ * all seen"). "Watched to the end" has its own explicit signal: the viewer
+ * POSTs /stores/:storeId/story-seen on the last slide -> markStoreSeen. */
 export async function recordStoryView(storyId: string, userId: string): Promise<void> {
-  const story = await prisma.story.findUniqueOrThrow({
-    where: { id: storyId },
-    select: { storeId: true },
-  });
+  await prisma.story.findUniqueOrThrow({ where: { id: storyId }, select: { id: true } });
 
-  await prisma.$transaction(async (tx) => {
-    try {
-      await tx.storyView.create({ data: { storyId, userId } });
-    } catch (err) {
-      if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) {
-        throw err;
-      }
+  try {
+    await prisma.storyView.create({ data: { storyId, userId } });
+  } catch (err) {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) {
+      throw err;
     }
-    await tx.userStorySeen.upsert({
-      where: { userId_storeId: { userId, storeId: story.storeId } },
-      create: { userId, storeId: story.storeId },
-      update: { seenAt: new Date() },
-    });
-  });
+  }
 }

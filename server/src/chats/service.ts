@@ -15,14 +15,16 @@ import { withRetry } from "../lib/withRetry.js";
 import {
   isPushEnabled,
   sendBadgeUpdate,
-  sendPushToUsers,
+  sendLocalizedPushToUsers,
   type PushOptions,
 } from "../notifications/push.js";
 
 export type ChatSide = "user" | "admin";
 
-/** Android notification channel for chat pushes — created at IMPORTANCE_HIGH
- * by the app's MainActivity.kt, so the id here and there must match. */
+/** Android notification channel for chat pushes — created at IMPORTANCE_HIGH,
+ * with no sound of its own, by the app's SemayApplication.kt, so the id here
+ * and there must match. Chat messages ring with the phone's DEFAULT
+ * notification sound, like every other push type (docs/08 §3b). */
 const CHAT_PUSH_CHANNEL = "chat_messages";
 
 export class ChatNotFoundError extends Error {
@@ -408,7 +410,11 @@ async function sendChatPush(
     messageId: message.id.toString(),
     senderRole: side,
   };
-  const opts: PushOptions = { channelId: CHAT_PUSH_CHANNEL, tag: chat.id, wakeApp: true };
+  const opts: PushOptions = {
+    channelId: CHAT_PUSH_CHANNEL,
+    tag: chat.id,
+    wakeApp: true,
+  };
   const store = await prisma.store.findUnique({ where: { id: chat.storeId }, select: { name: true } });
 
   if (side === "user") {
@@ -422,13 +428,27 @@ async function sendChatPush(
     // Titled by who wrote it, the way a messenger does — a store admin reading
     // "<their own store>: hello" could not tell which customer it was from.
     const customer = await prisma.user.findUnique({ where: { id: chat.userId }, select: { name: true } });
-    const title = customer?.name || store?.name || "New message";
+    const named = customer?.name || store?.name;
     opts.badgeByUser = await unreadBadgeForAdmins(adminIds);
-    await sendPushToUsers(adminIds, title, preview, data, opts);
+    // The fallback title is the only part of a chat push the server writes, and
+    // the product ships Turkmen/Russian only — so it is taken from each
+    // recipient's users.language (lib/copy.ts), never an English literal. The
+    // body is the message itself, which needs no translation.
+    await sendLocalizedPushToUsers(
+      adminIds,
+      (copy) => ({ title: named || copy.newMessage, body: preview }),
+      data,
+      opts
+    );
   } else {
     if (updatedChat.mutedByUser) return;
     opts.badgeByUser = new Map([[chat.userId, await unreadBadgeForUser(chat.userId)]]);
-    await sendPushToUsers([chat.userId], store?.name ?? "New message", preview, data, opts);
+    await sendLocalizedPushToUsers(
+      [chat.userId],
+      (copy) => ({ title: store?.name || copy.newMessage, body: preview }),
+      data,
+      opts
+    );
   }
 }
 
@@ -549,16 +569,27 @@ export async function markReceipts(
   // sent, to every subscriber of the thread. The client applies the stamp to
   // every message of `senderRole` that lacks it — the same rows the updateMany
   // above touched.
-  publish(`chat:${chat.id}:messages`, {
-    type: "receipts",
-    data: {
-      senderRole: counterpartRole,
-      status,
-      at: now.toISOString(),
-      upToMessageId,
-      fromMessageId: cutoff?.toString() ?? null,
-    },
-  });
+  //
+  // Only when this receipt actually stamped a row. `changed` also counts the
+  // unread counter being cleared, and those are not the same event: a read
+  // receipt that stamped no message but cleared a non-zero unread (a
+  // concurrent sendMessage committing between the two updateMany statements
+  // above) would otherwise publish a roll-up whose bound is null — a frame
+  // whose only correct interpretation is "ignore me", and which the client
+  // read as "no upper bound" and used to stamp the whole window as seen. The
+  // unread change still goes out, on the chat document below.
+  if (upToMessageId !== null) {
+    publish(`chat:${chat.id}:messages`, {
+      type: "receipts",
+      data: {
+        senderRole: counterpartRole,
+        status,
+        at: now.toISOString(),
+        upToMessageId,
+        fromMessageId: cutoff?.toString() ?? null,
+      },
+    });
+  }
   publishChatEverywhere(updatedChat);
 
   if (status === "read") {

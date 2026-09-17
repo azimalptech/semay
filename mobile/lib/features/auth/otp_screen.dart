@@ -137,13 +137,15 @@ class _OtpScreenState extends ConsumerState<OtpScreen> {
     } on OtpException catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.message;
+        // Not e.message: that is the server's CODE (OTP_INVALID,
+        // REQUEST_FAILED…) and this slot is rendered verbatim in red.
+        _error = describeOtpError(ref.read(l10nProvider), e);
         _attemptsRemaining = e.attemptsRemaining;
         _codeController.clear();
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.toString());
+      setState(() => _error = describeOtpError(ref.read(l10nProvider), e));
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
@@ -171,7 +173,7 @@ class _OtpScreenState extends ConsumerState<OtpScreen> {
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.toString());
+      setState(() => _error = describeOtpError(ref.read(l10nProvider), e));
     } finally {
       if (mounted) setState(() => _isResending = false);
     }
