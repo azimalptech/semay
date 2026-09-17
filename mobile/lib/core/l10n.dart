@@ -278,6 +278,21 @@ class S {
   String get today => isRu ? 'Сегодня' : 'Şu gün';
   String get yesterday => isRu ? 'Вчера' : 'Düýn';
 
+  /// Inbox row date: "Şu gün" for today, else "17 sen". The app ships Turkmen
+  /// and Russian only, so the month names cannot come from a hard-coded
+  /// English table the way they used to.
+  String shortDate(DateTime when) {
+    const tk = ['ýan', 'few', 'mart', 'apr', 'maý', 'iýun',
+                'iýul', 'awg', 'sen', 'okt', 'noý', 'dek'];
+    const ru = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн',
+                'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+    final now = DateTime.now();
+    if (when.year == now.year && when.month == now.month && when.day == now.day) {
+      return today;
+    }
+    return '${when.day} ${(isRu ? ru : tk)[when.month - 1]}';
+  }
+
   /// The one status line under the newest message I sent — Instagram's
   /// Sending… → Sent → Seen, never a per-bubble tick and never a "delivered"
   /// step (the server still records delivery; it just isn't shown).

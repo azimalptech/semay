@@ -535,14 +535,14 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                       if (counterpartTyping)
                         Text(
                           s.typing,
-                          style: AppTypography.caption.copyWith(
+                          style: ChatTypography.threadSubtitle.copyWith(
                             color: AppColors.brand,
                           ),
                         )
                       else if (showConnecting)
                         Text(
                           s.connecting,
-                          style: AppTypography.caption.copyWith(
+                          style: ChatTypography.threadSubtitle.copyWith(
                             color: AppColors.textMuted,
                           ),
                         ),
@@ -936,7 +936,9 @@ class _ReplyPreviewBar extends ConsumerWidget {
               children: [
                 Text(
                   '${s.reply} $senderLabel',
-                  style: AppTypography.caption.copyWith(
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: ChatTypography.quote.copyWith(
                     fontWeight: FontWeight.w600,
                     color: AppColors.brand,
                   ),
@@ -945,7 +947,7 @@ class _ReplyPreviewBar extends ConsumerWidget {
                   text,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: AppTypography.bodySmall.copyWith(
+                  style: ChatTypography.quote.copyWith(
                     color: AppColors.textSecondary,
                   ),
                 ),
@@ -1112,7 +1114,7 @@ class _DateDivider extends ConsumerWidget {
       child: Center(
         child: Text(
           _label(ref.watch(l10nProvider), timestamp),
-          style: AppTypography.label,
+          style: ChatTypography.dateDivider,
         ),
       ),
     );
@@ -1371,7 +1373,7 @@ class _MessageBubble extends StatelessWidget {
                   const SizedBox(width: 4),
                   Text(
                     repliedToStoryLabel,
-                    style: AppTypography.caption.copyWith(
+                    style: ChatTypography.quote.copyWith(
                       color: AppColors.textSecondary,
                     ),
                   ),
@@ -1393,7 +1395,12 @@ class _MessageBubble extends StatelessWidget {
               ),
               padding: isSharedPost || isStoryReply || isAttachment
                   ? const EdgeInsets.all(6)
-                  : const EdgeInsets.all(12),
+                  // Wider than tall, and both a touch roomier than the old
+                  // square 12: at ChatTypography.message's 16/1.3 a uniform
+                  // 12 left the text feeling pressed against the bubble's
+                  // sides. Instagram's bubbles are horizontally generous and
+                  // vertically tight for the same reason.
+                  : const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
                 color: isMine ? AppColors.brand : AppColors.backgroundCard,
                 borderRadius: BorderRadius.only(
@@ -1440,7 +1447,7 @@ class _MessageBubble extends StatelessWidget {
                           if (replyToSenderLabel != null)
                             Text(
                               replyToSenderLabel!,
-                              style: AppTypography.caption.copyWith(
+                              style: ChatTypography.quote.copyWith(
                                 fontWeight: FontWeight.w600,
                                 color: isMine
                                     ? AppColors.textOnPrimary
@@ -1451,7 +1458,7 @@ class _MessageBubble extends StatelessWidget {
                             replyToText!,
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
-                            style: AppTypography.caption.copyWith(
+                            style: ChatTypography.quote.copyWith(
                               color: isMine
                                   ? AppColors.textOnPrimary.withValues(
                                       alpha: 0.85,
@@ -1485,7 +1492,7 @@ class _MessageBubble extends StatelessWidget {
                         )
                       : Text(
                           text,
-                          style: AppTypography.bodyMedium.copyWith(
+                          style: ChatTypography.message.copyWith(
                             color: isMine
                                 ? AppColors.textOnPrimary
                                 : AppColors.textPrimary,
@@ -1514,7 +1521,7 @@ class _MessageBubble extends StatelessWidget {
                 ),
                 const SizedBox(width: 3),
               ],
-              Text(_formatTime(timestamp), style: AppTypography.caption),
+              Text(_formatTime(timestamp), style: ChatTypography.bubbleTime),
             ],
           ),
           if (isMine && isFailed && notSentLabel.isNotEmpty)
@@ -1522,7 +1529,7 @@ class _MessageBubble extends StatelessWidget {
               padding: const EdgeInsets.only(top: 2),
               child: Text(
                 notSentLabel,
-                style: AppTypography.caption.copyWith(color: AppColors.error),
+                style: ChatTypography.status.copyWith(color: AppColors.error),
               ),
             ),
           // Sending… → Sent → Seen, under the newest message only, and never
@@ -1617,7 +1624,10 @@ class MessageStatusLine extends ConsumerWidget {
     };
     return Text(
       label,
-      style: AppTypography.caption.copyWith(color: AppColors.textMuted),
+      // Turkmen/Russian "Görüldi 12 minut öň" is materially longer than
+      // "Seen 12m ago"; the line sits in a Column with no width cap of its
+      // own, so it wraps rather than clipping if it ever runs past the bubble.
+      style: ChatTypography.status.copyWith(color: AppColors.textMuted),
     );
   }
 }
@@ -2013,7 +2023,7 @@ class _Composer extends StatelessWidget {
                   Expanded(
                     child: TextField(
                       controller: controller,
-                      style: AppTypography.bodyMedium,
+                      style: ChatTypography.composer,
                       // Wraps and grows to five lines, then scrolls inside
                       // itself — past that the composer would start eating the
                       // conversation. Return inserts a newline and sending
@@ -2025,7 +2035,7 @@ class _Composer extends StatelessWidget {
                       textCapitalization: TextCapitalization.sentences,
                       decoration: InputDecoration(
                         hintText: hint,
-                        hintStyle: AppTypography.bodyMedium.copyWith(
+                        hintStyle: ChatTypography.composer.copyWith(
                           color: AppColors.textMuted,
                         ),
                         border: InputBorder.none,

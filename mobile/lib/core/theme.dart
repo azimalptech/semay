@@ -144,6 +144,116 @@ class AppTypography {
   );
 }
 
+/// Type scale for the chat surfaces only — the conversation thread
+/// (chat_thread_screen.dart) and the inbox (chat_list_screen.dart).
+///
+/// WHY THIS IS SCOPED, and not a bump to [AppTypography]: the owner reported
+/// that chat text reads far smaller than WhatsApp/Instagram, and it does —
+/// chat was drawing message bodies at `bodyMedium` (15) and every secondary
+/// line at `caption` (11), while both of those messengers run message text at
+/// ~16, timestamps at ~12, and an inbox preview at ~14 under a ~17 name. But
+/// `bodyMedium`, `bodySmall` and `caption` are the Figma body scale for the
+/// WHOLE app — feed, profile, orders, leaderboard, settings — all of which the
+/// owner has already seen and approved. Raising them there would resize
+/// screens nobody asked about. So chat gets its own group, and only the chat
+/// widgets point at it; every other screen keeps the Figma scale untouched.
+///
+/// Sizes are plain logical-pixel `fontSize`s, exactly like [AppTypography],
+/// so the platform's text-size accessibility setting still scales them: the
+/// app never overrides `MediaQuery.textScaler` anywhere, so Flutter's default
+/// scaling applies. Nothing here pins a box height to a font size, which is
+/// what would break at a large system scale.
+///
+/// Letter-spacing keeps the Figma -2% rule (16 * -0.02 = -0.32, and so on).
+class ChatTypography {
+  ChatTypography._();
+
+  /// The message body inside a bubble. 16 with a 1.3 line height — Instagram
+  /// bubbles read large as much from the leading and the bubble padding as
+  /// from the glyph size, so the height is part of the fix, not decoration.
+  static TextStyle get message => TextStyle(
+    fontSize: 16,
+    height: 1.3,
+    fontWeight: FontWeight.w400,
+    letterSpacing: -0.32,
+    color: AppColors.textPrimary,
+  );
+
+  /// The quoted reply block inside a bubble. Deliberately a step under
+  /// [message] but nowhere near the old 11 — at 11 beside a 16 body it read
+  /// as a rendering fault.
+  static TextStyle get quote => TextStyle(
+    fontSize: 13,
+    height: 1.25,
+    fontWeight: FontWeight.w400,
+    letterSpacing: -0.26,
+    color: AppColors.textSecondary,
+  );
+
+  /// Clock under a bubble (HH:mm).
+  static TextStyle get bubbleTime => TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w400,
+    letterSpacing: -0.24,
+    color: AppColors.textSecondary,
+  );
+
+  /// "Ugradylýar… / Ugradyldy / Görüldi" under the newest own message, and the
+  /// red "not sent" label — same size as the clock they sit beside.
+  static TextStyle get status => bubbleTime;
+
+  /// Day separator between message groups.
+  static TextStyle get dateDivider => TextStyle(
+    fontSize: 13,
+    fontWeight: FontWeight.w500,
+    letterSpacing: -0.26,
+    color: AppColors.textSecondary,
+  );
+
+  /// The thread app-bar's second line — "ýazýar…" / "Birikdirilýär…".
+  static TextStyle get threadSubtitle => TextStyle(
+    fontSize: 13,
+    fontWeight: FontWeight.w400,
+    letterSpacing: -0.26,
+    color: AppColors.textSecondary,
+  );
+
+  /// Composer input text and its hint.
+  static TextStyle get composer => TextStyle(
+    fontSize: 16,
+    height: 1.3,
+    fontWeight: FontWeight.w400,
+    letterSpacing: -0.32,
+    color: AppColors.textPrimary,
+  );
+
+  /// Inbox row: the store / customer name.
+  static TextStyle get inboxName => TextStyle(
+    fontSize: 17,
+    fontWeight: FontWeight.w600,
+    letterSpacing: -0.34,
+    color: AppColors.textPrimary,
+  );
+
+  /// Inbox row: the last-message preview, and "ýazýar…" in its place.
+  static TextStyle get inboxPreview => TextStyle(
+    fontSize: 14,
+    fontWeight: FontWeight.w400,
+    letterSpacing: -0.28,
+    color: AppColors.textSecondary,
+  );
+
+  /// Inbox row: the timestamp on the right of the preview line. Kept a step
+  /// under the preview so a long Turkmen name plus "Today, 17 Sep" still fits
+  /// on one row.
+  static TextStyle get inboxTime => TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w400,
+    letterSpacing: -0.24,
+    color: AppColors.textMuted,
+  );
+}
+
 class AppTheme {
   AppTheme._();
 

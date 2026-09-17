@@ -174,7 +174,7 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                       Text(s.chat),
                       Text(
                         s.connecting,
-                        style: AppTypography.caption.copyWith(
+                        style: ChatTypography.threadSubtitle.copyWith(
                           color: AppColors.textMuted,
                         ),
                       ),
@@ -445,8 +445,17 @@ class _ChatRow extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(name, style: AppTypography.bodyMediumSemibold),
-                  const SizedBox(height: 4),
+                  // maxLines/ellipsis, not the bare Text this used to be: at
+                  // the larger inbox size a long Turkmen store name would
+                  // otherwise wrap onto a second line and push the preview
+                  // row down. One line, clipped, is what both messengers do.
+                  Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ChatTypography.inboxName,
+                  ),
+                  const SizedBox(height: 2),
                   Row(
                     children: [
                       Expanded(
@@ -456,10 +465,16 @@ class _ChatRow extends StatelessWidget {
                           hasUnread: hasUnread,
                         ),
                       ),
-                      Text(
-                        _formatDate(lastMessageAt),
-                        style: AppTypography.caption.copyWith(
-                          color: AppColors.textMuted,
+                      const SizedBox(width: 8),
+                      // Scoped Consumer rather than making the whole row a
+                      // ConsumerWidget: the date is the only part that needs
+                      // the language, and it used to be hard-coded English.
+                      Consumer(
+                        builder: (context, ref, _) => Text(
+                          lastMessageAt == null
+                              ? ''
+                              : ref.watch(l10nProvider).shortDate(lastMessageAt!),
+                          style: ChatTypography.inboxTime,
                         ),
                       ),
                     ],
@@ -493,30 +508,6 @@ class _ChatRow extends StatelessWidget {
     );
   }
 
-  static const _months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
-
-  static String _formatDate(DateTime? timestamp) {
-    if (timestamp == null) return '';
-    final date = timestamp;
-    final now = DateTime.now();
-    final isToday =
-        date.year == now.year && date.month == now.month && date.day == now.day;
-    final formatted = '${date.day} ${_months[date.month - 1]}';
-    return isToday ? 'Today, $formatted' : formatted;
-  }
 }
 
 /// The second line of an inbox row: "ýazýar…" while the other side is
@@ -585,7 +576,7 @@ class _RowSubtitleState extends ConsumerState<_RowSubtitle> {
         ref.watch(l10nProvider).typing,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: AppTypography.caption.copyWith(
+        style: ChatTypography.inboxPreview.copyWith(
           color: AppColors.brand,
           fontWeight: FontWeight.w600,
         ),
@@ -595,7 +586,7 @@ class _RowSubtitleState extends ConsumerState<_RowSubtitle> {
       widget.lastMessage,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: AppTypography.caption.copyWith(
+      style: ChatTypography.inboxPreview.copyWith(
         color: widget.hasUnread ? AppColors.textPrimary : null,
         fontWeight: widget.hasUnread ? FontWeight.w600 : null,
       ),
