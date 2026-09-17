@@ -409,4 +409,42 @@ void main() {
     expect(t.api.activeChats, [_chatId, null]);
     t.container.dispose();
   });
+
+  // The composer was a fixed 54 px bar around a single-line TextField, so a
+  // long message scrolled sideways out of sight. It has to grow downward like
+  // every other messenger, then stop and scroll inside itself.
+  testWidgets('the composer grows with a long message, up to a cap', (
+    tester,
+  ) async {
+    final t = _Thread();
+    await t.mount(tester);
+    final field = find.byType(TextField);
+
+    await tester.enterText(field, 'Salam');
+    await tester.pump();
+    final oneLine = tester.getSize(field).height;
+
+    await tester.enterText(
+      field,
+      'Salam! Bu gaty uzyn habar, sebäbi men bir setire sygmaýan zat ýazýaryn '
+      'we ol aşak tarap ösmeli, gapdala süýşmeli däl.',
+    );
+    await tester.pump();
+    final wrapped = tester.getSize(field).height;
+    expect(wrapped, greaterThan(oneLine), reason: 'must wrap and grow, not scroll sideways');
+
+    await tester.enterText(field, List.filled(5, 'setir').join(String.fromCharCode(10)));
+    await tester.pump();
+    final five = tester.getSize(field).height;
+
+    await tester.enterText(field, List.filled(60, 'setir').join(String.fromCharCode(10)));
+    await tester.pump();
+    expect(
+      tester.getSize(field).height,
+      equals(five),
+      reason: 'past maxLines the composer stops growing and scrolls internally',
+    );
+
+    await t.unmount(tester);
+  });
 }

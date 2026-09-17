@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'l10n.dart';
 import 'session.dart';
+import 'upload_progress.dart';
 
 // --dart-define=API_BASE_URL=... overrides this, mirroring the existing
 // EMULATOR_HOST override pattern in main.dart. 'localhost' (not 10.0.2.2)
@@ -48,6 +49,15 @@ String describeApiError(S s, Object e) {
   if (e.statusCode == 429) return s.tooManyRequests;
   if (e.statusCode! >= 500) return s.serverError;
   return s.saveFailed;
+}
+
+/// What to SHOW for a failed media upload. [describeApiError] handles every
+/// server-side outcome; the one thing it cannot describe is a file the app
+/// itself refused before sending — that used to reach the user as the raw
+/// `Exception: Video must be under 100MB`, English prose in a tk/ru-only app.
+String describeUploadError(S s, Object e) {
+  if (e is MediaTooLargeException) return s.videoTooLarge(e.limitMegabytes);
+  return describeApiError(s, e);
 }
 
 ApiException _mapError(DioException e) {

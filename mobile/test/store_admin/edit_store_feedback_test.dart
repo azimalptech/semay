@@ -18,6 +18,7 @@ import 'package:semay/core/interaction_buffer.dart';
 import 'package:semay/core/l10n.dart';
 import 'package:semay/core/outbox.dart';
 import 'package:semay/core/session.dart';
+import 'package:semay/core/upload_progress.dart';
 import 'package:semay/features/store_admin/edit_store_screen.dart';
 import 'package:semay/features/store_profile/store_profile_providers.dart';
 import 'package:semay/services/posts_service.dart';
@@ -58,6 +59,7 @@ class _HangingUploads extends PostsService {
                 required bytes,
                 required fileExt,
                 required contentType,
+                onProgress,
               }) async => '',
         ),
         InteractionBuffer(api),
@@ -69,6 +71,7 @@ class _HangingUploads extends PostsService {
     required Uint8List bytes,
     required String fileExt,
     required String contentType,
+    UploadByteProgress? onProgress,
   }) => Completer<String>().future;
 }
 
@@ -82,6 +85,7 @@ class _FailingUploads extends _HangingUploads {
     required Uint8List bytes,
     required String fileExt,
     required String contentType,
+    UploadByteProgress? onProgress,
   }) async => throw ApiException(null, 'REQUEST_FAILED');
 }
 
@@ -268,7 +272,14 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(tester.takeException(), isNull);
-    expect(_snack(_s.avatarUploadFailed), findsOneWidget);
+    // Now names the reason too: "Surat ýüklenmedi: <reason>".
+    expect(
+      find.descendant(
+        of: find.byType(SnackBar),
+        matching: find.textContaining(_s.avatarUploadFailed),
+      ),
+      findsOneWidget,
+    );
     expect(_snack(_s.mediaPickFailed), findsNothing);
   });
 

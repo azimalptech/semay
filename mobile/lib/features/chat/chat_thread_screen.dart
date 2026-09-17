@@ -10,6 +10,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
+import '../../core/api_client.dart';
 import '../../core/app_icon.dart';
 import '../../core/json_ext.dart';
 import '../../core/l10n.dart';
@@ -331,10 +332,16 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
         senderRole: _isAdminHere ? 'admin' : 'user',
       );
     } catch (e) {
+      // Was `e.toString()` — "Exception: Video must be under 100MB", English
+      // prose in a tk/ru-only app. Only the QUEUEING can fail here (copying
+      // the file into app storage, the size cap); the upload itself runs in
+      // the outbox behind the bubble's ring, and its failure shows there as
+      // "not sent, tap to retry".
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(e.toString())));
+        final s = ref.read(l10nProvider);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(s.uploadFailed(describeUploadError(s, e)))),
+        );
       }
     } finally {
       if (mounted) setState(() => _isAttaching = false);
@@ -379,6 +386,12 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
         (chat?[isAdminHere ? 'mutedByAdmin' : 'mutedByUser'] as bool?) ?? false;
 
     final messagesAsync = ref.watch(mergedChatMessagesProvider(widget.chatId));
+    // Live upload percentages for queued attachments, keyed by clientKey. The
+    // chat upload is NOT a modal the user waits on — it runs in the outbox
+    // with retry — so its progress reaches the bubble through this rather
+    // than through a return value.
+    final uploadProgress =
+        ref.watch(outboxUploadProgressProvider).value ?? const <String, double>{};
     // "Connecting…" under the title whenever the socket is down — a stalled
     // thread then reads as "no network", not "the app is broken" (same cue
     // WhatsApp/Telegram use). Typing wins when both apply: it can only be
@@ -596,6 +609,11 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                             sharedMediaUrl: data['mediaUrl'] as String?,
                             attachmentType: data['mediaType'] as String?,
                             localMediaPath: data['localMediaPath'] as String?,
+                            // Keyed by clientKey — the id the outbox queues
+                            // the row under (see OutboxService.uploadProgress).
+                            uploadProgress: clientKey == null
+                                ? null
+                                : uploadProgress[clientKey],
                             repliedToStoryLabel: s.repliedToStory,
                             replyToText: data['replyToText'] as String?,
                             // Whoever's viewing this thread wrote the quoted
@@ -1146,6 +1164,7 @@ class _MessageBubble extends StatelessWidget {
     this.notSentLabel = '',
     this.onRetry,
     this.localMediaPath,
+    this.uploadProgress,
   });
 
   final String text;
@@ -1191,6 +1210,10 @@ class _MessageBubble extends StatelessWidget {
   /// the bubble is on screen before the upload starts (see
   /// ChatService.sendMediaMessage).
   final String? localMediaPath;
+
+  /// 0..1 for that queued attachment while the outbox is uploading it
+  /// (outboxUploadProgressProvider). Null when nothing is on the wire.
+  final double? uploadProgress;
 
   @override
   Widget build(BuildContext context) {
@@ -1328,6 +1351,7 @@ class _MessageBubble extends StatelessWidget {
                           localPath: localMediaPath,
                           mediaType: attachmentType!,
                           uploading: isPending,
+                          progress: uploadProgress,
                         )
                       : Text(
                           text,
@@ -1559,6 +1583,7 @@ class _AttachmentThumbnail extends StatelessWidget {
     required this.mediaType,
     this.localPath,
     this.uploading = false,
+    this.progress,
   });
 
   final String mediaUrl;
@@ -1568,6 +1593,12 @@ class _AttachmentThumbnail extends StatelessWidget {
   /// the user picked, with a progress ring, until the URL exists.
   final String? localPath;
   final bool uploading;
+
+  /// 0..1 while THIS item's bytes are on the wire (outboxUploadProgress-
+  /// Provider, keyed by clientKey). Null when the queue hasn't started this
+  /// one yet or the upload is done and only the POST is outstanding — the
+  /// ring stays, indeterminate, because the message is still on its way.
+  final double? progress;
 
   @override
   Widget build(BuildContext context) {
@@ -1606,13 +1637,35 @@ class _AttachmentThumbnail extends StatelessWidget {
               Container(
                 color: Colors.black.withValues(alpha: 0.25),
                 alignment: Alignment.center,
-                child: const SizedBox(
-                  width: 28,
-                  height: 28,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2.5,
-                    color: Colors.white,
-                  ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.5,
+                        color: Colors.white,
+                        // Determinate while the bytes move — the same
+                        // percentage the composers show, just without a modal
+                        // in front of it: this upload runs in the background
+                        // outbox with retry, so the bubble stays tappable and
+                        // the composer stays usable.
+                        value: progress,
+                      ),
+                    ),
+                    if (progress != null) ...[
+                      const SizedBox(height: 6),
+                      // Digits only: a label wouldn't fit a thumbnail, and
+                      // "45%" needs no translation.
+                      Text(
+                        '${(progress!.clamp(0.0, 1.0) * 100).floor()}%',
+                        style: AppTypography.caption.copyWith(
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
           ],
@@ -1756,18 +1809,25 @@ class _Composer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 54,
+      // A minimum, not a fixed height: the field grows downward as the message
+      // wraps (maxLines below), the way every messenger does. A hard 54 clipped
+      // everything past the first line and scrolled it sideways instead.
+      constraints: const BoxConstraints(minHeight: 54),
       padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
         color: AppColors.backgroundPrimary,
         borderRadius: BorderRadius.circular(500),
       ),
       child: Row(
+        // Attach and send hug the bottom as the field grows, rather than
+        // floating in the middle of a tall composer.
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8),
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   if (canAttach) ...[
                     GestureDetector(
@@ -1796,11 +1856,15 @@ class _Composer extends StatelessWidget {
                     child: TextField(
                       controller: controller,
                       style: AppTypography.bodyMedium,
-                      // Keyboard's Done key only dismisses the keyboard —
-                      // it isn't a second send button. Sending is
-                      // exclusively the explicit send icon on the right.
-                      onSubmitted: (_) =>
-                          FocusManager.instance.primaryFocus?.unfocus(),
+                      // Wraps and grows to five lines, then scrolls inside
+                      // itself — past that the composer would start eating the
+                      // conversation. Return inserts a newline and sending
+                      // stays exclusively the send icon, so there is no
+                      // onSubmitted: a multiline field never fires it.
+                      minLines: 1,
+                      maxLines: 5,
+                      keyboardType: TextInputType.multiline,
+                      textCapitalization: TextCapitalization.sentences,
                       decoration: InputDecoration(
                         hintText: hint,
                         hintStyle: AppTypography.bodyMedium.copyWith(
@@ -1823,7 +1887,10 @@ class _Composer extends StatelessWidget {
               borderRadius: BorderRadius.circular(500),
               child: const SizedBox(
                 width: 64,
-                height: double.infinity,
+                // Fixed, not double.infinity: now that the composer can grow,
+                // an infinite height would stretch this into a tall bar.
+                // 42 = the old 54 less the 6 of padding either side.
+                height: 42,
                 child: Icon(Icons.send_rounded, size: 24, color: Colors.white),
               ),
             ),

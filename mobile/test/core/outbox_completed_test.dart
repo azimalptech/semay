@@ -19,101 +19,11 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqflite/sqflite.dart';
 
 import 'package:semay/core/api_client.dart';
 import 'package:semay/core/outbox.dart';
 
-/// Just enough of sqflite to hold outbox rows in a list.
-class _FakeDb implements Database {
-  final rows = <Map<String, Object?>>[];
-  var _seq = 0;
-
-  @override
-  Future<int> insert(
-    String table,
-    Map<String, Object?> values, {
-    String? nullColumnHack,
-    ConflictAlgorithm? conflictAlgorithm,
-  }) async {
-    rows.removeWhere((r) => r['id'] == values['id']);
-    // `_seq` breaks the tie between rows enqueued inside the same
-    // millisecond, which real SQLite's rowid order would do.
-    rows.add(Map<String, Object?>.of(values)..['_seq'] = _seq++);
-    return 1;
-  }
-
-  @override
-  Future<List<Map<String, Object?>>> query(
-    String table, {
-    bool? distinct,
-    List<String>? columns,
-    String? where,
-    List<Object?>? whereArgs,
-    String? groupBy,
-    String? having,
-    String? orderBy,
-    int? limit,
-    int? offset,
-  }) async {
-    var out = where == null
-        ? [...rows]
-        : rows.where((r) => r['id'] == whereArgs!.first).toList();
-    out.sort((a, b) {
-      final byTime = (a['created_at']! as int).compareTo(
-        b['created_at']! as int,
-      );
-      return byTime != 0
-          ? byTime
-          : (a['_seq']! as int).compareTo(b['_seq']! as int);
-    });
-    if (limit != null) out = out.take(limit).toList();
-    return out.map(Map<String, Object?>.of).toList();
-  }
-
-  @override
-  Future<int> delete(
-    String table, {
-    String? where,
-    List<Object?>? whereArgs,
-  }) async {
-    final before = rows.length;
-    rows.removeWhere((r) => r['id'] == whereArgs!.first);
-    return before - rows.length;
-  }
-
-  @override
-  Future<int> rawUpdate(String sql, [List<Object?>? arguments]) async {
-    // The only raw update in the service is `attempts = attempts + 1`.
-    for (final r in rows) {
-      if (r['id'] == arguments!.first) {
-        r['attempts'] = (r['attempts']! as int) + 1;
-      }
-    }
-    return 1;
-  }
-
-  @override
-  Future<int> update(
-    String table,
-    Map<String, Object?> values, {
-    String? where,
-    List<Object?>? whereArgs,
-    ConflictAlgorithm? conflictAlgorithm,
-  }) async {
-    for (final r in rows) {
-      if (r['id'] == whereArgs!.first) r.addAll(values);
-    }
-    return 1;
-  }
-
-  @override
-  Future<void> close() async {}
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) =>
-      super.noSuchMethod(invocation);
-}
+import '../support/fake_outbox_db.dart';
 
 class _FakeApi extends ApiClient {
   _FakeApi() : super(Dio());
@@ -152,14 +62,14 @@ Future<void> _settle() async {
 }
 
 void main() {
-  late _FakeDb db;
+  late FakeOutboxDb db;
   late _FakeApi api;
   late OutboxService outbox;
   late List<OutboxKind> emitted;
   late StreamSubscription<OutboxKind> sub;
 
   setUp(() {
-    db = _FakeDb();
+    db = FakeOutboxDb();
     api = _FakeApi();
     outbox = OutboxService(
       api,
@@ -172,6 +82,7 @@ void main() {
             required bytes,
             required fileExt,
             required contentType,
+            onProgress,
           }) async => throw UnimplementedError(),
     );
     emitted = [];

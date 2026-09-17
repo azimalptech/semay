@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import '../core/api_client.dart';
 import '../core/chat_cache.dart';
 import '../core/outbox.dart';
+import '../core/upload_progress.dart';
 import 'notification_service.dart';
 
 class ChatService {
@@ -44,7 +45,7 @@ class ChatService {
       throw StateError('Only store admins can send attachments');
     }
     if (mediaType == 'video' && await file.length() > _maxVideoBytes) {
-      throw Exception('Video must be under 100MB');
+      throw const MediaTooLargeException(_maxVideoBytes);
     }
     final key = _outbox.newKey();
     final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'chat_outbox'));

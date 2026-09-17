@@ -64,12 +64,20 @@ Future<void> main() async {
       // the outbox (like/save toggles) — see MediaUploader in outbox.dart.
       outboxUploaderProvider.overrideWith(
         (ref) =>
-            ({required folder, required bytes, required fileExt, required contentType}) =>
-                ref.read(postsServiceProvider).uploadMedia(
+            ({
+              required folder,
+              required bytes,
+              required fileExt,
+              required contentType,
+              onProgress,
+            }) => ref
+                .read(postsServiceProvider)
+                .uploadMedia(
                   folder: folder,
                   bytes: bytes,
                   fileExt: fileExt,
                   contentType: contentType,
+                  onProgress: onProgress,
                 ),
       ),
     ],

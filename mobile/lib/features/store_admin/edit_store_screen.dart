@@ -9,6 +9,7 @@ import '../../core/app_icon.dart';
 import '../../core/image_crop.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
+import '../../core/upload_progress.dart';
 import '../../services/posts_service.dart';
 import '../store_profile/store_profile_providers.dart';
 
@@ -39,10 +40,16 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
   bool _loaded = false;
   bool _saving = false;
   bool _uploadingAvatar = false;
+  UploadProgress? _avatarProgress;
   String? _avatarUrl;
+
+  /// Closed in [dispose] so an upload that outlives the screen (this one is
+  /// pop-able while the PUT is in flight) cannot setState on a defunct State.
+  UploadProgressAggregator? _avatarJob;
 
   @override
   void dispose() {
+    _avatarJob?.close();
     _nameController.dispose();
     _taglineController.dispose();
     _addressController.dispose();
@@ -90,25 +97,58 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
       return;
     }
     if (image == null || !mounted) return;
-    setState(() => _uploadingAvatar = true);
+    // The messenger before the await, like _save below: this screen is
+    // pop-able while the PUT is in flight, and both outcomes have to be
+    // reported even if the admin backed out.
+    final messenger = ScaffoldMessenger.of(context);
+    final s = ref.read(l10nProvider);
+    setState(() {
+      _uploadingAvatar = true;
+      _avatarProgress = null;
+    });
     try {
       final bytes = await image.readAsBytes();
-      final url = await ref.read(postsServiceProvider).uploadMedia(
-        folder: 'stores',
-        bytes: bytes,
-        fileExt: 'jpg',
-        contentType: 'image/jpeg',
+      final job = UploadProgressAggregator(
+        totalBytes: bytes.length,
+        onProgress: (p) {
+          if (!mounted) return;
+          setState(() => _avatarProgress = p);
+        },
       );
+      _avatarJob?.close();
+      _avatarJob = job;
+      final slot = job.addFile(bytes.length);
+      final url = await ref
+          .read(postsServiceProvider)
+          .uploadMedia(
+            folder: 'stores',
+            bytes: bytes,
+            fileExt: 'jpg',
+            contentType: 'image/jpeg',
+            onProgress: slot.report,
+          );
+      slot.complete();
       if (mounted) setState(() => _avatarUrl = url);
-    } catch (_) {
-      // Was try/finally only — a failed upload just took the spinner away.
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(ref.read(l10nProvider).avatarUploadFailed)),
-        );
-      }
+      // The photo is up but NOT saved yet — Save writes avatarUrl onto the
+      // store — so this confirms the upload only.
+      messenger.showSnackBar(SnackBar(content: Text(s.photoUploaded)));
+    } catch (e) {
+      // Was try/finally only — a failed upload just took the spinner away —
+      // and then a bare "photo upload failed" with no reason. The picked
+      // photo is untouched: tapping the avatar again re-picks and retries.
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('${s.avatarUploadFailed}: ${describeUploadError(s, e)}'),
+        ),
+      );
     } finally {
-      if (mounted) setState(() => _uploadingAvatar = false);
+      _avatarJob?.close();
+      if (mounted) {
+        setState(() {
+          _uploadingAvatar = false;
+          _avatarProgress = null;
+        });
+      }
     }
   }
 
@@ -216,16 +256,34 @@ class _EditStoreScreenState extends ConsumerState<EditStoreScreen> {
                               ),
                       ),
                       if (_uploadingAvatar)
-                        const Positioned.fill(
+                        Positioned.fill(
                           child: CircleAvatar(
                             backgroundColor: Colors.black38,
-                            child: SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                    // Determinate the moment the first chunk
+                                    // is acknowledged; indeterminate only in
+                                    // the instant before that.
+                                    value: _avatarProgress?.fraction,
+                                  ),
+                                ),
+                                if (_avatarProgress != null) ...[
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '${_avatarProgress!.percent}%',
+                                    style: AppTypography.caption.copyWith(
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ),
                           ),
                         )

@@ -73,6 +73,7 @@ void main() {
               required bytes,
               required fileExt,
               required contentType,
+              onProgress,
             }) async => '',
       ),
       buffer,

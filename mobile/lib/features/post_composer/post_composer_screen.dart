@@ -3,9 +3,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../core/api_client.dart';
 import '../../core/image_crop.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
+import '../../core/upload_progress.dart';
 import '../../services/posts_service.dart';
 import '../feed/feed_providers.dart';
 import '../reels/reels_screen.dart';
@@ -44,6 +46,11 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
   final _priceController = TextEditingController();
   bool _submitting = false;
   bool _reframing = false;
+
+  /// One byte-weighted percentage for the WHOLE publish — every photo of a
+  /// carousel, or a reel's video plus its generated thumbnail (see
+  /// PostsService.createPost). Null until the first chunk goes out.
+  UploadProgress? _progress;
   int _page = 0;
   _FrameMode _mode = _FrameMode.fill;
   late List<XFile> _displayFiles = List.of(widget.files);
@@ -109,8 +116,23 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
       );
       if (proceed != true) return;
     }
+    // The price dialog is an await: the screen can be gone by the time it
+    // closes (Android back with the dialog up pops both).
+    if (!mounted) return;
 
-    setState(() => _submitting = true);
+    // Both taken before the upload, and for the same reason the story
+    // composer takes them: publishing is a media upload — tens of seconds on
+    // a mobile link for a reel — and this screen stays pop-able throughout
+    // (the AppBar back button and the Android back gesture are both live).
+    // `ref.invalidate` on a defunct State THROWS (riverpod's
+    // _assertNotDisposed), and the root messenger is the only surface a
+    // confirmation can land on once this screen has gone.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() {
+      _submitting = true;
+      _progress = null;
+    });
     try {
       await ref
           .read(postsServiceProvider)
@@ -120,24 +142,42 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
             files: widget.type == 'reel' ? widget.files : _displayFiles,
             caption: _captionController.text.trim(),
             price: priceText.isEmpty ? null : num.tryParse(priceText),
+            // `mounted` is the dispose guard: backing out mid-upload leaves
+            // the upload running (it is not cancellable) and the callbacks
+            // keep arriving — without this they would setState on a defunct
+            // State.
+            onProgress: (p) {
+              if (!mounted) return;
+              setState(() => _progress = p);
+            },
           );
       // The feed/reels/store-profile grids fetch once with .get() rather than
       // a live listener, so without this a freshly published post is invisible
       // until the next manual pull-to-refresh. globalReelsProvider backs the
       // Reels *tab* (distinct from the store's storeReelsProvider grid), so a
       // published reel needs it too or it never shows on the Reels tab.
-      ref.invalidate(feedNotifierProvider);
-      ref.invalidate(globalReelsProvider);
-      ref.invalidate(storePostsProvider(widget.storeId));
-      ref.invalidate(storeReelsProvider(widget.storeId));
+      container.invalidate(feedNotifierProvider);
+      container.invalidate(globalReelsProvider);
+      container.invalidate(storePostsProvider(widget.storeId));
+      container.invalidate(storeReelsProvider(widget.storeId));
       if (mounted) Navigator.of(context).pop();
+      // Un-gated on `mounted`: the post IS published, so it is confirmed
+      // whether or not this screen is still up. Owner requirement — success
+      // used to be a silent pop.
+      messenger.showSnackBar(SnackBar(content: Text(s.postPublished)));
     } catch (e) {
+      // Was `'${s.failedToLoad}: $e'` — the raw exception on screen. The
+      // files are still here and the button comes back, so the publish can
+      // simply be tapped again; nothing the user picked is lost.
       if (mounted) {
-        setState(() => _submitting = false);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('${s.failedToLoad}: $e')));
+        setState(() {
+          _submitting = false;
+          _progress = null;
+        });
       }
+      messenger.showSnackBar(
+        SnackBar(content: Text(s.uploadFailed(describeUploadError(s, e)))),
+      );
     }
   }
 
@@ -250,19 +290,43 @@ class _PostComposerScreenState extends ConsumerState<PostComposerScreen> {
           ),
           Padding(
             padding: const EdgeInsets.all(16),
-            child: SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                style: FilledButton.styleFrom(backgroundColor: AppColors.brand),
-                onPressed: _submitting ? null : _submit,
-                child: _submitting
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(),
-                      )
-                    : Text(s.publish),
-              ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // The bar only exists while bytes are moving, and it is one
+                // bar for the whole job: a four-photo carousel fills it once,
+                // not four times.
+                if (_submitting) ...[
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: _progress?.fraction,
+                      minHeight: 4,
+                      backgroundColor: AppColors.backgroundCard,
+                      color: AppColors.brand,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: AppColors.brand,
+                    ),
+                    // Stays disabled for the whole job — upload AND the POST
+                    // that follows it — so a second tap cannot publish twice.
+                    onPressed: _submitting ? null : _submit,
+                    child: _submitting
+                        ? Text(
+                            _progress == null
+                                ? s.uploadingMedia
+                                : s.uploadingPercent(_progress!.percent),
+                          )
+                        : Text(s.publish),
+                  ),
+                ),
+              ],
             ),
           ),
         ],

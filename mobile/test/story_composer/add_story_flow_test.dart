@@ -28,6 +28,7 @@ import 'package:semay/core/api_client.dart';
 import 'package:semay/core/interaction_buffer.dart';
 import 'package:semay/core/l10n.dart';
 import 'package:semay/core/outbox.dart';
+import 'package:semay/core/upload_progress.dart';
 import 'package:semay/core/session.dart';
 import 'package:semay/features/shared/story_bar_provider.dart';
 import 'package:semay/features/story_composer/add_story_flow.dart';
@@ -60,6 +61,7 @@ class _FakeStories extends StoriesService {
                   required bytes,
                   required fileExt,
                   required contentType,
+                  onProgress,
                 }) async => '',
           ),
           InteractionBuffer(api),
@@ -73,6 +75,7 @@ class _FakeStories extends StoriesService {
     required String storeId,
     required XFile mediaFile,
     required String mediaType,
+    UploadByteProgress? onProgress,
   }) => _create();
 }
 
@@ -222,6 +225,22 @@ void main() {
       return api;
     }
 
+    /// Taps Publish and lets the publish actually start.
+    ///
+    /// The publish measures every picked file (XFile.length) before the first
+    /// byte goes out — that is what makes ONE byte-weighted percentage across
+    /// a multi-file publish possible — and, like the preview's own file read,
+    /// real I/O does not progress under the fake clock. runAsync gives it a
+    /// real event-loop turn; the pumps after it render whatever came of it.
+    Future<void> tapPublish(WidgetTester tester) async {
+      await tester.tap(find.widgetWithText(FilledButton, _s.publish));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
     testWidgets('a failed publish names the reason, never the raw exception', (
       tester,
     ) async {
@@ -234,12 +253,12 @@ void main() {
         ),
       );
 
-      await tester.tap(find.widgetWithText(FilledButton, _s.publish));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tapPublish(tester);
 
       expect(tester.takeException(), isNull);
-      expect(_snack(_s.invalidInput), findsOneWidget);
+      // "Ýüklenip bilmedi: <reason>" — the reason describeUploadError picked,
+      // wrapped by the upload-failure sentence every surface now uses.
+      expect(_snack(_s.uploadFailed(_s.invalidInput)), findsOneWidget);
       expect(find.textContaining('ApiException'), findsNothing);
       expect(
         find.byType(StoryPreviewScreen),
@@ -251,12 +270,10 @@ void main() {
     testWidgets('a dead network reads as noConnection', (tester) async {
       await pump(tester, () async => throw ApiException(null, 'REQUEST_FAILED'));
 
-      await tester.tap(find.widgetWithText(FilledButton, _s.publish));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tapPublish(tester);
 
       expect(tester.takeException(), isNull);
-      expect(_snack(_s.noConnection), findsOneWidget);
+      expect(_snack(_s.uploadFailed(_s.noConnection)), findsOneWidget);
     });
 
     testWidgets(
@@ -267,8 +284,7 @@ void main() {
         final ringsBefore = api.count('GET /stories/rings');
         final listBefore = api.count('GET /stores/$_storeId/stories');
 
-        await tester.tap(find.widgetWithText(FilledButton, _s.publish));
-        await tester.pump();
+        await tapPublish(tester);
 
         // Close the preview while the upload is still in flight.
         await tester.tap(find.byType(IconButton));

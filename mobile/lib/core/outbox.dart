@@ -12,6 +12,7 @@ import 'package:uuid/uuid.dart';
 
 import 'api_client.dart';
 import 'session.dart';
+import 'upload_progress.dart';
 
 /// Offline write outbox (Phase 9b). A durable local SQLite queue for the two
 /// mutations users most expect to survive bad signal — chat messages and
@@ -37,6 +38,7 @@ typedef MediaUploader = Future<String> Function({
   required Uint8List bytes,
   required String fileExt,
   required String contentType,
+  UploadByteProgress? onProgress,
 });
 
 class OutboxItem {
@@ -160,6 +162,29 @@ class OutboxService {
   final StreamController<OutboxKind> _completed = StreamController<OutboxKind>.broadcast();
   Stream<OutboxKind> get completed => _completed.stream;
 
+  /// Upload progress (0..1) of queued media messages, keyed by item id
+  /// (== clientKey == the pending bubble's key). Chat uploads run in the
+  /// BACKGROUND with retry — the user is not held on a modal — so the
+  /// percentage has to reach the bubble through the same queue, not through
+  /// a return value nobody is awaiting. An entry exists only while that
+  /// item's bytes are on the wire: it is dropped when the send completes,
+  /// fails or is abandoned, so a stalled bubble never sits at "62 %" forever.
+  final Map<String, double> _uploads = {};
+  final StreamController<Map<String, double>> _uploadProgress =
+      StreamController<Map<String, double>>.broadcast();
+  Stream<Map<String, double>> get uploadProgress => _uploadProgress.stream;
+  Map<String, double> get uploadProgressSnapshot => Map.unmodifiable(_uploads);
+
+  void _setUploadProgress(String id, double fraction) {
+    _uploads[id] = fraction;
+    if (!_uploadProgress.isClosed) _uploadProgress.add(Map.unmodifiable(_uploads));
+  }
+
+  void _clearUploadProgress(String id) {
+    if (_uploads.remove(id) == null) return;
+    if (!_uploadProgress.isClosed) _uploadProgress.add(Map.unmodifiable(_uploads));
+  }
+
   Future<Database> _open() async {
     if (_db != null) return _db!;
     final injected = _openDb;
@@ -194,6 +219,7 @@ class OutboxService {
     _changes.close();
     _sent.close();
     _completed.close();
+    _uploadProgress.close();
     _db?.close();
   }
 
@@ -251,6 +277,8 @@ class OutboxService {
       await _deleteLocalMedia(pl);
     }
     await db.delete('outbox');
+    _uploads.clear();
+    if (!_uploadProgress.isClosed) _uploadProgress.add(const {});
     _bump();
   }
 
@@ -322,6 +350,7 @@ class OutboxService {
         final item = OutboxItem.fromRow(rows.first);
         try {
           await _send(item);
+          _clearUploadProgress(item.id);
           await _remove(item.id, payload: item.payload);
           _bump();
           // Only here — the send returned and the row is gone. Not on the
@@ -331,10 +360,17 @@ class OutboxService {
           if (!_completed.isClosed) _completed.add(item.kind);
         } on _PermanentSendError catch (e) {
           debugPrint('outbox: dropping ${item.id}: ${e.reason}');
+          _clearUploadProgress(item.id);
           await _remove(item.id, payload: item.payload);
           _bump();
           continue;
         } on ApiException catch (e) {
+          // Whatever happens next, this item's bytes are no longer moving —
+          // a ring left at 62 % would claim otherwise. A retry that DOES
+          // re-upload starts the entry again from 0 (and a retry after a
+          // successful upload doesn't re-upload at all: the URL is on the
+          // row).
+          _clearUploadProgress(item.id);
           final status = e.statusCode ?? 0;
           // 4xx (except 401, which the ApiClient interceptor already tried to
           // refresh) is permanent — drop it rather than retry forever.
@@ -351,6 +387,7 @@ class OutboxService {
           break;
         } catch (_) {
           // Network/timeout — offline again. Retry on next reconnect.
+          _clearUploadProgress(item.id);
           final failures = await _incrementAttempts(item.id);
           _bump();
           _scheduleRetry(failures);
@@ -382,12 +419,25 @@ class OutboxService {
             throw const _PermanentSendError('media file is gone');
           }
           final isVideo = pl['mediaType'] == 'video';
+          final bytes = await file.readAsBytes();
+          // Byte-weighted like every other surface (one file here, so the
+          // aggregator is just doing the percent throttling), and published
+          // on [uploadProgress] so the queued bubble's ring is determinate
+          // instead of spinning with no number on it.
+          final job = UploadProgressAggregator(
+            totalBytes: bytes.length,
+            onProgress: (p) => _setUploadProgress(item.id, p.fraction),
+          );
+          final slot = job.addFile(bytes.length);
+          _setUploadProgress(item.id, 0);
           final url = await _uploader(
             folder: 'chats',
-            bytes: await file.readAsBytes(),
+            bytes: bytes,
             fileExt: isVideo ? 'mp4' : 'jpg',
             contentType: isVideo ? 'video/mp4' : 'image/jpeg',
+            onProgress: slot.report,
           );
+          slot.complete();
           pl['mediaUrl'] = url;
           await _updatePayload(item.id, pl);
           _bump(); // the pending bubble switches from local file to URL
@@ -426,12 +476,19 @@ final outboxServiceProvider = Provider<OutboxService>((ref) {
     ref.watch(apiClientProvider),
     Connectivity(),
     hasSession: () => ref.read(sessionControllerProvider).value != null,
-    uploader: ({required folder, required bytes, required fileExt, required contentType}) =>
-        ref.read(outboxUploaderProvider)(
+    uploader:
+        ({
+          required folder,
+          required bytes,
+          required fileExt,
+          required contentType,
+          onProgress,
+        }) => ref.read(outboxUploaderProvider)(
           folder: folder,
           bytes: bytes,
           fileExt: fileExt,
           contentType: contentType,
+          onProgress: onProgress,
         ),
   );
   // Logout empties the queue; a (re)login drains whatever was queued while
@@ -444,6 +501,17 @@ final outboxServiceProvider = Provider<OutboxService>((ref) {
   });
   ref.onDispose(service.dispose);
   return service;
+});
+
+/// Upload progress of queued chat attachments, keyed by clientKey — what the
+/// thread screen reads to draw a DETERMINATE ring on a queued bubble. Starts
+/// from the current snapshot so a thread opened mid-upload shows the
+/// percentage immediately rather than waiting for the next chunk. Behind its
+/// own provider so a widget test can feed it without a real outbox.
+final outboxUploadProgressProvider = StreamProvider<Map<String, double>>((ref) async* {
+  final outbox = ref.watch(outboxServiceProvider);
+  yield outbox.uploadProgressSnapshot;
+  yield* outbox.uploadProgress;
 });
 
 /// [OutboxService.completed] behind its own provider, so a screen or a unit

@@ -221,6 +221,29 @@ class S {
       : 'At $max harpdan uzyn bolmaly däl';
   String get avatarUploadFailed =>
       isRu ? 'Не удалось загрузить фото' : 'Surat ýüklenmedi';
+
+  // Media upload progress + outcome. Owner requirement: every upload shows a
+  // percentage while it runs and says whether it succeeded or failed —
+  // [uploadFailed] carries the reason describeApiError picked, so a dead link
+  // and a rejected file don't read the same.
+  String uploadingPercent(int percent) =>
+      isRu ? 'Загрузка… $percent%' : 'Ýüklenýär… $percent%';
+  String get uploadingMedia => isRu ? 'Загрузка…' : 'Ýüklenýär…';
+  String uploadFailed(String reason) =>
+      isRu ? 'Не удалось загрузить: $reason' : 'Ýüklenip bilmedi: $reason';
+  String get photoUploaded => isRu ? 'Фото загружено' : 'Surat ýüklendi';
+  /// The app's own pre-send cap (100 MB). Reached users as the English
+  /// `Exception: Video must be under 100MB` before this existed.
+  String videoTooLarge(int megabytes) => isRu
+      ? 'Видео должно быть меньше $megabytes МБ'
+      : 'Wideo $megabytes MB-dan kiçi bolmaly';
+  String get postPublished => isRu ? 'Публикация размещена' : 'Bildiriş ýerleşdirildi';
+  String get storyPublished => isRu ? 'История опубликована' : 'Wakaňyz paýlaşyldy';
+  /// Plural-aware only in the count: the publish loop creates one story per
+  /// picked file, and the confirmation says how many landed.
+  String storiesPublished(int count) => isRu
+      ? 'Опубликовано историй: $count'
+      : '$count sany waka paýlaşyldy';
   /// The camera/gallery could not be opened or returned nothing usable —
   /// image_picker's PlatformException (a denied permission, a broken activity
   /// result). Not [avatarUploadFailed]: nothing was uploaded, or even picked.

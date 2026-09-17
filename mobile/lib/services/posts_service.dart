@@ -12,6 +12,7 @@ import '../core/api_client.dart';
 import '../core/interaction_buffer.dart';
 import '../core/outbox.dart';
 import '../core/share_links.dart';
+import '../core/upload_progress.dart';
 
 /// What came of handing the OS a share sheet. Three states, not a bool: a
 /// dismissal and a sheet that never opened look identical to the caller
@@ -21,24 +22,47 @@ import '../core/share_links.dart';
 enum ShareOutcome { shared, dismissed, failed }
 
 class PostsService {
-  PostsService(this._api, this._outbox, this._interactions);
+  PostsService(this._api, this._outbox, this._interactions, {Dio? uploadClient})
+    : _uploadDio = uploadClient ?? Dio();
 
   final ApiClient _api;
   final OutboxService _outbox;
   final InteractionBuffer _interactions;
 
+  /// The bare Dio the presigned PUT goes through (no auth interceptor — the
+  /// URL carries its own signature). Injectable so the progress plumbing can
+  /// be driven against a stub adapter in a test instead of a real socket —
+  /// see test/services/upload_progress_test.dart.
+  final Dio _uploadDio;
+
   static const _maxVideoBytes = 100 * 1024 * 1024;
+
+  /// How much of the file each chunk of the request stream carries.
+  ///
+  /// This is what makes progress exist at all. Dio reports `onSendProgress`
+  /// once per chunk of the stream it is given (dio/src/progress_stream/
+  /// io_progress_stream.dart), so the old `Stream.fromIterable([bytes])` —
+  /// ONE chunk holding the whole file — could only ever fire a single
+  /// callback, at 100 %, after the last byte was already gone. 64 KB gives a
+  /// 40 MB reel ~640 updates and a 300 KB avatar ~5, at no measurable cost.
+  /// (Handing Dio the raw Uint8List instead would work too, but it slices at
+  /// 1 KB — 40 000 callbacks and 40 000 copies for the same reel.)
+  static const uploadChunkBytes = 64 * 1024;
 
   /// Requests a presigned upload URL from the API, PUTs the bytes straight to
   /// MinIO, and returns the eventual public URL to store on the post/story
   /// (see docs/07_MIGRATION.md Phase 3's media pipeline). Replaces Firebase
   /// Storage's putData + getDownloadURL. Public so StoriesService/ChatService
   /// reuse the exact same upload path.
+  /// [onProgress] receives `(bytesSent, bytesTotal)` as the PUT streams, which
+  /// is how every surface shows a percentage. Optional: a caller that doesn't
+  /// pass it behaves exactly as before.
   Future<String> uploadMedia({
     required String folder, // "posts" | "stores" | "stories" | "chats"
     required Uint8List bytes,
     required String fileExt, // "jpg" | "mp4"
     required String contentType,
+    UploadByteProgress? onProgress,
   }) async {
     final slot = await _api.post(
       '/media/upload-url',
@@ -48,58 +72,125 @@ class PostsService {
     final publicUrl = slot['publicUrl'] as String;
     // Bare Dio (no auth header) — the presigned URL carries its own signature,
     // and MinIO doesn't want our bearer token.
-    await Dio().put<void>(
+    //
+    // Still a Stream + an explicit content-length (the server's signed PUT
+    // requires the length up front and we must not buffer a 100 MB video
+    // twice), just sliced — see [uploadChunkBytes].
+    await _uploadDio.put<void>(
       uploadUrl,
-      data: Stream.fromIterable([bytes]),
+      data: Stream<List<int>>.fromIterable(_chunks(bytes)),
       options: Options(
         headers: {
           Headers.contentTypeHeader: contentType,
           Headers.contentLengthHeader: bytes.length,
         },
       ),
+      onSendProgress: onProgress,
     );
+    // The last chunk's callback fires as it is handed to the socket, so a
+    // caller that only ever saw chunk callbacks could sit at 99 %. The PUT
+    // has returned here: the file is up.
+    onProgress?.call(bytes.length, bytes.length);
     return publicUrl;
   }
 
+  /// Lazy — one 64 KB copy alive at a time, not a second full copy of a
+  /// 100 MB video.
+  static Iterable<List<int>> _chunks(Uint8List bytes) sync* {
+    if (bytes.isEmpty) {
+      yield const <int>[];
+      return;
+    }
+    for (var start = 0; start < bytes.length; start += uploadChunkBytes) {
+      final end = start + uploadChunkBytes;
+      yield bytes.sublist(start, end < bytes.length ? end : bytes.length);
+    }
+  }
+
+  /// [onProgress] reports ONE percentage for the whole publish — every file in
+  /// a carousel, plus a reel's generated thumbnail — weighted by bytes, so the
+  /// bar never restarts per file (see [UploadProgressAggregator]).
   Future<void> createPost({
     required String storeId,
     required String type, // "image" | "carousel" | "reel"
     required List<XFile> files,
     required String caption,
     num? price,
+    UploadProgressCallback? onProgress,
   }) async {
+    final isReel = type == 'reel';
+
+    // Sizes first, from the files themselves — the aggregate percentage has
+    // to know the whole job before the first byte goes out. `length()` is a
+    // stat, not a read: the bytes are still read one file at a time below.
+    final sizes = <int>[];
+    for (final file in files) {
+      final size = await file.length();
+      if (isReel && size > _maxVideoBytes) {
+        // Checked before reading, not after: the old order pulled a 200 MB
+        // video into memory only to reject it.
+        throw const MediaTooLargeException(_maxVideoBytes);
+      }
+      sizes.add(size);
+    }
+
+    // The reel thumbnail is generated BEFORE the uploads start, so its bytes
+    // are part of the job total. Generated after, it was a second upload the
+    // bar knew nothing about — the percentage hit 100 % and the user then
+    // waited on an invisible one. video_thumbnail has no web implementation —
+    // reels published from a browser get an empty thumbnailUrl and grids fall
+    // back to the video URL — and a thumbnail that fails must not fail the
+    // publish, so this is best-effort either way.
+    Uint8List? thumbBytes;
+    if (isReel && !kIsWeb && files.isNotEmpty) {
+      try {
+        thumbBytes = await VideoThumbnail.thumbnailData(
+          video: files.first.path,
+          imageFormat: ImageFormat.JPEG,
+        );
+      } catch (e) {
+        debugPrint('createPost: thumbnail generation failed: $e');
+      }
+    }
+
+    final totalBytes =
+        sizes.fold<int>(0, (a, b) => a + b) + (thumbBytes?.length ?? 0);
+    final job = UploadProgressAggregator(
+      totalBytes: totalBytes,
+      onProgress: onProgress,
+    );
+
     final media = <Map<String, dynamic>>[];
     for (var i = 0; i < files.length; i++) {
       final bytes = await files[i].readAsBytes();
-      if (type == 'reel' && bytes.length > _maxVideoBytes) {
-        throw Exception('Video must be under 100MB');
+      if (isReel && bytes.length > _maxVideoBytes) {
+        throw const MediaTooLargeException(_maxVideoBytes);
       }
-      final isReel = type == 'reel';
+      // Weighted by the size the job total was built from, so the slots sum
+      // to exactly that total and a finished job reads 100 %.
+      final slot = job.addFile(sizes[i]);
       final url = await uploadMedia(
         folder: 'posts',
         bytes: bytes,
         fileExt: isReel ? 'mp4' : 'jpg',
         contentType: isReel ? 'video/mp4' : 'image/jpeg',
+        onProgress: slot.report,
       );
+      slot.complete();
       media.add({'url': url, 'position': i});
     }
 
-    // video_thumbnail has no web implementation — reels published from a
-    // browser get an empty thumbnailUrl and grids fall back to the video URL.
     String thumbnailUrl = '';
-    if (type == 'reel' && !kIsWeb) {
-      final thumbBytes = await VideoThumbnail.thumbnailData(
-        video: files.first.path,
-        imageFormat: ImageFormat.JPEG,
+    if (thumbBytes != null) {
+      final slot = job.addFile(thumbBytes.length);
+      thumbnailUrl = await uploadMedia(
+        folder: 'posts',
+        bytes: thumbBytes,
+        fileExt: 'jpg',
+        contentType: 'image/jpeg',
+        onProgress: slot.report,
       );
-      if (thumbBytes != null) {
-        thumbnailUrl = await uploadMedia(
-          folder: 'posts',
-          bytes: thumbBytes,
-          fileExt: 'jpg',
-          contentType: 'image/jpeg',
-        );
-      }
+      slot.complete();
     }
 
     final body = <String, dynamic>{

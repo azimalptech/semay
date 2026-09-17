@@ -7,6 +7,7 @@ import '../../core/api_client.dart';
 import '../../core/app_icon.dart';
 import '../../core/l10n.dart';
 import '../../core/theme.dart';
+import '../../core/upload_progress.dart';
 import '../../services/stories_service.dart';
 import '../shared/story_bar_provider.dart';
 import '../story_viewer/story_providers.dart';
@@ -177,6 +178,18 @@ class _StoryPreviewScreenState extends ConsumerState<StoryPreviewScreen> {
   int _page = 0;
   bool _publishing = false;
 
+  /// One byte-weighted percentage across every file in this publish — not a
+  /// bar that restarts at each story.
+  UploadProgress? _progress;
+
+  /// The files still to publish. A publish that fails partway REMOVES the
+  /// ones that already landed, so tapping publish again sends only the rest
+  /// instead of duplicating what is already on the ring — previously a
+  /// failure on file 3 of 5 left the screen offering to publish all five
+  /// again.
+  late List<XFile> _files = List.of(widget.files);
+  late List<String> _mediaTypes = List.of(widget.mediaTypes);
+
   @override
   void dispose() {
     _pageController.dispose();
@@ -196,19 +209,54 @@ class _StoryPreviewScreenState extends ConsumerState<StoryPreviewScreen> {
     // path a publish has.
     final container = ProviderScope.containerOf(context, listen: false);
     final messenger = ScaffoldMessenger.of(context);
-    setState(() => _publishing = true);
+    final files = List.of(_files);
+    final mediaTypes = List.of(_mediaTypes);
+    // Synchronously, before ANY await: the button has to be dead from the
+    // first frame after the tap. Measuring the files below is itself an await
+    // (a platform call), and a screen popped during it came back to a
+    // setState on a defunct State.
+    setState(() {
+      _publishing = true;
+      _progress = null;
+    });
+    var published = 0;
     try {
+      // Sizes up front — the aggregate percentage has to know the whole job
+      // before the first byte goes out. A file whose length can't be read is
+      // weighted 0 and simply doesn't move the bar.
+      final sizes = <int>[];
+      for (final file in files) {
+        try {
+          sizes.add(await file.length());
+        } catch (_) {
+          sizes.add(0);
+        }
+      }
+      final job = UploadProgressAggregator(
+        totalBytes: sizes.fold<int>(0, (a, b) => a + b),
+        // The screen is pop-able throughout, so the callback must be inert
+        // once the State is gone (a setState on a defunct State is the
+        // classic crash here).
+        onProgress: (p) {
+          if (!mounted) return;
+          setState(() => _progress = p);
+        },
+      );
       final service = ref.read(storiesServiceProvider);
       // Sequential, not parallel — createStory's createdAt is the client
       // clock at call time (see stories_service.dart), so each awaited call
       // naturally lands after the previous one, keeping playback order
       // matched to the order they were selected/previewed in.
-      for (var i = 0; i < widget.files.length; i++) {
+      for (var i = 0; i < files.length; i++) {
+        final slot = job.addFile(sizes[i]);
         await service.createStory(
           storeId: widget.storeId,
-          mediaFile: widget.files[i],
-          mediaType: widget.mediaTypes[i],
+          mediaFile: files[i],
+          mediaType: mediaTypes[i],
+          onProgress: slot.report,
         );
+        slot.complete();
+        published++;
       }
       // The story bar (home ring row) and the store's own story viewer fetch
       // once with .get(), not a live listener — without invalidating them a
@@ -216,19 +264,49 @@ class _StoryPreviewScreenState extends ConsumerState<StoryPreviewScreen> {
       container.invalidate(storyBarProvider);
       container.invalidate(storeStoriesProvider(widget.storeId));
       if (mounted) Navigator.of(context).pop();
+      // Un-gated on `mounted`, like every other outcome here: the stories are
+      // live, so the publish is confirmed whether or not this screen is still
+      // up. It used to pop in silence.
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            files.length > 1 ? s.storiesPublished(published) : s.storyPublished,
+          ),
+        ),
+      );
     } catch (e) {
       // Was `'${s.failedToLoad}: $e'` — the raw exception, so a failed publish
       // read "Ýüklenmedi: ApiException(400, INVALID_INPUT)". describeApiError
       // is the same helper the three other screens in this pass use.
-      if (mounted) setState(() => _publishing = false);
-      messenger.showSnackBar(SnackBar(content: Text(describeApiError(s, e))));
+      // A publish that failed on file 3 of 5 still put two stories live —
+      // refreshed through the container, so it happens whether or not this
+      // screen survived the wait.
+      if (published > 0) {
+        container.invalidate(storyBarProvider);
+        container.invalidate(storeStoriesProvider(widget.storeId));
+      }
+      if (mounted) {
+        setState(() {
+          _publishing = false;
+          _progress = null;
+          // Whatever already went up is gone from the retry set (and from the
+          // pager) — publishing again must not post it twice.
+          _files = files.sublist(published);
+          _mediaTypes = mediaTypes.sublist(published);
+          _page = _page.clamp(0, _files.isEmpty ? 0 : _files.length - 1);
+        });
+        if (_files.isEmpty) Navigator.of(context).pop();
+      }
+      messenger.showSnackBar(
+        SnackBar(content: Text(s.uploadFailed(describeUploadError(s, e)))),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final s = ref.watch(l10nProvider);
-    final multiple = widget.files.length > 1;
+    final multiple = _files.length > 1;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -237,11 +315,11 @@ class _StoryPreviewScreenState extends ConsumerState<StoryPreviewScreen> {
         children: [
           PageView.builder(
             controller: _pageController,
-            itemCount: widget.files.length,
+            itemCount: _files.length,
             onPageChanged: (i) => setState(() => _page = i),
             itemBuilder: (context, i) => _StoryPreviewPage(
-              file: widget.files[i],
-              mediaType: widget.mediaTypes[i],
+              file: _files[i],
+              mediaType: _mediaTypes[i],
               active: i == _page,
             ),
           ),
@@ -252,7 +330,7 @@ class _StoryPreviewScreenState extends ConsumerState<StoryPreviewScreen> {
               right: 16,
               child: Row(
                 children: [
-                  for (var i = 0; i < widget.files.length; i++)
+                  for (var i = 0; i < _files.length; i++)
                     Expanded(
                       child: Container(
                         height: 3,
@@ -280,23 +358,44 @@ class _StoryPreviewScreenState extends ConsumerState<StoryPreviewScreen> {
             left: 16,
             right: 16,
             bottom: MediaQuery.of(context).padding.bottom + 16,
-            child: FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: AppColors.brand,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-              ),
-              onPressed: _publishing ? null : _publish,
-              child: _publishing
-                  ? const SizedBox(
-                      height: 20,
-                      width: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Text(
-                      multiple
-                          ? '${s.publish} (${widget.files.length})'
-                          : s.publish,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_publishing) ...[
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: _progress?.fraction,
+                      minHeight: 4,
+                      backgroundColor: Colors.white24,
+                      color: AppColors.brand,
                     ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: AppColors.brand,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    // Disabled for the whole job, not just the first file.
+                    onPressed: _publishing ? null : _publish,
+                    child: _publishing
+                        ? Text(
+                            _progress == null
+                                ? s.uploadingMedia
+                                : s.uploadingPercent(_progress!.percent),
+                          )
+                        : Text(
+                            multiple
+                                ? '${s.publish} (${_files.length})'
+                                : s.publish,
+                          ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
