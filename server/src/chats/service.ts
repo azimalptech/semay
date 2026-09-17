@@ -599,6 +599,15 @@ export async function markReceipts(
   }
 }
 
+/** The row already carries `typingUserAt`/`typingAdminAt`, and the chat-list
+ * channels already deliver whole chat rows — but typing used to publish to the
+ * THREAD channel only, so the inbox could never show "typing…" under a name:
+ * the field it needed only reached it when some unrelated event (a message, a
+ * receipt) happened to republish the row. Fanned out like every other chat
+ * change instead. The write itself is unchanged, and the client only re-stamps
+ * every 2 s while there is text in the field (chat_thread_screen.dart's
+ * _typingWriteGap), so this is at most one extra publish per list channel per
+ * 2 s per person actually composing. */
 export async function setTyping(chat: Chat, side: ChatSide, typing: boolean): Promise<void> {
   const updatedChat = await prisma.chat.update({
     where: { id: chat.id },
@@ -607,7 +616,7 @@ export async function setTyping(chat: Chat, side: ChatSide, typing: boolean): Pr
         ? { typingUserAt: typing ? new Date() : null }
         : { typingAdminAt: typing ? new Date() : null },
   });
-  publish(`chat:${chat.id}`, { type: "upsert", data: updatedChat });
+  publishChatEverywhere(updatedChat);
 }
 
 export async function setMuted(chat: Chat, side: ChatSide, muted: boolean): Promise<void> {

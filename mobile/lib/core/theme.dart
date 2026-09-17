@@ -38,10 +38,11 @@ class AppColors {
   static const Color textOnPrimary = Colors.white;
   static const Color error = Color(0xFFF44F3E);
 
-  /// The read ("seen") tick under a sent message — blue, not [brand]: read
-  /// has to register as a different state from delivered at a glance, and
-  /// brand purple beside the grey delivered tick, under a purple bubble, did
-  /// not. Every messenger the users know draws this one blue.
+  /// The read ("seen") tick under a sent message. Unused since chat moved to
+  /// Instagram's model — there are no per-message ticks any more, only the one
+  /// Sending…/Sent/Seen line under the newest message (see
+  /// chat_thread_screen.dart's MessageStatusLine) — kept because it is the
+  /// colour to reach for if a per-message read mark is ever wanted again.
   static const Color readTick = Color(0xFF34B7F1);
 
   /// Store Detail's "Call" button — deliberately not [brand]; a call action

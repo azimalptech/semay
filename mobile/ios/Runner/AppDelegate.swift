@@ -73,14 +73,21 @@ import UserNotifications
     }
   }
 
-  // The rule, verbatim from notification_service.dart's shouldPresentPush: a
-  // chat push is silent ONLY when its chatId equals the thread on screen with
-  // the app resumed; everything else is presented in full with the phone's
-  // default notification sound (the push's own aps.sound, which the server
-  // sends as "default"), and broadcasts — no chatId — are never suppressed. The silent
-  // case still goes through super so the FCM plugin fires Messaging#onMessage
-  // (the delivered receipt); only its completion is replaced with badge-only:
-  // no banner, no sound.
+  // willPresent is called ONLY while the app is in the foreground, so every
+  // chat push reaching it is one Flutter is about to announce itself with the
+  // in-app banner (features/chat/in_app_banner.dart). iOS therefore draws no
+  // banner of its own for a chat message — two banners for one message was
+  // the alternative — and answers with badge + the phone's default sound
+  // instead. The one exception is the rule from notification_service.dart's
+  // shouldPresentPush, unchanged: a message for the thread ALREADY ON SCREEN
+  // is silent, badge only, because the user is looking straight at it.
+  //
+  // Broadcasts and order notices — no chatId — are untouched: the OS presents
+  // them in full, exactly as before.
+  //
+  // Every case still goes through super so the FCM plugin fires
+  // Messaging#onMessage (the delivered receipt, and the banner itself); only
+  // the presentation options are replaced.
   override func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     willPresent notification: UNNotification,
@@ -98,9 +105,11 @@ import UserNotifications
       completionHandler(options)
     }
     let chatId = notification.request.content.userInfo["chatId"] as? String
-    if let chatId = chatId, chatId == activeChatId {
+    if let chatId = chatId {
+      let options: UNNotificationPresentationOptions =
+        chatId == activeChatId ? [.badge] : [.badge, .sound]
       super.userNotificationCenter(center, willPresent: notification) { _ in
-        answer([.badge])
+        answer(options)
       }
       return
     }

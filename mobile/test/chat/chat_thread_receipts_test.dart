@@ -6,9 +6,10 @@
 //
 // The receipts protocol itself was proven against a live server by a
 // two-client matrix (every state, both roles); this pins the surface the
-// user actually looks at, which that matrix could not: a `receipts` roll-up
-// for OLDER messages re-renders their ticks at once, and "Seen HH:MM" sits
-// under the newest message only, only while that message is mine and read.
+// user actually looks at, which that matrix could not: the ONE status line
+// under the newest message follows the receipts as they land, a `delivered`
+// roll-up never shows anything (Instagram has no delivered step), and the
+// line sits under the newest message only, only while that message is mine.
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -22,7 +23,6 @@ import 'package:semay/core/l10n.dart';
 import 'package:semay/core/outbox.dart';
 import 'package:semay/core/realtime_client.dart';
 import 'package:semay/core/session.dart';
-import 'package:semay/core/theme.dart';
 import 'package:semay/features/chat/chat_providers.dart';
 import 'package:semay/features/chat/chat_thread_screen.dart';
 import 'package:semay/features/store_profile/store_profile_providers.dart';
@@ -177,20 +177,37 @@ class _Thread {
   }
 }
 
-/// The status marks on screen, keyed by the message text they sit under.
-Map<String, AppIcon> _ticks(WidgetTester tester) {
-  final result = <String, AppIcon>{};
-  for (final element in find.byType(MessageStatusTicks).evaluate()) {
-    final bubble = find.ancestor(of: find.byWidget(element.widget), matching: find.byType(Column)).first;
-    final text = find.descendant(of: bubble, matching: find.textContaining('message ')).evaluate().first.widget as Text;
-    final icon = find.descendant(of: find.byWidget(element.widget), matching: find.byType(AppIcon));
-    result[text.data!] = tester.widget<AppIcon>(icon);
+/// The "Ugradyldy · " / "Okaldy · " prefixes, without hard-coding the copy.
+final _sentPrefix = _s.sentAgo('|').split('|').first;
+final _seenPrefix = _s.seenAgo('|').split('|').first;
+
+/// The thread's ONE status line, or null when there is none. More than one is
+/// itself a failure: Instagram puts a status under the newest message only,
+/// never under every bubble.
+String? _status(WidgetTester tester) {
+  final lines = find.byType(MessageStatusLine);
+  final found = lines.evaluate().length;
+  if (found == 0) return null;
+  expect(found, 1, reason: 'the status line belongs under the newest message only');
+  return tester
+      .widget<Text>(find.descendant(of: lines, matching: find.byType(Text)))
+      .data;
+}
+
+/// Every tick glyph the old per-bubble model drew. None of these may ever
+/// appear again: no sent tick, no delivered double-tick, no read tick.
+void _expectNoTicks(WidgetTester tester) {
+  for (final icon in find.byType(AppIcon).evaluate()) {
+    expect(
+      (icon.widget as AppIcon).name,
+      isNot(anyOf('check', 'check_double')),
+      reason: 'message ticks were replaced by the status line',
+    );
   }
-  return result;
 }
 
 void main() {
-  testWidgets('receipts for older messages re-render their ticks; Seen only under the newest', (
+  testWidgets('the status line follows the receipts, under the newest message only', (
     tester,
   ) async {
     final t = _Thread()..api.messages = [_message(1), _message(2)];
@@ -198,43 +215,36 @@ void main() {
     expect(t.socket.subscribed, [_channel]);
     expect(find.text(_s.connecting), findsNothing);
 
-    // Sent: one grey check under each of my messages.
-    var ticks = _ticks(tester);
-    expect(ticks.keys, unorderedEquals(['message 1', 'message 2']));
-    expect(ticks.values.map((i) => i.name), everyElement('check'));
-    expect(ticks.values.map((i) => i.color), everyElement(AppColors.textSecondary));
+    // Two of my messages, ONE status line — under the newer of them — and no
+    // tick under either.
+    expect(find.text('message 1'), findsOneWidget);
+    expect(_status(tester), startsWith(_sentPrefix));
+    _expectNoTicks(tester);
 
     // Their chat list stamped delivery: a roll-up, one frame for both rows.
+    // Instagram shows nothing for it — Sent stands until they actually read.
     t.socket.deliver(_receipts('delivered', upTo: 2));
     await tester.pump(_tick);
-    ticks = _ticks(tester);
-    expect(ticks.values.map((i) => i.name), everyElement('check_double'));
-    expect(ticks.values.map((i) => i.color), everyElement(AppColors.textSecondary));
-    expect(find.textContaining(_s.seenAt('')), findsNothing);
+    expect(_status(tester), startsWith(_sentPrefix));
+    _expectNoTicks(tester);
 
     // They read only up to the older one (a message that arrived after
     // their receipt was stamped is not in its set).
     t.socket.deliver(_receipts('read', upTo: 1));
     await tester.pump(_tick);
-    ticks = _ticks(tester);
-    expect(ticks['message 1']!.color, AppColors.readTick);
-    expect(ticks['message 2']!.color, AppColors.textSecondary);
-    expect(find.textContaining(_s.seenAt('')), findsNothing,
-        reason: 'Seen belongs under the newest message, which is not read');
+    expect(_status(tester), startsWith(_sentPrefix),
+        reason: 'Seen belongs to the newest message, which is not read');
 
     t.socket.deliver(_receipts('read', upTo: 2));
     await tester.pump(_tick);
-    ticks = _ticks(tester);
-    expect(ticks.values.map((i) => i.color), everyElement(AppColors.readTick));
-    expect(find.textContaining(_s.seenAt('')), findsOneWidget);
+    expect(_status(tester), startsWith(_seenPrefix));
 
-    // Their reply is now the newest: no caption, no mark on their bubble,
-    // and the thread marks it read for them.
+    // Their reply is now the newest: no status line at all (it is not my
+    // message), nothing drawn on their bubble, and the thread marks it read.
     t.socket.deliver({'channel': _channel, 'type': 'upsert', 'data': _message(3, senderRole: 'admin')});
     await tester.pump(_tick);
     expect(find.text('message 3'), findsOneWidget);
-    expect(find.textContaining(_s.seenAt('')), findsNothing);
-    expect(_ticks(tester).keys, unorderedEquals(['message 1', 'message 2']));
+    expect(_status(tester), isNull);
     expect(t.api.receipts, contains('read'));
 
     await t.unmount(tester);
@@ -312,34 +322,30 @@ void main() {
   // Reading null as "no upper bound" is the exact false "Seen" the bound
   // exists to prevent — and the server does emit that frame (a read receipt
   // that stamped no message but cleared a non-zero unread counter).
-  testWidgets('a receipts roll-up that stamped nothing (upToMessageId null) changes no tick', (
+  testWidgets('a receipts roll-up that stamped nothing (upToMessageId null) changes nothing', (
     tester,
   ) async {
     final t = _Thread()..api.messages = [_message(1), _message(2)];
     await t.mount(tester);
 
-    var ticks = _ticks(tester);
-    expect(ticks.values.map((i) => i.name), everyElement('check'));
-    expect(ticks.values.map((i) => i.color), everyElement(AppColors.textSecondary));
+    expect(_status(tester), startsWith(_sentPrefix));
 
     t.socket.deliver(_receipts('read', upTo: null));
     await tester.pump(_tick);
-    ticks = _ticks(tester);
-    expect(ticks.keys, unorderedEquals(['message 1', 'message 2']));
-    expect(ticks.values.map((i) => i.name), everyElement('check'),
-        reason: 'nothing was stamped, so nothing may show as delivered');
-    expect(ticks.values.map((i) => i.color), everyElement(AppColors.textSecondary));
-    expect(find.textContaining(_s.seenAt('')), findsNothing);
+    expect(find.text('message 1'), findsOneWidget);
+    expect(find.text('message 2'), findsOneWidget);
+    expect(_status(tester), startsWith(_sentPrefix),
+        reason: 'nothing was stamped, so nothing may show as seen');
 
     // A `delivered` roll-up with a null bound is just as empty.
     t.socket.deliver(_receipts('delivered', upTo: null));
     await tester.pump(_tick);
-    expect(_ticks(tester).values.map((i) => i.name), everyElement('check'));
+    expect(_status(tester), startsWith(_sentPrefix));
 
     // And a real bound still lands, so this is a guard, not a mute.
     t.socket.deliver(_receipts('read', upTo: 2));
     await tester.pump(_tick);
-    expect(_ticks(tester).values.map((i) => i.color), everyElement(AppColors.readTick));
+    expect(_status(tester), startsWith(_seenPrefix));
 
     await t.unmount(tester);
   });

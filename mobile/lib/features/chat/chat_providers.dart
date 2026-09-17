@@ -16,6 +16,26 @@ import '../../services/chat_service.dart';
 /// wrapped so screens keep reading `doc.id` / `doc.data()['field']`.
 typedef ChatDoc = JsonDoc;
 
+/// How fresh a typing heartbeat must be for the other side to still count as
+/// typing. The composer re-stamps every 2 s while there is text in the field
+/// and the server clears the stamp on send / on an emptied field, so this only
+/// has to cover someone who simply stops — five seconds is the rule the thread
+/// screen has always used, and the inbox row now uses the same one.
+const typingFreshness = Duration(seconds: 5);
+
+/// Whether the counterpart's typing stamp on a chat row is still fresh.
+/// [now] is passed in so a row can re-evaluate it on its own expiry timer
+/// without every chat row rebuilding once a second.
+bool isTypingFresh(DateTime? at, {DateTime? now}) =>
+    at != null && (now ?? DateTime.now()).difference(at) < typingFreshness;
+
+/// The other side's typing stamp on a chat row: a customer watches the admin's,
+/// a store admin watches the customer's.
+DateTime? counterpartTypingAt(
+  Map<String, dynamic> chat, {
+  required bool viewerIsAdmin,
+}) => parseTimestamp(chat[viewerIsAdmin ? 'typingUserAt' : 'typingAdminAt']);
+
 DateTime? _lastMessageAt(Map<String, dynamic> chat) =>
     parseTimestamp(chat['lastMessageAt']);
 

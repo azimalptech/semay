@@ -27,9 +27,10 @@ import '../store_profile/store_profile_providers.dart';
 import 'accept_order_sheet.dart';
 import 'chat_providers.dart';
 
-/// How fresh a typing heartbeat must be to show the indicator, and the
-/// minimum gap between heartbeat writes while composing.
-const _typingFreshness = Duration(seconds: 5);
+/// The minimum gap between typing-heartbeat writes while composing. How FRESH
+/// a heartbeat has to be to still count as typing is [typingFreshness], shared
+/// with the inbox list (chat_list_screen.dart) so both surfaces stop showing
+/// "typing…" at the same moment.
 const _typingWriteGap = Duration(seconds: 2);
 
 class ChatThreadScreen extends ConsumerStatefulWidget {
@@ -280,6 +281,65 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     if (replyingTo != null) setState(() => _replyingTo = null);
   }
 
+  /// Instagram's failed-message choice, in place of the old "any tap retries
+  /// immediately": a message that could not be sent is either tried again or
+  /// thrown away, and until now there was no way at all to throw one away —
+  /// a message that kept failing sat red in the thread for good.
+  ///
+  /// Retry only resets the attempt counter and kicks the queue
+  /// (OutboxService.retry), so the automatic drain on reconnect is untouched:
+  /// a message left alone still goes out by itself when the connection
+  /// returns.
+  Future<void> _showFailedMessageSheet(String clientKey) async {
+    final s = ref.read(l10nProvider);
+    final outbox = ref.read(outboxServiceProvider);
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.backgroundCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 8),
+              child: Text(
+                s.messageNotSentTitle,
+                style: AppTypography.bodySmall.copyWith(
+                  color: AppColors.textSecondary,
+                ),
+              ),
+            ),
+            ListTile(
+              leading: Icon(Icons.refresh, color: AppColors.textPrimary),
+              title: Text(s.retrySend, style: AppTypography.bodyMedium),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                outbox.retry(clientKey);
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.delete_outline, color: AppColors.error),
+              title: Text(
+                s.deleteMessage,
+                style: AppTypography.bodyMedium.copyWith(
+                  color: AppColors.error,
+                ),
+              ),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                outbox.discard(clientKey);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _startReply(ChatDoc message) {
     final data = message.data();
     final text = data['text'] as String? ?? '';
@@ -349,7 +409,7 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
   }
 
   static bool _isFresh(DateTime? at) =>
-      at != null && DateTime.now().difference(at) < _typingFreshness;
+      at != null && DateTime.now().difference(at) < typingFreshness;
 
   @override
   Widget build(BuildContext context) {
@@ -377,6 +437,14 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
     final title = isAdminHere
         ? (customer?['name'] as String? ?? '…')
         : (store?['name'] as String? ?? '…');
+    // Their picture — shown next to the typing bubble at the bottom of the
+    // conversation, the way Instagram draws it.
+    final counterpart = isAdminHere ? customer : store;
+    final counterpartAvatarUrl = counterpart?['avatarUrl'] as String? ?? '';
+    // One clock reading per frame for every relative "Sent/Seen 3 min öň"
+    // label below; the 1-second staleness ticker in initState is what makes
+    // the frame happen, so nothing here needs a timer of its own.
+    final now = DateTime.now();
 
     // Counterpart's typing heartbeat, from the chat doc.
     final counterpartTyping = _isFresh(
@@ -574,7 +642,12 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                   itemBuilder: (context, index) {
                     var i = index;
                     if (counterpartTyping) {
-                      if (i == 0) return const _TypingBubble();
+                      if (i == 0) {
+                        return _TypingBubble(
+                          avatarUrl: counterpartAvatarUrl,
+                          name: title,
+                        );
+                      }
                       i -= 1;
                     }
                     if (i == messages.length) return const _OlderLoader();
@@ -628,20 +701,24 @@ class _ChatThreadScreenState extends ConsumerState<ChatThreadScreen>
                                       : title),
                             isMine: isMine,
                             timestamp: createdAt,
-                            deliveredAt: parseTimestamp(data['deliveredAt']),
                             readAt: parseTimestamp(data['readAt']),
                             isPending: isPending,
                             isFailed: isFailed,
                             notSentLabel: s.notSentTapToRetry,
-                            onRetry: isFailed && clientKey != null
-                                ? () => ref
-                                      .read(outboxServiceProvider)
-                                      .retry(clientKey)
+                            // Tapping a failed message (or its red mark) no
+                            // longer re-sends blind: it offers Retry or
+                            // Delete (_showFailedMessageSheet).
+                            onFailedTap: isFailed && clientKey != null
+                                ? () => _showFailedMessageSheet(clientKey)
                                 : null,
-                            // Instagram shows "Seen HH:MM" once, under the
-                            // newest message, not repeated on every bubble.
-                            showSeenCaption: k == messages.length - 1,
-                            seenLabel: s.seenAt,
+                            // ONE status line, under the newest message and
+                            // only while that message is mine — Sending… →
+                            // Sent → Seen, exactly Instagram's model. `now`
+                            // comes from the build, which the 1-second
+                            // staleness ticker already re-runs, so "3 min öň"
+                            // ages on its own with no second timer.
+                            showStatusLine: k == messages.length - 1,
+                            now: now,
                           ),
                         ),
                       ],
@@ -904,9 +981,17 @@ class _OlderLoader extends StatelessWidget {
   }
 }
 
-/// Incoming "typing…" bubble: three dots pulsing in a staggered wave.
+/// Incoming "typing…" bubble: three dots pulsing in a staggered wave, next to
+/// the other person's profile picture — Instagram draws the avatar beside it
+/// at the bottom of the conversation, and without one the bubble reads as an
+/// empty message rather than as *them* typing. Shown only while their typing
+/// heartbeat is fresh (see [_typingFreshness]); the server clears the stamp
+/// when they send or empty the field.
 class _TypingBubble extends StatefulWidget {
-  const _TypingBubble();
+  const _TypingBubble({required this.avatarUrl, required this.name});
+
+  final String avatarUrl;
+  final String name;
 
   @override
   State<_TypingBubble> createState() => _TypingBubbleState();
@@ -927,48 +1012,90 @@ class _TypingBubbleState extends State<_TypingBubble>
 
   @override
   Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-        decoration: BoxDecoration(
-          color: AppColors.backgroundCard,
-          borderRadius: const BorderRadius.only(
-            topLeft: Radius.circular(16),
-            topRight: Radius.circular(16),
-            bottomRight: Radius.circular(16),
-          ),
-        ),
-        child: AnimatedBuilder(
-          animation: _controller,
-          builder: (context, _) => Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (var i = 0; i < 3; i++) ...[
-                if (i > 0) const SizedBox(width: 4),
-                Opacity(
-                  // Triangle wave per dot, staggered by a third of a cycle.
-                  opacity:
-                      0.25 +
-                      0.75 *
-                          (1 -
-                              (((_controller.value + i / 3) % 1.0) * 2 - 1)
-                                  .abs()),
-                  child: Container(
-                    width: 7,
-                    height: 7,
-                    decoration: BoxDecoration(
-                      color: AppColors.textSecondary,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          _TypingAvatar(avatarUrl: widget.avatarUrl, name: widget.name),
+          const SizedBox(width: 8),
+          _typingDots(),
+        ],
+      ),
+    );
+  }
+
+  Widget _typingDots() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      decoration: BoxDecoration(
+        color: AppColors.backgroundCard,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(16),
+          topRight: Radius.circular(16),
+          bottomRight: Radius.circular(16),
         ),
       ),
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < 3; i++) ...[
+              if (i > 0) const SizedBox(width: 4),
+              Opacity(
+                // Triangle wave per dot, staggered by a third of a cycle.
+                opacity:
+                    0.25 +
+                    0.75 *
+                        (1 -
+                            (((_controller.value + i / 3) % 1.0) * 2 - 1).abs()),
+                child: Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    color: AppColors.textSecondary,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The counterpart's picture beside the typing bubble — their avatar, or
+/// their initial while it loads / when they have none.
+class _TypingAvatar extends StatelessWidget {
+  const _TypingAvatar({required this.avatarUrl, required this.name});
+
+  final String avatarUrl;
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final initial = name.trim().isEmpty
+        ? ''
+        : name.trim().substring(0, 1).toUpperCase();
+    return CircleAvatar(
+      radius: 14,
+      backgroundColor: AppColors.buttonMuted,
+      backgroundImage: avatarUrl.isNotEmpty
+          ? CachedNetworkImageProvider(avatarUrl)
+          : null,
+      child: avatarUrl.isNotEmpty
+          ? null
+          : Text(
+              initial,
+              style: AppTypography.caption.copyWith(
+                fontWeight: FontWeight.w600,
+                color: AppColors.textSecondary,
+              ),
+            ),
     );
   }
 }
@@ -1155,14 +1282,13 @@ class _MessageBubble extends StatelessWidget {
     this.replyToSenderLabel,
     required this.isMine,
     required this.timestamp,
-    required this.deliveredAt,
     required this.readAt,
-    required this.showSeenCaption,
-    required this.seenLabel,
+    required this.showStatusLine,
+    required this.now,
     this.isPending = false,
     this.isFailed = false,
     this.notSentLabel = '',
-    this.onRetry,
+    this.onFailedTap,
     this.localMediaPath,
     this.uploadProgress,
   });
@@ -1184,27 +1310,31 @@ class _MessageBubble extends StatelessWidget {
   final bool isMine;
   final DateTime? timestamp;
 
-  /// Set by the *recipient's* client (see chat_service.dart's
-  /// markMessagesDelivered/markMessagesRead) — null/null means only sent,
-  /// deliveredAt-only means delivered-not-read, both set means read. Only
-  /// meaningful (rendered) on my own messages — there's no status icon on
-  /// an incoming bubble.
-  final DateTime? deliveredAt;
+  /// Stamped by the *recipient's* client when they open the thread (see
+  /// chat_service.dart's markThreadRead) — the only receipt the UI shows.
+  /// The server's `deliveredAt` is still recorded and still drives unread
+  /// counters and the badge; Instagram has no delivered step in the
+  /// conversation, so nothing here reads it.
   final DateTime? readAt;
 
-  /// True only for the newest message in the thread — Instagram shows
-  /// "Seen HH:MM" once under the last message, not repeated on every bubble.
-  final bool showSeenCaption;
-  final String Function(String time) seenLabel;
+  /// True only for the newest message in the thread. Instagram puts ONE
+  /// status line under the newest message the user sent — Sending… / Sent ·
+  /// 3 min öň / Okaldy · 5 min öň — and nothing under any other bubble.
+  final bool showStatusLine;
 
-  /// Still in the outbox (no server row yet) — a clock replaces the check,
-  /// like WhatsApp's pending state. [isFailed] once the outbox has given up
-  /// a few times in a row: red mark + [notSentLabel], and the bubble's tap
-  /// becomes [onRetry] (see outboxFailedAfterAttempts).
+  /// The clock reading this frame was built with, so the relative label ages
+  /// as the thread's existing 1-second ticker re-renders it.
+  final DateTime now;
+
+  /// Still in the outbox (no server row yet) — the bubble is faded and
+  /// carries a small clock. [isFailed] once the outbox has given up a few
+  /// times in a row: red exclamation mark + [notSentLabel], and the bubble's
+  /// tap opens the Retry / Delete sheet ([onFailedTap], see
+  /// outboxFailedAfterAttempts).
   final bool isPending;
   final bool isFailed;
   final String notSentLabel;
-  final VoidCallback? onRetry;
+  final VoidCallback? onFailedTap;
 
   /// A queued photo/video not yet uploaded — rendered from the picked file so
   /// the bubble is on screen before the upload starts (see
@@ -1249,8 +1379,8 @@ class _MessageBubble extends StatelessWidget {
               ),
             ),
           GestureDetector(
-            onTap: isFailed && onRetry != null
-                ? onRetry
+            onTap: isFailed && onFailedTap != null
+                ? onFailedTap
                 : isSharedPost
                 ? () => context.push('/post/$sharedPostId')
                 : isAttachment && hasUploadedMedia
@@ -1369,14 +1499,20 @@ class _MessageBubble extends StatelessWidget {
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (isMine) ...[
-                MessageStatusTicks(
-                  deliveredAt: deliveredAt,
-                  readAt: readAt,
-                  isPending: isPending,
-                  isFailed: isFailed,
+              // No ticks, ever — not sent, not delivered, not read. The only
+              // marks left on a bubble are the outbox's two, and only on my
+              // own: the clock that says "still on its way" and the red
+              // exclamation that says "it did not go".
+              if (isMine && isFailed) ...[
+                Icon(Icons.error_outline, size: 16, color: AppColors.error),
+                const SizedBox(width: 3),
+              ] else if (isMine && isPending) ...[
+                Icon(
+                  Icons.schedule,
+                  size: 13,
+                  color: AppColors.textSecondary,
                 ),
-                const SizedBox(width: 2),
+                const SizedBox(width: 3),
               ],
               Text(_formatTime(timestamp), style: AppTypography.caption),
             ],
@@ -1389,30 +1525,41 @@ class _MessageBubble extends StatelessWidget {
                 style: AppTypography.caption.copyWith(color: AppColors.error),
               ),
             ),
-          if (isMine && showSeenCaption && readAt != null)
+          // Sending… → Sent → Seen, under the newest message only, and never
+          // on a failed one (the red line above already speaks for it).
+          if (isMine && showStatusLine && !isFailed)
             Padding(
               padding: const EdgeInsets.only(top: 2),
-              child: Text(
-                seenLabel(_formatTime(readAt)),
-                style: AppTypography.caption.copyWith(
-                  color: AppColors.textMuted,
-                ),
+              child: MessageStatusLine(
+                state: isPending
+                    ? MessageSendState.sending
+                    : readAt != null
+                    ? MessageSendState.seen
+                    : MessageSendState.sent,
+                at: readAt ?? timestamp,
+                now: now,
               ),
             ),
         ],
       ),
     );
-    // A failed bubble retries from ANY part of it — the red mark and the
-    // "not sent" caption sit outside the bubble body's own tap target, and
-    // they are exactly what a user taps.
-    if (isFailed && onRetry != null) {
+    // A pending bubble is slightly faded until the server has it — the same
+    // "not delivered yet" cue Instagram uses, and the reason the clock above
+    // can stay as small as it is.
+    final body = isPending && !isFailed
+        ? Opacity(opacity: 0.6, child: bubble)
+        : bubble;
+    // A failed bubble opens the Retry/Delete sheet from ANY part of it — the
+    // red mark and the "not sent" caption sit outside the bubble body's own
+    // tap target, and they are exactly what a user taps.
+    if (isFailed && onFailedTap != null) {
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: onRetry,
-        child: bubble,
+        onTap: onFailedTap,
+        child: body,
       );
     }
-    return bubble;
+    return body;
   }
 
   static String _formatTime(DateTime? timestamp) {
@@ -1423,43 +1570,54 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
-/// The status mark under one of MY bubbles — the three states a sender can
-/// tell apart at a glance, plus the outbox's two. Clock = accepted locally,
-/// not yet by the server; red = the outbox gave up (tap retries); single
-/// grey check = sent, the server has it; double grey = delivered, the
-/// recipient's device has it (their chat list or push handler stamped it —
-/// chat_service.dart markDelivered); double blue = read, they opened the
-/// thread. Nothing is drawn on an incoming bubble. Stamps reach the list as
-/// `receipts` roll-ups on the thread channel (chat_providers.dart
-/// _applyReceipts), which republish it, so the mark under an older message
-/// changes the moment its receipt lands — not on the next open.
-class MessageStatusTicks extends StatelessWidget {
-  const MessageStatusTicks({
+/// The three states Instagram lets a sender tell apart, and the only place
+/// any of them is shown: one line under the NEWEST message, when that message
+/// is mine.
+///
+/// [MessageSendState.sending] — the outbox has it, the server does not
+/// (the bubble is faded and carries a clock); [sent] — the server has it,
+/// which says nothing about the recipient; [seen] — they opened the thread
+/// and it loaded.
+///
+/// There is deliberately no *delivered* state. The server still stamps
+/// `deliveredAt` and still publishes it as a `receipts` roll-up — that is what
+/// unread counters and the launcher badge are built on — but a sender never
+/// sees it, exactly as in Instagram, where a message goes from Sent straight
+/// to Seen.
+///
+/// The time is relative ("Sent 3m ago") and re-rendered by the thread's
+/// existing 1-second staleness ticker, so it ages without a message arriving
+/// and without a second timer: [now] is simply whatever clock reading the
+/// frame was built with.
+enum MessageSendState { sending, sent, seen }
+
+class MessageStatusLine extends ConsumerWidget {
+  const MessageStatusLine({
     super.key,
-    required this.deliveredAt,
-    required this.readAt,
-    this.isPending = false,
-    this.isFailed = false,
+    required this.state,
+    required this.at,
+    required this.now,
   });
 
-  final DateTime? deliveredAt;
-  final DateTime? readAt;
-  final bool isPending;
-  final bool isFailed;
+  final MessageSendState state;
+
+  /// When the thing being reported happened — the send time for [sent], the
+  /// read time for [seen]. Ignored while [sending].
+  final DateTime? at;
+  final DateTime now;
 
   @override
-  Widget build(BuildContext context) {
-    if (isFailed) {
-      return Icon(Icons.error_outline, size: 16, color: AppColors.error);
-    }
-    if (isPending) {
-      return Icon(Icons.schedule, size: 14, color: AppColors.textSecondary);
-    }
-    final read = readAt != null;
-    return AppIcon(
-      read || deliveredAt != null ? 'check_double' : 'check',
-      size: 16,
-      color: read ? AppColors.readTick : AppColors.textSecondary,
+  Widget build(BuildContext context, WidgetRef ref) {
+    final s = ref.watch(l10nProvider);
+    final ago = s.timeAgo(at == null ? Duration.zero : now.difference(at!));
+    final label = switch (state) {
+      MessageSendState.sending => s.sendingStatus,
+      MessageSendState.sent => s.sentAgo(ago),
+      MessageSendState.seen => s.seenAgo(ago),
+    };
+    return Text(
+      label,
+      style: AppTypography.caption.copyWith(color: AppColors.textMuted),
     );
   }
 }

@@ -14,6 +14,7 @@ import 'package:go_router/go_router.dart';
 
 import '../core/api_client.dart';
 import '../core/firebase_options.dart';
+import '../features/chat/in_app_banner.dart';
 import 'auth_service.dart';
 
 // Web push needs a VAPID key, which is per-project and can't be derived from
@@ -185,10 +186,51 @@ Future<void> setUpForegroundNotifications(
     _markMessageDelivered(message);
     final kind = _PushKind(message.data);
     if (kind.isBroadcast) onBroadcast();
+    // A CHAT message while the app is open is announced by the in-app banner
+    // (features/chat/in_app_banner.dart), not by a system notification — the
+    // way Instagram does it, and the reason _showForegroundNotification now
+    // returns early for one. Everything else (announcements, order notices)
+    // still goes to the shade on Android / to the OS on iOS.
+    if (kind.chatId != null) {
+      _showInAppBanner(container, message, kind.chatId!);
+      return;
+    }
     _showForegroundNotification(message, kind);
   });
 }
 
+/// The in-app banner for a foreground chat push. Suppression is
+/// [shouldPresentPush] — the one rule, shared with the OS notification path
+/// and with AppDelegate.swift: a message for the thread already on screen
+/// shows nothing at all.
+void _showInAppBanner(
+  ProviderContainer container,
+  RemoteMessage message,
+  String chatId,
+) {
+  if (!shouldPresentPush(chatId: chatId, activeChatId: _activeChatId)) {
+    debugPrint('foreground push: suppressed, chat $chatId is on screen');
+    return;
+  }
+  final title = message.notification?.title ?? '';
+  final body = message.notification?.body ?? '';
+  if (title.isEmpty && body.isEmpty) return;
+  container.read(chatBannerProvider.notifier).show(
+    chatId: chatId,
+    title: title,
+    body: body,
+  );
+}
+
+// Android's system notification for a foreground push — announcements and
+// order notices only now: a chat message arriving while the app is open is
+// the in-app banner's job (see the onMessage listener above), and posting both
+// put two notices on screen for one message.
+//
+// The rest is unchanged, and still describes chat because a chat push posted
+// from the BACKGROUND (by FCM's own SDK) uses exactly this identity, which is
+// what dismissChatNotification below cancels.
+//
 // Android's system notification for a foreground push — the same channel, tag
 // and (id 0) identity FCM's own Android SDK uses for a background delivery, so
 // a chat that already has a notification in the shade gets it REPLACED rather
@@ -297,10 +339,12 @@ Future<void> dismissChatNotification(String chatId) async {
   }
 }
 
-// Marks the message the push refers to as "delivered" — the double-gray-
-// check state (see chat_thread_screen.dart's MessageStatusTicks), meaning
-// the recipient's device actually received it, independent of whether they
-// ever open the thread. The server's sendChatPush attaches chatId/messageId
+// Marks the message the push refers to as "delivered" — the recipient's
+// device actually received it, independent of whether they ever open the
+// thread. Nothing in the UI shows this any more (Instagram has no delivered
+// step — see chat_thread_screen.dart's MessageStatusLine); it is still
+// recorded because unread counters, the Chat tab badge and the launcher badge
+// are all built on it. The server's sendChatPush attaches chatId/messageId
 // as the FCM data payload specifically so this has something to write to;
 // notification-only fields (title/body) carry nothing identifying which
 // message this was.

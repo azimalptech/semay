@@ -266,6 +266,29 @@ class OutboxService {
     unawaited(drain());
   }
 
+  /// User chose "Delete" on a failed message instead of retrying: the queued
+  /// row (and the local copy of its attachment) goes, and the optimistic
+  /// bubble with it. Deliberately public and separate from the private
+  /// [_remove] the drain uses — that one runs on a message the server has
+  /// ACCEPTED, this one on a message the user has given up on, and only this
+  /// one has to tell the UI ([_bump]).
+  Future<void> discard(String id) async {
+    final db = await _open();
+    final rows = await db.query(
+      'outbox',
+      columns: ['payload'],
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    if (rows.isEmpty) return;
+    await _remove(
+      id,
+      payload: jsonDecode(rows.first['payload'] as String) as Map<String, dynamic>,
+    );
+    _clearUploadProgress(id);
+    _bump();
+  }
+
   /// Logout: whatever is queued belongs to the session that just ended and
   /// must never go out under the next one. Queued media files go with it.
   Future<void> clear() async {

@@ -6,6 +6,14 @@
 // and the app's own iOS channel (so the active-chat mirror is observable).
 // Nothing else is stubbed: _markMessageDelivered's secure-storage read throws
 // MissingPluginException, which it catches.
+//
+// A CHAT message arriving while the app is OPEN no longer posts a system
+// notification on either platform: it raises the in-app banner instead
+// (chatBannerProvider → ChatBannerHost, mounted above the navigator), which is
+// what Instagram does and what the owner asked for. Posting both put two
+// notices on screen for one message. Announcements and order notices are
+// unchanged. The suppression rule is untouched and still shared:
+// shouldPresentPush decides the banner exactly as it decided the notification.
 
 import 'package:firebase_messaging_platform_interface/firebase_messaging_platform_interface.dart';
 import 'package:flutter/foundation.dart';
@@ -14,6 +22,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:semay/features/chat/in_app_banner.dart';
 import 'package:semay/services/notification_service.dart';
 
 const _localChannel = MethodChannel(
@@ -62,6 +71,11 @@ Map<dynamic, dynamic> _android(Map<dynamic, dynamic> show) =>
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  // The app-lifetime container setUpForegroundNotifications is handed in
+  // main(); the in-app banner is written into it, so the test reads it back
+  // from the same place ChatBannerHost watches.
+  final container = ProviderContainer();
+
   final shows = <Map<dynamic, dynamic>>[];
   final localCalls = <String>[];
   final iosActiveChats = <String?>[];
@@ -109,10 +123,7 @@ void main() {
           }
           return null;
         });
-    await setUpForegroundNotifications(
-      ProviderContainer(),
-      onBroadcast: () => broadcasts++,
-    );
+    await setUpForegroundNotifications(container, onBroadcast: () => broadcasts++);
   });
 
   setUp(() {
@@ -122,56 +133,67 @@ void main() {
     iosDismissed.clear();
     rejectShow = false;
     setLocallyActiveChatId(null);
+    container.read(chatBannerProvider.notifier).dismiss();
   });
 
   tearDownAll(() {
     debugDefaultTargetPlatformOverride = null;
+    container.dispose();
   });
 
-  group('Android foreground', () {
-    test('inside chat A, a message for A posts nothing', () async {
+  group('foreground chat messages raise the in-app banner', () {
+    test('inside chat A, a message for A shows nothing at all', () async {
       setLocallyActiveChatId('chatA');
       await _deliver(_chatPush(chatId: 'chatA', messageId: 'm1'));
       expect(shows, isEmpty);
       expect(localCalls, isEmpty);
+      expect(container.read(chatBannerProvider), isNull);
     });
 
     test(
-      'inside chat A, a message for B posts on chat_messages with the default sound',
+      'inside chat A, a message for B banners in-app and posts no notification',
       () async {
         setLocallyActiveChatId('chatA');
         await _deliver(_chatPush(chatId: 'chatB', messageId: 'm2'));
-        expect(shows, hasLength(1));
-        final android = _android(shows.single);
-        expect(shows.single['id'], 0);
-        expect(android['channelId'], 'chat_messages');
-        // The Turkmen fallback name from notification_service.dart, mirroring
-        // res/values/strings.xml — the product ships tk/ru only (l10n.dart),
-        // and a user never sees it anyway: SemayApplication.kt created the
-        // channel (with the localized name) before any Dart ran, and the
-        // plugin only names a channel it has to create.
-        expect(android['channelName'], 'Habarlar');
-        // No override: the channel's sound — the phone's default notification
-        // sound — is what plays, the same as announcements and order notices.
-        expect(android['sound'], isNull);
-        expect(android['playSound'], isTrue);
-        expect(android['importance'], Importance.high.value);
-        expect(android['tag'], 'chatB');
+        expect(shows, isEmpty, reason: 'the banner replaces the system notice');
+        final banner = container.read(chatBannerProvider);
+        expect(banner, isNotNull);
+        expect(banner!.chatId, 'chatB');
+        // Sender name and preview come straight off the push the server
+        // already composes — the banner needs no extra fetch to say something.
+        expect(banner.title, 'Store');
+        expect(banner.body, 'hello');
       },
     );
 
     test(
-      'on the chat list (no thread open), a message posts with the default sound',
+      'on the chat list (no thread open), a message banners in-app',
       () async {
         await _deliver(_chatPush(chatId: 'chatA', messageId: 'm3'));
-        expect(shows, hasLength(1));
-        final android = _android(shows.single);
-        expect(android['channelId'], 'chat_messages');
-        expect(android['sound'], isNull);
-        expect(android['tag'], 'chatA');
+        expect(shows, isEmpty);
+        expect(container.read(chatBannerProvider)?.chatId, 'chatA');
       },
     );
 
+    // Two messages in a row must not leave the first banner frozen on screen:
+    // each show() carries a new id, which restarts the animation and the
+    // auto-dismiss timer.
+    test('a second message replaces the first banner', () async {
+      await _deliver(_chatPush(chatId: 'chatA', messageId: 'm3a'));
+      final first = container.read(chatBannerProvider)!;
+      await _deliver(_chatPush(chatId: 'chatB', messageId: 'm3b'));
+      final second = container.read(chatBannerProvider)!;
+      expect(second.chatId, 'chatB');
+      expect(second.id, isNot(first.id));
+      // The stale timer for the first one may no longer take the second down.
+      container.read(chatBannerProvider.notifier).dismiss(onlyIfId: first.id);
+      expect(container.read(chatBannerProvider), isNotNull);
+      container.read(chatBannerProvider.notifier).dismiss(onlyIfId: second.id);
+      expect(container.read(chatBannerProvider), isNull);
+    });
+  });
+
+  group('Android foreground', () {
     test(
       'a broadcast inside chat A posts on announcements with no sound override',
       () async {
@@ -214,14 +236,14 @@ void main() {
     // fail the same way.
     test('a rejected show() is swallowed, not retried', () async {
       rejectShow = true;
-      await _deliver(_chatPush(chatId: 'chatA', messageId: 'm5'));
+      await _deliver(_broadcastPush(messageId: 'm5'));
       expect(shows, hasLength(1));
       final attempt = _android(shows.single);
       expect(attempt['sound'], isNull);
-      expect(attempt['channelId'], 'chat_messages');
-      expect(attempt['tag'], 'chatA');
+      expect(attempt['channelId'], 'announcements');
+      expect(attempt['tag'], 'broadcast');
       expect(shows.single['id'], 0);
-      expect(shows.single['body'], 'hello');
+      expect(shows.single['body'], 'announcement');
     });
 
     // Opening a thread clears its notification, on the plugin identity FCM's
@@ -253,6 +275,11 @@ void main() {
       expect(localCalls, isEmpty);
       // Enter and leave both reached the native side, in order.
       expect(iosActiveChats, ['chatA', null]);
+      // The in-app banner is not platform-specific — the same Dart handler
+      // raises it on iOS, where AppDelegate.swift answers a foreground chat
+      // push with badge + sound and no OS banner so there is only ever one.
+      // The last push (chat A, after the thread was left) is the one showing.
+      expect(container.read(chatBannerProvider)?.chatId, 'chatA');
     },
   );
 

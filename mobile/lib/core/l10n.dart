@@ -277,7 +277,32 @@ class S {
   String get typing => isRu ? 'печатает…' : 'ýazýar…';
   String get today => isRu ? 'Сегодня' : 'Şu gün';
   String get yesterday => isRu ? 'Вчера' : 'Düýn';
-  String seenAt(String time) => isRu ? 'Прочитано: $time' : 'Okaldy: $time';
+
+  /// The one status line under the newest message I sent — Instagram's
+  /// Sending… → Sent → Seen, never a per-bubble tick and never a "delivered"
+  /// step (the server still records delivery; it just isn't shown).
+  String get sendingStatus => isRu ? 'Отправка…' : 'Ugradylýar…';
+  String sentAgo(String ago) => isRu ? 'Отправлено · $ago' : 'Ugradyldy · $ago';
+  String seenAgo(String ago) => isRu ? 'Прочитано · $ago' : 'Okaldy · $ago';
+
+  /// Relative age for that status line ("3m ago"), coarse on purpose: the line
+  /// re-renders every second off the thread's staleness ticker, so anything
+  /// finer than a minute would just flicker.
+  String timeAgo(Duration since) {
+    final d = since.isNegative ? Duration.zero : since;
+    if (d.inMinutes < 1) return isRu ? 'только что' : 'häzir';
+    if (d.inHours < 1) {
+      return isRu ? '${d.inMinutes} мин назад' : '${d.inMinutes} min öň';
+    }
+    if (d.inDays < 1) return isRu ? '${d.inHours} ч назад' : '${d.inHours} sag öň';
+    return isRu ? '${d.inDays} дн назад' : '${d.inDays} gün öň';
+  }
+
+  /// The sheet a failed message opens (tap the bubble or its red mark).
+  String get messageNotSentTitle =>
+      isRu ? 'Сообщение не отправлено' : 'Habar ugradylmady';
+  String get retrySend => isRu ? 'Повторить' : 'Gaýtadan ugrat';
+  String get deleteMessage => isRu ? 'Удалить' : 'Poz';
   String get muteNotifications =>
       isRu ? 'Отключить уведомления' : 'Bildirişleri öçür';
   String get unmuteNotifications =>

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -236,10 +238,29 @@ class _UserChatListState extends ConsumerState<_UserChatList> {
           );
 
     if (chats.isEmpty && storesWithoutChat.isEmpty) {
-      return Center(child: Text(ref.watch(l10nProvider).noConversationsYet));
+      // Scrollable, not a bare Center: an empty inbox is exactly when someone
+      // pulls to check, and a non-scrollable child gives RefreshIndicator
+      // nothing to react to.
+      return _PullToRefresh(
+        onRefresh: () => _refreshUserInbox(ref),
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            SizedBox(
+              height: 320,
+              child: Center(
+                child: Text(ref.watch(l10nProvider).noConversationsYet),
+              ),
+            ),
+          ],
+        ),
+      );
     }
 
-    return ListView.builder(
+    return _PullToRefresh(
+      onRefresh: () => _refreshUserInbox(ref),
+      child: ListView.builder(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.symmetric(vertical: 16),
       itemCount: chats.length + storesWithoutChat.length,
       itemBuilder: (context, index) {
@@ -261,6 +282,7 @@ class _UserChatListState extends ConsumerState<_UserChatList> {
               lastMessage: data['lastMessageText'] as String? ?? '',
               lastMessageAt: parseTimestamp(data['lastMessageAt']),
               unreadCount: data['unreadByUser'] as int? ?? 0,
+              typingAt: counterpartTypingAt(data, viewerIsAdmin: false),
               onTap: () => context.push('/chat/${chat.id}'),
             ),
           );
@@ -281,6 +303,7 @@ class _UserChatListState extends ConsumerState<_UserChatList> {
           },
         );
       },
+      ),
     );
   }
 }
@@ -325,12 +348,26 @@ class _AdminChatListState extends ConsumerState<_AdminChatList> {
             .where((c) => !_isHiddenForSide(c.data(), asAdmin: true))
             .toList();
         if (chats.isEmpty) {
-          return Center(
-            child: Text(ref.watch(l10nProvider).noConversationsYet),
+          return _PullToRefresh(
+            onRefresh: () => _refreshAdminInbox(ref),
+            child: ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              children: [
+                SizedBox(
+                  height: 320,
+                  child: Center(
+                    child: Text(ref.watch(l10nProvider).noConversationsYet),
+                  ),
+                ),
+              ],
+            ),
           );
         }
-        return ListView.builder(
+        return _PullToRefresh(
+          onRefresh: () => _refreshAdminInbox(ref),
+          child: ListView.builder(
           controller: _controller,
+          physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.symmetric(vertical: 16),
           itemCount: chats.length,
           itemBuilder: (context, index) {
@@ -351,10 +388,12 @@ class _AdminChatListState extends ConsumerState<_AdminChatList> {
                 lastMessage: data['lastMessageText'] as String? ?? '',
                 lastMessageAt: parseTimestamp(data['lastMessageAt']),
                 unreadCount: data['unreadByAdmin'] as int? ?? 0,
+                typingAt: counterpartTypingAt(data, viewerIsAdmin: true),
                 onTap: () => context.push('/admin/chat/${chat.id}'),
               ),
             );
           },
+          ),
         );
       },
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -372,6 +411,7 @@ class _ChatRow extends StatelessWidget {
     required this.lastMessageAt,
     required this.unreadCount,
     required this.onTap,
+    this.typingAt,
   });
 
   final String avatarUrl;
@@ -380,6 +420,12 @@ class _ChatRow extends StatelessWidget {
   final DateTime? lastMessageAt;
   final int unreadCount;
   final VoidCallback onTap;
+
+  /// The counterpart's typing heartbeat on this chat row (null on a store with
+  /// no conversation yet). While it is fresh the row shows "ýazýar…" in place
+  /// of the last message, the way Instagram's inbox does — see
+  /// [_RowSubtitle], which expires it on its own timer.
+  final DateTime? typingAt;
 
   @override
   Widget build(BuildContext context) {
@@ -404,14 +450,10 @@ class _ChatRow extends StatelessWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: Text(
-                          lastMessage,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: AppTypography.caption.copyWith(
-                            color: hasUnread ? AppColors.textPrimary : null,
-                            fontWeight: hasUnread ? FontWeight.w600 : null,
-                          ),
+                        child: _RowSubtitle(
+                          typingAt: typingAt,
+                          lastMessage: lastMessage,
+                          hasUnread: hasUnread,
                         ),
                       ),
                       Text(
@@ -474,6 +516,90 @@ class _ChatRow extends StatelessWidget {
         date.year == now.year && date.month == now.month && date.day == now.day;
     final formatted = '${date.day} ${_months[date.month - 1]}';
     return isToday ? 'Today, $formatted' : formatted;
+  }
+}
+
+/// The second line of an inbox row: "ýazýar…" while the other side is
+/// actively typing, otherwise the last message.
+///
+/// The typing state reaches the list on the chat-list channel itself (the
+/// chat row carries `typingUserAt`/`typingAdminAt`, and chats/service.ts
+/// setTyping now republishes the row to both list channels as well as to the
+/// thread), so this costs no extra subscription. The EXPIRY is the only thing
+/// the list has to do for itself — nothing arrives to say "they stopped" — and
+/// it is done here, per row, with a one-shot timer for the exact moment the
+/// heartbeat goes stale rather than by ticking the whole list once a second.
+class _RowSubtitle extends ConsumerStatefulWidget {
+  const _RowSubtitle({
+    required this.typingAt,
+    required this.lastMessage,
+    required this.hasUnread,
+  });
+
+  final DateTime? typingAt;
+  final String lastMessage;
+  final bool hasUnread;
+
+  @override
+  ConsumerState<_RowSubtitle> createState() => _RowSubtitleState();
+}
+
+class _RowSubtitleState extends ConsumerState<_RowSubtitle> {
+  Timer? _expiry;
+
+  @override
+  void initState() {
+    super.initState();
+    _armExpiry();
+  }
+
+  @override
+  void didUpdateWidget(_RowSubtitle oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.typingAt != widget.typingAt) _armExpiry();
+  }
+
+  @override
+  void dispose() {
+    _expiry?.cancel();
+    super.dispose();
+  }
+
+  void _armExpiry() {
+    _expiry?.cancel();
+    final at = widget.typingAt;
+    if (at == null) return;
+    final left = typingFreshness - DateTime.now().difference(at);
+    if (left <= Duration.zero) return;
+    // +1 tick so the rebuild lands just AFTER the stamp goes stale, never on
+    // the boundary where isTypingFresh could still round to true.
+    _expiry = Timer(left + const Duration(milliseconds: 100), () {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (isTypingFresh(widget.typingAt)) {
+      return Text(
+        ref.watch(l10nProvider).typing,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: AppTypography.caption.copyWith(
+          color: AppColors.brand,
+          fontWeight: FontWeight.w600,
+        ),
+      );
+    }
+    return Text(
+      widget.lastMessage,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: AppTypography.caption.copyWith(
+        color: widget.hasUnread ? AppColors.textPrimary : null,
+        fontWeight: widget.hasUnread ? FontWeight.w600 : null,
+      ),
+    );
   }
 }
 
@@ -688,4 +814,38 @@ class _SwipeToDeleteState extends State<_SwipeToDelete>
       ),
     );
   }
+}
+
+/// Pull-to-refresh for the inbox only — never inside a conversation, where the
+/// list is reversed (a downward pull lands at the bottom) and an upward pull is
+/// already how older messages page in.
+///
+/// The inbox is realtime, so this is a safety net rather than the mechanism:
+/// it re-subscribes the list channel, which re-seeds it from the server.
+class _PullToRefresh extends StatelessWidget {
+  const _PullToRefresh({required this.onRefresh, required this.child});
+
+  final Future<void> Function() onRefresh;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => RefreshIndicator(
+    onRefresh: onRefresh,
+    color: AppColors.brand,
+    child: child,
+  );
+}
+
+/// Invalidating re-runs the channel subscription, so the server sends a fresh
+/// snapshot. The small delay is deliberate: without it the spinner vanishes
+/// before the snapshot lands and the pull reads as having done nothing.
+Future<void> _refreshUserInbox(WidgetRef ref) async {
+  ref.invalidate(userChatsProvider);
+  ref.invalidate(activeStoresProvider);
+  await Future<void>.delayed(const Duration(milliseconds: 450));
+}
+
+Future<void> _refreshAdminInbox(WidgetRef ref) async {
+  ref.invalidate(adminChatsProvider);
+  await Future<void>.delayed(const Duration(milliseconds: 450));
 }

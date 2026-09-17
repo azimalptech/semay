@@ -14,6 +14,7 @@ import 'core/router.dart';
 import 'core/shell_tab.dart';
 import 'core/theme.dart';
 import 'core/theme_provider.dart';
+import 'features/chat/in_app_banner.dart';
 import 'features/profile/notifications_providers.dart';
 import 'services/auth_service.dart';
 import 'services/notification_service.dart';
@@ -40,14 +41,16 @@ Future<void> main() async {
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   // iOS: a push that arrives while the app is in the FOREGROUND is otherwise
   // presented with nothing at all. Let the OS show it in full — banner, sound
-  // and badge — so a chat message or a broadcast is heard on any screen, the
+  // and badge — so a broadcast or an order notice is seen on any screen, the
   // way it is on Android from the app's own local notification (see
   // notification_service.dart, which posts nothing on iOS for that reason).
-  // These are global; the one per-message exception — a message for the
-  // thread on screen, badge only — is made natively in AppDelegate.swift's
-  // willPresent override, because Dart is never asked. Badge has to be
-  // included regardless, or the badge-only correction the server sends after
-  // a read never reaches the icon. No-op on Android.
+  // These are global; the per-message exceptions are made natively in
+  // AppDelegate.swift's willPresent override, because Dart is never asked —
+  // a CHAT message gets badge + sound but no OS banner (ChatBannerHost draws
+  // the in-app one instead), and a message for the thread already on screen
+  // gets badge only. Badge has to be included regardless, or the badge-only
+  // correction the server sends after a read never reaches the icon. No-op on
+  // Android.
   await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
     alert: true,
     badge: true,
@@ -86,9 +89,10 @@ Future<void> main() async {
   unawaited(container.read(interactionBufferProvider).start());
   // Tap on a push → open that chat / the inbox (cold-start and background).
   listenNotificationTaps(container);
-  // A push that arrives while the app is open: Android system notification
-  // (skipped for the chat on screen), and an inbox refetch for a broadcast so
-  // the bell badge updates now instead of on the next restart.
+  // A push that arrives while the app is open: the in-app banner for a chat
+  // message (ChatBannerHost, skipped for the chat already on screen), an
+  // Android system notification for anything else, and an inbox refetch for a
+  // broadcast so the bell badge updates now instead of on the next restart.
   await setUpForegroundNotifications(
     container,
     onBroadcast: () => container.invalidate(notificationsProvider),
@@ -171,7 +175,12 @@ class SeMayApp extends ConsumerWidget {
         final dismissKeyboard = GestureDetector(
           onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
           behavior: HitTestBehavior.translucent,
-          child: child,
+          // Above the navigator, so a chat message arriving while the app is
+          // open slides its banner over whatever screen the user is on — the
+          // feed, reels, settings, another chat — and tapping it opens that
+          // conversation. Inside the builder rather than around MaterialApp
+          // because it needs the app's Directionality/Material ancestors.
+          child: ChatBannerHost(child: child),
         );
         return LayoutBuilder(
           builder: (context, constraints) {
