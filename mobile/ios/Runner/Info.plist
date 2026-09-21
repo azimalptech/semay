@@ -116,11 +116,22 @@
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
+	<!-- Portrait only, and iPhone only (TARGETED_DEVICE_FAMILY = "1" in
+	     Runner.xcodeproj — Flutter's template ships "1,2").
+
+	     There is deliberately NO ~ipad variant here. Apple refuses the upload
+	     with error 90474 when a bundle claims iPad support but does not list
+	     all four orientations, because an iPad app has to work in Split View.
+	     A portrait-only ~ipad key is therefore not a smaller promise than the
+	     default, it is an invalid one — which is exactly how build 2 failed.
+
+	     SeMay's feed, reels and chat are designed for a portrait phone, so
+	     iPhone is the honest declaration. iPad owners can still install it and
+	     run it in a phone-sized window.
+
+	     Re-adding iPad means all four orientations here AND a layout that
+	     survives landscape. Do not add ~ipad on its own. -->
 	<key>UISupportedInterfaceOrientations</key>
-	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-	</array>
-	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
