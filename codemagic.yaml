@@ -26,8 +26,8 @@
 #      app configuration) or FCM has no way to reach the device.
 
 workflows:
-  ios-testflight:
-    name: iOS → TestFlight
+  ios-appstore:
+    name: iOS App Store (downloadable .ipa, not published)
     instance_type: mac_mini_m2
     max_build_duration: 60
     integrations:
@@ -51,7 +51,11 @@ workflows:
         # Must be https: iOS App Transport Security refuses cleartext, and an
         # http value fails only once the app is on a device.
         API_BASE_URL: "https://semaycollection.com/api/v1"
-        APP_STORE_APPLE_ID: 6814409437 # "Semay Collection" in App Store Connect
+        # Recorded for reference only: with no `publishing:` block (see the
+        # end of this workflow) nothing in CI reads it. It is what App Store
+        # Connect calls the Apple ID of "Semay Collection", and restoring
+        # automatic publishing would need it again.
+        APP_STORE_APPLE_ID: 6814409437
     scripts:
       - name: Reject a non-https API URL
         script: |
@@ -125,14 +129,22 @@ workflows:
       - mobile/build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
 
-    publishing:
-      app_store_connect:
-        auth: integration
-        # TestFlight only. Promoting to the App Store stays a manual decision in
-        # App Store Connect — an automatic submission on every green build is
-        # not something a CI file should be able to do.
-        submit_to_testflight: true
-        submit_to_app_store: false
+    # No `publishing:` block, deliberately — the owner uploads to App Store
+    # Connect by hand. CI's job ends at producing the signed binary; download it
+    # from this build's Artifacts.
+    #
+    # What still matters is the signing TYPE above: IOS_APP_STORE. That is the
+    # only distribution type App Store Connect accepts on upload — an ad-hoc or
+    # development signed ipa is refused, and nothing about the file looks wrong
+    # until Apple rejects it. So this workflow is not "ios-adhoc without
+    # publishing"; the two produce differently signed artifacts.
+    #
+    # To hand uploading back to CI, restore:
+    #     publishing:
+    #       app_store_connect:
+    #         auth: integration
+    #         submit_to_testflight: true
+    #         submit_to_app_store: false
 
   # Signed for direct install on registered devices. NOT published anywhere —
   # no TestFlight, no App Store review. The ipa this produces installs straight
