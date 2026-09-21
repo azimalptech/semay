@@ -36,17 +36,15 @@ workflows:
       flutter: stable
       xcode: latest
       cocoapods: default
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.semay.semay
       vars:
+        BUNDLE_ID: "com.semay.semay"
         # Compiled into the binary. Without it api_client.dart falls back to
         # http://localhost:8080/api/v1 — which on a phone means the phone — so
         # the build would succeed and the app could never reach the server.
         # Must be https: iOS App Transport Security refuses cleartext, and an
         # http value fails only once the app is on a device.
         API_BASE_URL: "https://semaycollection.com/api/v1"
-        APP_STORE_APPLE_ID: 0000000000 # replace with the real numeric Apple ID
+        APP_STORE_APPLE_ID: 6814409437 # "Semay Collection" in App Store Connect
     scripts:
       - name: Reject a non-https API URL
         script: |
@@ -54,6 +52,35 @@ workflows:
             https://*) echo "API base URL: $API_BASE_URL" ;;
             *) echo "API_BASE_URL must be https (got '$API_BASE_URL')"; exit 1 ;;
           esac
+
+      - name: Create and install the App Store signing files
+        script: |
+          set -e
+          keychain initialize
+
+          # Same reasoning as the ad-hoc workflow: an `ios_signing:` block only
+          # FETCHES signing files that already exist, and this app had no App
+          # Store profile at all, so it failed before a machine was allocated.
+          # `--create` makes the missing profile instead of erroring on it.
+          #
+          # CERTIFICATE_PRIVATE_KEY must be set as an encrypted variable in the
+          # Codemagic UI. Without it every build mints a throwaway key, asks
+          # Apple for ANOTHER distribution certificate, and is refused once the
+          # account hits its cap of two — which is exactly how this project
+          # ended up revoking certificates by hand twice.
+          if [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
+            echo "CERTIFICATE_PRIVATE_KEY is not set."
+            echo "Set it in Codemagic (app settings -> Environment variables, Secret)"
+            echo "or this build will burn a distribution certificate slot it cannot reuse."
+            exit 1
+          fi
+
+          app-store-connect fetch-signing-files "$BUNDLE_ID"             --type IOS_APP_STORE             --create
+
+          keychain add-certificates
+          xcode-project use-profiles
+
+          /usr/libexec/PlistBuddy -c "Print :provisioningProfiles:$BUNDLE_ID"             "$HOME/export_options.plist"             || { echo "export_options.plist names no profile for $BUNDLE_ID — signing setup failed"; exit 1; }
 
       - name: Fail early if the iOS usage strings are missing
         script: |
