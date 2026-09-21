@@ -33,6 +33,13 @@ workflows:
     integrations:
       app_store_connect: semay-app-store
     environment:
+      # CERTIFICATE_PRIVATE_KEY lives in this Codemagic variable group.
+      # Codemagic requires every variable to belong to a group, and a grouped
+      # variable is invisible to any workflow that does not import its group.
+      # So dropping this line is not a harmless default: the guard below sees
+      # an unset key and fails the build.
+      groups:
+        - ios_signing
       flutter: stable
       xcode: latest
       cocoapods: default
@@ -157,6 +164,12 @@ workflows:
     integrations:
       app_store_connect: semay-app-store
     environment:
+      # Imports CERTIFICATE_PRIVATE_KEY (see ios-testflight). Without this the
+      # variable is simply absent, and the signing step below silently falls
+      # back to a throwaway key — which is what burns a distribution
+      # certificate slot on every build.
+      groups:
+        - ios_signing
       flutter: stable
       xcode: latest
       cocoapods: default
