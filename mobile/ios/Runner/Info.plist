@@ -44,6 +44,21 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Declares that the app uses no NON-EXEMPT encryption. SeMay talks to its
+	     own API over ordinary HTTPS and ships no cryptography of its own, which
+	     is the standard exemption (Apple's question is about proprietary or
+	     non-standard crypto, not TLS).
+
+	     Without this key App Store Connect marks EVERY upload "Missing
+	     Compliance" and the build cannot be attached to a version until someone
+	     answers the questionnaire by hand — once per upload, forever. With it,
+	     uploads go straight to usable.
+
+	     Revisit this if the app ever ships its own encryption (local message
+	     encryption, a bundled crypto library): the answer would become true and
+	     the upload would then need real export documentation. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<!-- semay://open/p|r|s/<id> — what the share page's "Open in SeMay" button
 	     uses, and the only way into the app from a link on iOS until the
 	     associated-domains entitlement exists (portal work: see

@@ -27,7 +27,7 @@
 
 workflows:
   ios-appstore:
-    name: iOS App Store (downloadable .ipa, not published)
+    name: iOS → App Store Connect (upload only, no submission)
     instance_type: mac_mini_m2
     max_build_duration: 60
     integrations:
@@ -51,10 +51,8 @@ workflows:
         # Must be https: iOS App Transport Security refuses cleartext, and an
         # http value fails only once the app is on a device.
         API_BASE_URL: "https://semaycollection.com/api/v1"
-        # Recorded for reference only: with no `publishing:` block (see the
-        # end of this workflow) nothing in CI reads it. It is what App Store
-        # Connect calls the Apple ID of "Semay Collection", and restoring
-        # automatic publishing would need it again.
+        # Numeric Apple ID of "Semay Collection" — how the publishing step at
+        # the end of this workflow identifies which app the binary belongs to.
         APP_STORE_APPLE_ID: 6814409437
     scripts:
       - name: Reject a non-https API URL
@@ -129,22 +127,28 @@ workflows:
       - mobile/build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
 
-    # No `publishing:` block, deliberately — the owner uploads to App Store
-    # Connect by hand. CI's job ends at producing the signed binary; download it
-    # from this build's Artifacts.
+    # Uploads the binary to App Store Connect and STOPS there.
     #
-    # What still matters is the signing TYPE above: IOS_APP_STORE. That is the
-    # only distribution type App Store Connect accepts on upload — an ad-hoc or
-    # development signed ipa is refused, and nothing about the file looks wrong
-    # until Apple rejects it. So this workflow is not "ios-adhoc without
-    # publishing"; the two produce differently signed artifacts.
+    # BOTH submit flags are false deliberately. The build lands in the Build
+    # section of the version page, and every decision after that — beta review,
+    # "Add for Review", release — stays a human one made in App Store Connect.
+    # submit_to_testflight would additionally push it into beta review, which is
+    # more than "upload this binary" should ever mean.
     #
-    # To hand uploading back to CI, restore:
-    #     publishing:
-    #       app_store_connect:
-    #         auth: integration
-    #         submit_to_testflight: true
-    #         submit_to_app_store: false
+    # CI is the upload path because Apple ships no uploader for Windows, which
+    # is what this project is developed on: Transporter and Xcode are both
+    # macOS-only, so "download the ipa and upload it by hand" is not actually
+    # available here. The signed .ipa is still published as an artifact above,
+    # so a local copy stays downloadable from the build page either way.
+    #
+    # The signing TYPE above (IOS_APP_STORE) is what makes the upload
+    # acceptable at all — Apple refuses an ad-hoc signed ipa, and nothing about
+    # the file looks wrong until it is rejected.
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: false
+        submit_to_app_store: false
 
   # Signed for direct install on registered devices. NOT published anywhere —
   # no TestFlight, no App Store review. The ipa this produces installs straight
