@@ -20,6 +20,9 @@ Super Admin web panel. Full product spec, architecture, data model, API, screen 
   hardening decision.
 - `docs/09_DEPLOYMENT.md` — step-by-step deployment/redeploy checklist (setup, env vars, Windows
   service, backups, health checks). The *what to type*; 08 is the *why*.
+- `docs/10_RELEASES.md` — **store release history per platform** (Google Play, App Store): what
+  each version/build number contains, how it was signed and built. **Read before bumping the
+  version or building for a store, and add a row in the same change.**
 
 ## Repo layout
 ```
